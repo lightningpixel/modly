@@ -58,7 +58,7 @@ export class PythonBridge {
         MODELS_DIR:        this.resolveModelsDir(),
         WORKSPACE_DIR:     this.resolveWorkspaceDir(),
         EXTENSIONS_DIR:    this.resolveExtensionsDir(),
-        SELECTED_MODEL_ID: process.env['SELECTED_MODEL_ID'] ?? 'sf3d',
+        SELECTED_MODEL_ID: process.env['SELECTED_MODEL_ID'] ?? '',
       }
     })
 
