@@ -10,9 +10,10 @@ export function useApi() {
     imagePath: string,
     options: GenerationOptions,
     collection: string = 'Default',
+    imageData?: string,
   ): Promise<{ jobId: string }> {
-    // Read file via IPC (avoids file:// restrictions in the renderer)
-    const base64 = await window.electron.fs.readFileBase64(imagePath)
+    // Use provided base64 (drag & drop) or read from disk via IPC
+    const base64 = imageData ?? await window.electron.fs.readFileBase64(imagePath)
     const byteArray = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
     const blob = new Blob([byteArray], { type: 'image/png' })
     const filename = imagePath.split(/[\\/]/).pop() ?? 'image.png'

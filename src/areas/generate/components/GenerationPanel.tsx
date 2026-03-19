@@ -43,7 +43,7 @@ export default function GenerationPanel(): JSX.Element {
   const { status: jobStatus, progress, step, error } = currentJob
 
   const statusLabel: Record<string, string> = {
-    uploading:  'Uploading image…',
+    uploading:  'Reading image…',
     generating: step ?? 'Generating 3D mesh…',
     done:       'Done!',
     error:      'Generation failed',

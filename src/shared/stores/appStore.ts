@@ -66,6 +66,8 @@ interface AppState {
   setSelectedImagePath: (path: string | null) => void
   selectedImagePreviewUrl: string | null
   setSelectedImagePreviewUrl: (url: string | null) => void
+  selectedImageData: string | null   // base64 content for drag & drop (when path is unavailable)
+  setSelectedImageData: (data: string | null) => void
 
   // Generation options
   generationOptions: GenerationOptions
@@ -135,6 +137,8 @@ export const useAppStore = create<AppState>()(
       setSelectedImagePath: (path) => set({ selectedImagePath: path }),
       selectedImagePreviewUrl: null,
       setSelectedImagePreviewUrl: (url) => set({ selectedImagePreviewUrl: url }),
+      selectedImageData: null,
+      setSelectedImageData: (data) => set({ selectedImageData: data }),
       generationOptions: DEFAULT_OPTIONS,
       meshStats: null,
       setMeshStats: (stats) => set({ meshStats: stats }),

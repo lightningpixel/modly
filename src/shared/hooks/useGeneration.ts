@@ -4,7 +4,7 @@ import { useCollectionsStore } from '@shared/stores/collectionsStore'
 import { useApi } from './useApi'
 
 export function useGeneration() {
-  const { currentJob, setCurrentJob, updateCurrentJob, generationOptions } = useAppStore()
+  const { currentJob, setCurrentJob, updateCurrentJob, generationOptions, selectedImageData } = useAppStore()
   const addToWorkspace = useCollectionsStore((s) => s.addToWorkspace)
   const activeCollectionId = useCollectionsStore((s) => s.activeCollectionId)
   const { generateFromImage, pollJobStatus } = useApi()
@@ -23,7 +23,7 @@ export function useGeneration() {
       setCurrentJob(job)
 
       try {
-        const { jobId } = await generateFromImage(imagePath, generationOptions, activeCollectionId)
+        const { jobId } = await generateFromImage(imagePath, generationOptions, activeCollectionId, selectedImageData ?? undefined)
 
         updateCurrentJob({ status: 'generating', progress: 0 })
 
