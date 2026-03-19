@@ -110,9 +110,12 @@ export function Select({ value, onChange, options }: {
   )
 }
 
-export function LinkButton({ label }: { label: string }): JSX.Element {
+export function LinkButton({ label, href }: { label: string; href?: string }): JSX.Element {
+  const handleClick = (): void => {
+    if (href) window.open(href, '_blank')
+  }
   return (
-    <button className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors">
+    <button onClick={handleClick} className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors">
       {label}
       <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-zinc-500">
         <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
