@@ -41,7 +41,7 @@ export interface GenerationOptions {
 }
 
 const DEFAULT_OPTIONS: GenerationOptions = {
-  modelId: 'sf3d',
+  modelId: '',
   vertexCount: 10000,
   remesh: 'quad',
   enableTexture: false,

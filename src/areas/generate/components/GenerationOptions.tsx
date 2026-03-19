@@ -167,7 +167,7 @@ export default function GenerationOptions(): JSX.Element {
     window.electron.model.listDownloaded()
       .then((list) => {
         setModels(list)
-        if (list.length > 0 && !list.find((m) => m.id === generationOptions.modelId)) {
+        if (list.length > 0 && (!generationOptions.modelId || !list.find((m) => m.id === generationOptions.modelId))) {
           setGenerationOptions({ modelId: list[0].id })
         }
       })
