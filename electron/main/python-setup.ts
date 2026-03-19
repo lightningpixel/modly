@@ -2,13 +2,29 @@ import { BrowserWindow, app } from 'electron'
 import { existsSync, readFileSync, writeFileSync, readdirSync } from 'fs'
 import { join } from 'path'
 import { spawn, execSync } from 'child_process'
+import { createHash } from 'crypto'
 
 const SETUP_VERSION = 2
 const TOTAL_PACKAGES = 20
 
 interface SetupJson {
   version: number
-  appVersion?: string
+  requirementsHash?: string
+}
+
+function getRequirementsPath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'api', 'requirements.txt')
+    : join(app.getAppPath(), 'api', 'requirements.txt')
+}
+
+function hashRequirements(): string {
+  try {
+    const content = readFileSync(getRequirementsPath(), 'utf-8')
+    return createHash('sha256').update(content).digest('hex')
+  } catch {
+    return ''
+  }
 }
 
 // ─── Public helpers ──────────────────────────────────────────────────────────
@@ -19,8 +35,7 @@ export function checkSetupNeeded(userData: string): boolean {
   try {
     const data = JSON.parse(readFileSync(jsonPath, 'utf-8')) as SetupJson
     if (data.version < SETUP_VERSION) return true
-    // Re-run setup if the app was updated (new python-embed is fresh, no packages)
-    if (data.appVersion !== app.getVersion()) return true
+    if (data.requirementsHash !== hashRequirements()) return true
   } catch {
     return true
   }
@@ -35,7 +50,7 @@ export function markSetupDone(userData: string): void {
   const jsonPath = join(userData, 'python_setup.json')
   writeFileSync(
     jsonPath,
-    JSON.stringify({ version: SETUP_VERSION, appVersion: app.getVersion() }),
+    JSON.stringify({ version: SETUP_VERSION, requirementsHash: hashRequirements() }),
     'utf-8'
   )
 }
@@ -188,9 +203,7 @@ function createVenv(python3: string, venvDir: string, win: BrowserWindow): Promi
 
 export async function runFullSetup(win: BrowserWindow, userData: string): Promise<void> {
   try {
-    const requirementsPath = app.isPackaged
-      ? join(process.resourcesPath, 'api', 'requirements.txt')
-      : join(app.getAppPath(), 'api', 'requirements.txt')
+    const requirementsPath = getRequirementsPath()
 
     if (process.platform === 'win32') {
       // Windows: use embedded Python bundled with the app
