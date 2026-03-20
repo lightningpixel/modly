@@ -89,6 +89,11 @@ interface AppState {
   runSetup:       () => Promise<void>
   saveDataDir:    (baseDir: string) => Promise<void>
 
+  // Error modal
+  errorModal: string | null
+  showError: (message: string) => void
+  hideError: () => void
+
   // Actions
   initApp: () => Promise<void>
   setCurrentJob: (job: GenerationJob | null) => void
@@ -140,6 +145,10 @@ export const useAppStore = create<AppState>()(
         window.electron.setup.run()
       },
 
+      errorModal: null,
+      showError: (message) => set({ errorModal: message }),
+      hideError: () => set({ errorModal: null }),
+
       currentJob: null,
       selectedImagePath: null,
       setSelectedImagePath: (path) => set({ selectedImagePath: path }),
@@ -157,8 +166,10 @@ export const useAppStore = create<AppState>()(
         set({ backendStatus: 'starting', backendError: null })
 
         window.electron.python.offCrashed()
-        window.electron.python.onCrashed(() => {
-          set({ backendStatus: 'error', apiUrl: '', backendError: 'FastAPI crashed unexpectedly' })
+        window.electron.python.onCrashed(({ code }) => {
+          const msg = `FastAPI process crashed unexpectedly (exit code: ${code ?? 'unknown'})`
+          set({ backendStatus: 'error', apiUrl: '', backendError: msg })
+          get().showError(msg)
         })
 
         try {
@@ -167,10 +178,9 @@ export const useAppStore = create<AppState>()(
           const { apiUrl } = await window.electron.app.info()
           set({ backendStatus: 'ready', apiUrl })
         } catch (err) {
-          set({
-            backendStatus: 'error',
-            backendError: err instanceof Error ? err.message : String(err),
-          })
+          const msg = err instanceof Error ? err.message : String(err)
+          set({ backendStatus: 'error', backendError: msg })
+          get().showError(msg)
         }
       },
 
