@@ -224,7 +224,7 @@ export default function Viewer3D(): JSX.Element {
     const canvas = canvasRef.current
     if (!canvas) return
     const link = document.createElement('a')
-    link.download = `localmeshy-${Date.now()}.png`
+    link.download = `modly-${Date.now()}.png`
     link.href = canvas.toDataURL('image/png')
     link.click()
   }
