@@ -1,8 +1,9 @@
 import { BrowserWindow, app } from 'electron'
-import { existsSync, readFileSync, writeFileSync, readdirSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync, readdirSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { spawn, execSync } from 'child_process'
 import { createHash } from 'crypto'
+import { getSettings } from './settings-store'
 
 const SETUP_VERSION = 2
 const TOTAL_PACKAGES = 20
@@ -29,6 +30,11 @@ function hashRequirements(): string {
 
 // ─── Public helpers ──────────────────────────────────────────────────────────
 
+function areSitePackagesInstalled(): boolean {
+  const { dependenciesDir } = getSettings(app.getPath('userData'))
+  return existsSync(join(dependenciesDir, 'uvicorn'))
+}
+
 export function checkSetupNeeded(userData: string): boolean {
   const jsonPath = join(userData, 'python_setup.json')
   if (!existsSync(jsonPath)) return true
@@ -43,6 +49,8 @@ export function checkSetupNeeded(userData: string): boolean {
   if (process.platform !== 'win32' && app.isPackaged) {
     if (!existsSync(join(userData, 'venv', 'bin', 'python'))) return true
   }
+  // Verify packages are actually present (guards against reinstall without uninstall)
+  if (!areSitePackagesInstalled()) return true
   return false
 }
 
@@ -73,7 +81,7 @@ export function getEmbeddedPythonExe(): string {
   return join(dir, 'bin', 'python3')
 }
 
-function enableSitePackages(pythonDir: string, win: BrowserWindow): void {
+function enableSitePackages(pythonDir: string, dependenciesDir: string, win: BrowserWindow): void {
   win.webContents.send('setup:progress', { step: 'enabling-site', percent: 5 })
   const files = readdirSync(pythonDir) as string[]
   const pthFile = files.find((f) => f.match(/^python\d+\._pth$/))
@@ -86,6 +94,11 @@ function enableSitePackages(pythonDir: string, win: BrowserWindow): void {
   content = content.replace(/^#import site/m, 'import site')
   if (!content.includes('Lib\\site-packages')) {
     content = content.trimEnd() + '\nLib\\site-packages\n'
+  }
+  // Add the user's dependencies dir so Python finds packages installed there.
+  // PYTHONPATH is ignored when a ._pth file is present (Python embed behavior).
+  if (!content.includes(dependenciesDir)) {
+    content = content.trimEnd() + `\n${dependenciesDir}\n`
   }
   writeFileSync(pthPath, content, 'utf-8')
   console.log('[PythonSetup] Enabled site-packages in', pthFile)
@@ -116,11 +129,13 @@ function installRequirements(
   requirementsPath: string,
   win: BrowserWindow
 ): Promise<void> {
+  const dependenciesDir = getSettings(app.getPath('userData')).dependenciesDir
+  mkdirSync(dependenciesDir, { recursive: true })
   return new Promise((resolve, reject) => {
-    console.log('[PythonSetup] Installing requirements from', requirementsPath)
+    console.log('[PythonSetup] Installing requirements into', dependenciesDir)
     const proc = spawn(
       pythonExe,
-      ['-m', 'pip', 'install', '-r', requirementsPath, '--no-warn-script-location', '--progress-bar', 'off'],
+      ['-m', 'pip', 'install', '-r', requirementsPath, '--target', dependenciesDir, '--no-warn-script-location', '--progress-bar', 'off'],
       { stdio: ['ignore', 'pipe', 'pipe'] }
     )
     let packagesInstalled = 0
@@ -213,7 +228,8 @@ export async function runFullSetup(win: BrowserWindow, userData: string): Promis
         ? process.resourcesPath
         : join(app.getAppPath(), 'resources')
 
-      enableSitePackages(pythonDir, win)
+      const dependenciesDir = getSettings(app.getPath('userData')).dependenciesDir
+      enableSitePackages(pythonDir, dependenciesDir, win)
       await installPip(pythonExe, resourcesPath, win)
       await installRequirements(pythonExe, requirementsPath, win)
     } else if (app.isPackaged) {

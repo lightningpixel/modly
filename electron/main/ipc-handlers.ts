@@ -41,9 +41,10 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   ipcMain.handle('setup:saveDataDir', async (_event, { baseDir }: { baseDir: string }) => {
     const userData = app.getPath('userData')
     setSettings(userData, {
-      modelsDir:     join(baseDir, 'models'),
-      workspaceDir:  join(baseDir, 'workspace'),
-      extensionsDir: join(baseDir, 'extensions'),
+      modelsDir:        join(baseDir, 'models'),
+      workspaceDir:     join(baseDir, 'workspace'),
+      extensionsDir:    join(baseDir, 'extensions'),
+      dependenciesDir:  join(baseDir, 'dependencies'),
     })
   })
 

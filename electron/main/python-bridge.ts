@@ -55,6 +55,7 @@ export class PythonBridge {
       env: {
         ...process.env,
         PYTHONUNBUFFERED:  '1',
+        PYTHONPATH:        this.resolveDependenciesDir(),
         MODELS_DIR:        this.resolveModelsDir(),
         WORKSPACE_DIR:     this.resolveWorkspaceDir(),
         EXTENSIONS_DIR:    this.resolveExtensionsDir(),
@@ -232,6 +233,12 @@ export class PythonBridge {
     const s = getSettings(app.getPath('userData'))
     mkdirSync(s.extensionsDir, { recursive: true })
     return s.extensionsDir
+  }
+
+  private resolveDependenciesDir(): string {
+    const s = getSettings(app.getPath('userData'))
+    mkdirSync(s.dependenciesDir, { recursive: true })
+    return s.dependenciesDir
   }
 
 }
