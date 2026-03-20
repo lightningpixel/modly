@@ -48,10 +48,13 @@ app.setName('Modly')
 
 process.on('uncaughtException', (err) => {
   logger.error(`Uncaught exception: ${err.stack ?? err.message}`)
+  mainWindow?.webContents.send('app:error', err.stack ?? err.message)
 })
 
 process.on('unhandledRejection', (reason) => {
-  logger.error(`Unhandled rejection: ${String(reason)}`)
+  const msg = String(reason)
+  logger.error(`Unhandled rejection: ${msg}`)
+  mainWindow?.webContents.send('app:error', msg)
 })
 
 app.whenReady().then(async () => {

@@ -79,7 +79,11 @@ contextBridge.exposeInMainWorld('electron', {
   // App metadata
   app: {
     info: (): Promise<{ version: string; userData: string; modelsDir: string; apiUrl: string }> =>
-      ipcRenderer.invoke('app:info')
+      ipcRenderer.invoke('app:info'),
+    onError:  (cb: (message: string) => void) => {
+      ipcRenderer.on('app:error', (_event, message) => cb(message))
+    },
+    offError: () => ipcRenderer.removeAllListeners('app:error'),
   },
 
   // Logging

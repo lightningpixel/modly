@@ -52,6 +52,8 @@ declare global {
           modelsDir: string
           apiUrl:    string
         }>
+        onError:  (cb: (message: string) => void) => void
+        offError: () => void
       }
       log: {
         error:   (message: string) => void

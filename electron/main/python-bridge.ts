@@ -186,19 +186,14 @@ export class PythonBridge {
       : join(app.getAppPath(), 'resources')
     const userData = app.getPath('userData')
 
-    const candidates = app.isPackaged
-      ? [
-          join(resourcesPath, 'python-embed', 'python.exe'),  // Windows embeddable
-          join(userData, 'venv', 'bin', 'python'),             // Linux/macOS venv (packaged)
-          'python3',
-          'python',
-        ]
-      : [
-          join(apiDir, '.venv', 'Scripts', 'python.exe'), // Windows venv (dev)
-          join(apiDir, '.venv', 'bin', 'python'),          // Unix/Mac venv (dev)
-          'python',
-          'python3',
-        ]
+    const candidates = [
+      join(resourcesPath, 'python-embed', 'python.exe'),  // Windows embedded (dev + packaged)
+      join(userData, 'venv', 'bin', 'python'),             // Linux/macOS venv
+      join(apiDir, '.venv', 'Scripts', 'python.exe'),      // legacy dev fallback
+      join(apiDir, '.venv', 'bin', 'python'),              // legacy dev fallback
+      'python3',
+      'python',
+    ]
 
     for (const candidate of candidates) {
       if (existsSync(candidate)) {

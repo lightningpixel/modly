@@ -3,6 +3,7 @@ import { useAppStore } from '@shared/stores/appStore'
 import FirstRunSetup from '@areas/setup/FirstRunSetup'
 import MainLayout from '@shared/components/layout/MainLayout'
 import { UpdateModal } from '@shared/components/ui/UpdateModal'
+import { ErrorModal } from '@shared/components/ui/ErrorModal'
 
 function compareSemver(a: string, b: string): number {
   const pa = a.replace(/^v/, '').split('.').map(Number)
@@ -15,12 +16,15 @@ function compareSemver(a: string, b: string): number {
 }
 
 export default function App(): JSX.Element {
-  const { checkSetup, setupStatus, initApp, backendStatus } = useAppStore()
+  const { checkSetup, setupStatus, initApp, backendStatus, showError } = useAppStore()
   const [updateVersion, setUpdateVersion] = useState<string | null>(null)
   const [currentVersion, setCurrentVersion] = useState<string>('')
 
   useEffect(() => {
     checkSetup()
+    window.electron.app.onError((message) => showError(message))
+
+return () => { window.electron.app.offError() }
   }, [])
 
   useEffect(() => {
@@ -51,7 +55,13 @@ export default function App(): JSX.Element {
           onDismiss={() => setUpdateVersion(null)}
         />
       )}
+      <ErrorModal />
     </>
   )
-  return <FirstRunSetup />
+  return (
+    <>
+      <FirstRunSetup />
+      <ErrorModal />
+    </>
+  )
 }
