@@ -8,7 +8,7 @@ import Viewer3D from './components/Viewer3D'
 
 export default function GeneratePage(): JSX.Element {
   const selectedImagePath = useAppStore((s) => s.selectedImagePath)
-  const { currentJob, startGeneration } = useGeneration()
+  const { currentJob, startGeneration, stopGeneration } = useGeneration()
   const isGenerating = currentJob?.status === 'uploading' || currentJob?.status === 'generating'
 
   return (
@@ -22,13 +22,22 @@ export default function GeneratePage(): JSX.Element {
 
         {/* Sticky bottom: Generate button */}
         <div className="p-4 border-t border-zinc-800">
-          <button
-            onClick={() => selectedImagePath && startGeneration(selectedImagePath)}
-            disabled={!selectedImagePath || isGenerating}
-            className="w-full py-2.5 rounded-lg text-sm font-semibold bg-accent hover:bg-accent-dark disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
-          >
-            {isGenerating ? 'Generating…' : 'Generate 3D Model'}
-          </button>
+          {isGenerating ? (
+            <button
+              onClick={stopGeneration}
+              className="w-full py-2.5 rounded-lg text-sm font-semibold bg-red-600 hover:bg-red-700 text-white transition-colors"
+            >
+              Stop Generation
+            </button>
+          ) : (
+            <button
+              onClick={() => selectedImagePath && startGeneration(selectedImagePath)}
+              disabled={!selectedImagePath}
+              className="w-full py-2.5 rounded-lg text-sm font-semibold bg-accent hover:bg-accent-dark disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
+            >
+              Generate 3D Model
+            </button>
+          )}
         </div>
       </div>
 

@@ -38,7 +38,7 @@ export function useApi() {
   }
 
   async function pollJobStatus(jobId: string): Promise<{
-    status: 'pending' | 'running' | 'done' | 'error'
+    status: 'pending' | 'running' | 'done' | 'error' | 'cancelled'
     progress: number
     step?: string
     outputUrl?: string
@@ -46,6 +46,10 @@ export function useApi() {
   }> {
     const { data } = await client.get(`/generate/status/${jobId}`)
     return { ...data, outputUrl: data.output_url }
+  }
+
+  async function cancelJob(jobId: string): Promise<void> {
+    await client.post(`/generate/cancel/${jobId}`)
   }
 
   async function getModelStatus(): Promise<{
@@ -95,5 +99,5 @@ export function useApi() {
     return { url: data.url, faceCount: data.face_count }
   }
 
-  return { generateFromImage, pollJobStatus, getModelStatus, downloadModel, optimizeMesh }
+  return { generateFromImage, pollJobStatus, cancelJob, getModelStatus, downloadModel, optimizeMesh }
 }
