@@ -4,7 +4,7 @@ BaseGenerator — contract that each model adapter must implement.
 from abc import ABC, abstractmethod
 import threading
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, List, Optional, Union
 
 
 def smooth_progress(
@@ -84,12 +84,13 @@ class BaseGenerator(ABC):
     @abstractmethod
     def generate(
         self,
-        image_bytes: bytes,
+        image_bytes: Union[bytes, List[bytes]],
         params: dict,
         progress_cb: Optional[Callable[[int, str], None]] = None,
     ) -> Path:
         """
-        Starts 3D generation from an image.
+        Starts 3D generation from one or more images.
+        Pass a single bytes for single-view, or List[bytes] for multi-view.
         Returns the path to the generated .glb file.
         progress_cb(percent: int, step_label: str)
         """

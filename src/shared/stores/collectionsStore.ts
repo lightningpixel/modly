@@ -30,14 +30,14 @@ interface CollectionsState {
 }
 
 async function syncCurrentJob(firstJob: GenerationJob | undefined) {
-  const { setCurrentJob, setSelectedImagePath, setSelectedImagePreviewUrl, setGenerationOptions } = useAppStore.getState()
+  const { setCurrentJob, setViewImage, clearViewImages, setGenerationOptions } = useAppStore.getState()
   if (!firstJob) {
     setCurrentJob(null)
     return
   }
 
   setCurrentJob({ ...firstJob, outputUrl: firstJob.originalOutputUrl ?? firstJob.outputUrl })
-  setSelectedImagePath(firstJob.imageFile)
+  clearViewImages()
 
   if (firstJob.generationOptions) {
     setGenerationOptions(firstJob.generationOptions)
@@ -49,9 +49,9 @@ async function syncCurrentJob(firstJob: GenerationJob | undefined) {
     const base64 = await window.electron.fs.readFileBase64(firstJob.imageFile)
     const byteArray = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
     const blob = new Blob([byteArray], { type: 'image/png' })
-    setSelectedImagePreviewUrl(URL.createObjectURL(blob))
+    setViewImage('front', { path: firstJob.imageFile, previewUrl: URL.createObjectURL(blob), data: null })
   } catch {
-    setSelectedImagePreviewUrl(null)
+    // Image file not readable, skip preview
   }
 }
 

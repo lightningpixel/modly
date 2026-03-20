@@ -138,11 +138,11 @@ export function ExtensionCard({ ext, installedIds, downloading, loadError, disab
                     </div>
                   ) : (
                     <button
-                      onClick={() => ext.trusted && !disabled && onInstall(variant)}
-                      disabled={!ext.trusted || disabled}
-                      title={!ext.trusted ? 'Unverified source — installation blocked' : disabled ? 'A download is already in progress' : `Install ${variant.name}`}
+                      onClick={() => !disabled && onInstall(variant)}
+                      disabled={disabled}
+                      title={disabled ? 'A download is already in progress' : `Install ${variant.name}`}
                       className={`w-full flex items-center justify-center gap-1 px-2 py-1 rounded-lg border text-[10px] font-semibold transition-all ${
-                        ext.trusted && !disabled
+                        !disabled
                           ? 'bg-accent/15 border-accent/25 text-accent-light hover:bg-accent/25 hover:border-accent/40 cursor-pointer'
                           : 'bg-zinc-800/40 border-zinc-700/30 text-zinc-600 cursor-not-allowed'
                       }`}

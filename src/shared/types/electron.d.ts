@@ -18,7 +18,7 @@ declare global {
         offLog: () => void
       }
       fs: {
-        selectImage:     () => Promise<string | null>
+        selectImage:     () => Promise<string | null>  // single file; multi-view via drag & drop
         saveModel:       (defaultName: string) => Promise<string | null>
         readFileBase64:  (filePath: string) => Promise<string>
         selectDirectory: () => Promise<string | null>

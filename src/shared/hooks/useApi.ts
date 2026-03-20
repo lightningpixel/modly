@@ -7,19 +7,30 @@ export function useApi() {
   const client = axios.create({ baseURL: apiUrl })
 
   async function generateFromImage(
-    imagePath: string,
+    imagePaths: string[],
     options: GenerationOptions,
     collection: string = 'Default',
-    imageData?: string,
+    imageDataArray?: (string | null)[],
+    viewLabels?: string[],
   ): Promise<{ jobId: string }> {
-    // Use provided base64 (drag & drop) or read from disk via IPC
-    const base64 = imageData ?? await window.electron.fs.readFileBase64(imagePath)
-    const byteArray = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
-    const blob = new Blob([byteArray], { type: 'image/png' })
-    const filename = imagePath.split(/[\\/]/).pop() ?? 'image.png'
-
     const formData = new FormData()
-    formData.append('image', blob, filename)
+
+    // Append each image as a separate 'image' field (FastAPI collects as List[UploadFile])
+    for (let i = 0; i < imagePaths.length; i++) {
+      const path = imagePaths[i]
+      const imageData = imageDataArray?.[i]
+      const base64 = imageData ?? await window.electron.fs.readFileBase64(path)
+      const byteArray = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+      const blob = new Blob([byteArray], { type: 'image/png' })
+      const filename = path.split(/[\\/]/).pop() ?? `image_${i}.png`
+      formData.append('image', blob, filename)
+    }
+
+    // Send view labels so backend knows which view each image corresponds to
+    if (viewLabels && viewLabels.length > 0) {
+      formData.append('view_labels', viewLabels.join(','))
+    }
+
     formData.append('model_id', options.modelId)
     formData.append('collection', collection)
     formData.append('vertex_count', String(options.vertexCount))

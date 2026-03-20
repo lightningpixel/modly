@@ -19,7 +19,7 @@ import threading
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, List, Optional, Union
 
 from PIL import Image
 
@@ -84,7 +84,7 @@ class Hunyuan3DGenerator(BaseGenerator):
 
     def generate(
         self,
-        image_bytes: bytes,
+        image_bytes: Union[bytes, List[bytes]],
         params: dict,
         progress_cb: Optional[Callable[[int, str], None]] = None,
     ) -> Path:
@@ -93,9 +93,23 @@ class Hunyuan3DGenerator(BaseGenerator):
         num_steps  = int(params.get("num_inference_steps", 50))
         vert_count = int(params.get("vertex_count", 0))
 
-        # Step 1 — background removal
-        self._report(progress_cb, 5, "Removing background…")
-        image = self._preprocess(image_bytes)
+        # Step 1 — background removal (single or multi-view)
+        view_labels = params.get("view_labels", [])
+        is_multiview = isinstance(image_bytes, list) and len(image_bytes) > 1
+        if is_multiview:
+            self._report(progress_cb, 5, f"Removing backgrounds ({len(image_bytes)} images)…")
+            processed_images = [self._preprocess(ib) for ib in image_bytes]
+            if view_labels and len(view_labels) == len(processed_images):
+                image = {label: img for label, img in zip(view_labels, processed_images)}
+            else:
+                fallback_keys = ["front", "left", "back", "right"]
+                image = {fallback_keys[i]: img for i, img in enumerate(processed_images[:4])}
+        elif isinstance(image_bytes, list):
+            self._report(progress_cb, 5, "Removing background…")
+            image = self._preprocess(image_bytes[0])
+        else:
+            self._report(progress_cb, 5, "Removing background…")
+            image = self._preprocess(image_bytes)
 
         # Step 2 — shape generation (long, no internal callbacks)
         self._report(progress_cb, 12, "Generating 3D shape…")
