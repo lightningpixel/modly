@@ -1,94 +1,139 @@
-import { useState, useCallback } from 'react'
-import { useAppStore } from '@shared/stores/appStore'
+import { useCallback } from 'react'
+import { useAppStore, VIEW_SLOTS, ViewSlot } from '@shared/stores/appStore'
 import { useGeneration } from '@shared/hooks/useGeneration'
+
+const VIEW_LABELS: Record<ViewSlot, { label: string; tooltip: string }> = {
+  front: { label: 'Front', tooltip: 'Front-facing view of the object' },
+  left:  { label: 'Left',  tooltip: 'Left side view (90° clockwise from front)' },
+  back:  { label: 'Back',  tooltip: 'Rear view of the object' },
+  right: { label: 'Right', tooltip: 'Right side view (90° counter-clockwise from front)' },
+}
 
 export default function ImageUpload(): JSX.Element {
   const { currentJob } = useGeneration()
-  const { setSelectedImagePath, selectedImagePreviewUrl, setSelectedImagePreviewUrl, setSelectedImageData } = useAppStore()
-  const [isDragging, setIsDragging] = useState(false)
+  const { viewImages, setViewImage, removeViewImage, clearViewImages } = useAppStore()
 
   const isGenerating = currentJob?.status === 'uploading' || currentJob?.status === 'generating'
+  const hasAnyImage = Object.keys(viewImages).length > 0
 
-  const handleFileSelect = useCallback(async () => {
+  const handleSlotSelect = useCallback(async (slot: ViewSlot) => {
     const path = await window.electron.fs.selectImage()
     if (!path) return
-    setSelectedImageData(null)
-    setSelectedImagePath(path)
 
-    // Read via IPC → blob URL (file:// blocked when served from localhost in dev)
     const base64 = await window.electron.fs.readFileBase64(path)
     const byteArray = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
     const blob = new Blob([byteArray], { type: 'image/png' })
-    setSelectedImagePreviewUrl(URL.createObjectURL(blob))
-  }, [setSelectedImagePath, setSelectedImagePreviewUrl, setSelectedImageData])
+    const previewUrl = URL.createObjectURL(blob)
 
-  const handleDrop = useCallback((e: React.DragEvent) => {
+    setViewImage(slot, { path, previewUrl, data: null })
+  }, [setViewImage])
+
+  const handleSlotDrop = useCallback((e: React.DragEvent, slot: ViewSlot) => {
     e.preventDefault()
-    setIsDragging(false)
+    e.stopPropagation()
     const file = e.dataTransfer.files[0]
     if (!file || !file.type.startsWith('image/')) return
 
-    setSelectedImagePreviewUrl(URL.createObjectURL(file))
-
+    const previewUrl = URL.createObjectURL(file)
     const filePath = (file as File & { path?: string }).path
+
     if (filePath) {
-      setSelectedImageData(null)
-      setSelectedImagePath(filePath)
+      setViewImage(slot, { path: filePath, previewUrl, data: null })
     } else {
-      // file.path unavailable (some Electron configs) — read directly via FileReader
       const reader = new FileReader()
       reader.onload = (ev) => {
         const dataUrl = ev.target?.result as string
         const base64 = dataUrl.split(',')[1]
-        setSelectedImageData(base64)
-        setSelectedImagePath('__blob__')
+        setViewImage(slot, { path: '__blob__', previewUrl, data: base64 })
       }
       reader.readAsDataURL(file)
     }
-  }, [setSelectedImagePath, setSelectedImagePreviewUrl, setSelectedImageData])
+  }, [setViewImage])
 
   return (
     <div className="flex flex-col p-4 gap-3">
-      <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-500">Input Image</h2>
-
-      {/* Drop zone */}
-      <div
-        onClick={isGenerating ? undefined : handleFileSelect}
-        onDrop={handleDrop}
-        onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }}
-        onDragLeave={() => setIsDragging(false)}
-        className={`
-          relative aspect-square rounded-xl border-2 border-dashed
-          flex items-center justify-center overflow-hidden
-          transition-colors cursor-pointer
-          ${isDragging ? 'border-accent bg-accent/10' : 'border-zinc-700 hover:border-zinc-500'}
-          ${isGenerating ? 'cursor-not-allowed opacity-60' : ''}
-        `}
-      >
-        {selectedImagePreviewUrl ? (
-          <img
-            src={selectedImagePreviewUrl}
-            alt="Input"
-            className="w-full h-full object-cover"
-          />
-        ) : (
-          <div className="flex flex-col items-center gap-2 text-zinc-600">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
-              <rect x="3" y="3" width="18" height="18" rx="2" />
-              <circle cx="8.5" cy="8.5" r="1.5" />
-              <polyline points="21 15 16 10 5 21" />
-            </svg>
-            <p className="text-xs text-center">Drop image here<br />or click to browse</p>
-          </div>
-        )}
-
-        {/* Generating overlay */}
-        {isGenerating && (
-          <div className="absolute inset-0 bg-surface-500/80 flex items-center justify-center">
-            <div className="w-8 h-8 border-2 border-accent border-t-transparent rounded-full animate-spin" />
-          </div>
+      <div className="flex items-center justify-between">
+        <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-500">
+          Input Images
+        </h2>
+        {hasAnyImage && (
+          <button
+            onClick={clearViewImages}
+            disabled={isGenerating}
+            className="text-[10px] text-zinc-500 hover:text-zinc-300 disabled:opacity-40"
+          >
+            Clear all
+          </button>
         )}
       </div>
+
+      {/* View slots grid */}
+      <div className="grid grid-cols-2 gap-2">
+        {VIEW_SLOTS.map((slot) => {
+          const image = viewImages[slot]
+          const { label, tooltip } = VIEW_LABELS[slot]
+          const isRequired = slot === 'front'
+
+          return (
+            <div
+              key={slot}
+              title={tooltip}
+              onClick={isGenerating ? undefined : () => handleSlotSelect(slot)}
+              onDrop={(e) => !isGenerating && handleSlotDrop(e, slot)}
+              onDragOver={(e) => { e.preventDefault(); e.stopPropagation() }}
+              className={`
+                relative aspect-square rounded-lg border-2 border-dashed
+                flex items-center justify-center overflow-hidden
+                transition-colors cursor-pointer
+                ${image ? 'border-zinc-600' : isRequired ? 'border-zinc-600 hover:border-zinc-400' : 'border-zinc-800 hover:border-zinc-600'}
+                ${isGenerating ? 'cursor-not-allowed opacity-60' : ''}
+              `}
+            >
+              {image ? (
+                <>
+                  <img src={image.previewUrl} alt={label} className="w-full h-full object-cover" />
+                  {!isGenerating && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); removeViewImage(slot) }}
+                      className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/70 text-zinc-300 hover:text-white flex items-center justify-center text-xs opacity-0 group-hover:opacity-100 transition-opacity"
+                      style={{ opacity: undefined }}
+                      onMouseEnter={(e) => (e.currentTarget.style.opacity = '1')}
+                      onMouseLeave={(e) => (e.currentTarget.style.opacity = '0')}
+                    >
+                      x
+                    </button>
+                  )}
+                  <span className="absolute bottom-1 left-1 text-[9px] bg-black/60 text-zinc-300 px-1 rounded">
+                    {label}
+                  </span>
+                </>
+              ) : (
+                <div className="flex flex-col items-center gap-1 text-zinc-600 p-2">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <line x1="12" y1="5" x2="12" y2="19" />
+                    <line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                  <p className="text-[10px] text-center leading-tight">
+                    {label}
+                    {isRequired && <span className="text-accent"> *</span>}
+                  </p>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      <p className="text-[10px] text-zinc-600 leading-tight">
+        Front view required. Add more views for better results. Empty slots are skipped.
+      </p>
+
+      {/* Generating overlay */}
+      {isGenerating && (
+        <div className="text-center">
+          <div className="inline-block w-6 h-6 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+        </div>
+      )}
     </div>
   )
 }

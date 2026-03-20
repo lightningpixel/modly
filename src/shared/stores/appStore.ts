@@ -40,6 +40,15 @@ export interface GenerationOptions {
   numInferenceSteps: number
 }
 
+export type ViewSlot = 'front' | 'left' | 'back' | 'right'
+export const VIEW_SLOTS: ViewSlot[] = ['front', 'left', 'back', 'right']
+
+export interface ViewImage {
+  path: string
+  previewUrl: string
+  data: string | null  // base64 for drag & drop
+}
+
 const DEFAULT_OPTIONS: GenerationOptions = {
   modelId: '',
   vertexCount: 10000,
@@ -61,13 +70,11 @@ interface AppState {
   // Current generation
   currentJob: GenerationJob | null
 
-  // Selected image (shared between ImageUpload and the Generate button)
-  selectedImagePath: string | null
-  setSelectedImagePath: (path: string | null) => void
-  selectedImagePreviewUrl: string | null
-  setSelectedImagePreviewUrl: (url: string | null) => void
-  selectedImageData: string | null   // base64 content for drag & drop (when path is unavailable)
-  setSelectedImageData: (data: string | null) => void
+  // Selected images by view slot (front, left, back, right)
+  viewImages: Partial<Record<ViewSlot, ViewImage>>
+  setViewImage: (slot: ViewSlot, image: ViewImage) => void
+  removeViewImage: (slot: ViewSlot) => void
+  clearViewImages: () => void
 
   // Generation options
   generationOptions: GenerationOptions
@@ -133,12 +140,16 @@ export const useAppStore = create<AppState>()(
       },
 
       currentJob: null,
-      selectedImagePath: null,
-      setSelectedImagePath: (path) => set({ selectedImagePath: path }),
-      selectedImagePreviewUrl: null,
-      setSelectedImagePreviewUrl: (url) => set({ selectedImagePreviewUrl: url }),
-      selectedImageData: null,
-      setSelectedImageData: (data) => set({ selectedImageData: data }),
+      viewImages: {},
+      setViewImage: (slot, image) => set((s) => ({
+        viewImages: { ...s.viewImages, [slot]: image },
+      })),
+      removeViewImage: (slot) => set((s) => {
+        const next = { ...s.viewImages }
+        delete next[slot]
+        return { viewImages: next }
+      }),
+      clearViewImages: () => set({ viewImages: {} }),
       generationOptions: DEFAULT_OPTIONS,
       meshStats: null,
       setMeshStats: (stats) => set({ meshStats: stats }),

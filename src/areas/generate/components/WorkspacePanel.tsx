@@ -88,7 +88,7 @@ export function WorkspaceToggle(): JSX.Element {
 }
 
 export default function WorkspacePanel(): JSX.Element {
-  const { currentJob, setCurrentJob, setSelectedImagePath, setSelectedImagePreviewUrl, setGenerationOptions } = useAppStore()
+  const { currentJob, setCurrentJob, setViewImage, clearViewImages, setGenerationOptions } = useAppStore()
   const { collections, activeCollectionId, setActiveCollection, removeFromWorkspace, createCollection } = useCollectionsStore()
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
@@ -117,14 +117,14 @@ export default function WorkspacePanel(): JSX.Element {
     } else if (job.modelId) {
       setGenerationOptions({ modelId: job.modelId })
     }
-    setSelectedImagePath(job.imageFile)
+    clearViewImages()
     try {
       const base64 = await window.electron.fs.readFileBase64(job.imageFile)
       const byteArray = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
       const blob = new Blob([byteArray], { type: 'image/png' })
-      setSelectedImagePreviewUrl(URL.createObjectURL(blob))
+      setViewImage('front', { path: job.imageFile, previewUrl: URL.createObjectURL(blob), data: null })
     } catch {
-      setSelectedImagePreviewUrl(null)
+      // Image file not readable, skip preview
     }
   }
 

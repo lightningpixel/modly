@@ -4,16 +4,23 @@ import { useCollectionsStore } from '@shared/stores/collectionsStore'
 import { useApi } from './useApi'
 
 export function useGeneration() {
-  const { currentJob, setCurrentJob, updateCurrentJob, generationOptions, selectedImageData } = useAppStore()
+  const { currentJob, setCurrentJob, updateCurrentJob, generationOptions, viewImages } = useAppStore()
   const addToWorkspace = useCollectionsStore((s) => s.addToWorkspace)
   const activeCollectionId = useCollectionsStore((s) => s.activeCollectionId)
   const { generateFromImage, pollJobStatus } = useApi()
 
   const startGeneration = useCallback(
-    async (imagePath: string) => {
+    async () => {
+      // Build ordered arrays from view slots (front, left, back, right)
+      // Only include slots that have images
+      const VIEW_ORDER = ['front', 'left', 'back', 'right'] as const
+      const filledSlots = VIEW_ORDER.filter((slot) => viewImages[slot])
+      const imagePaths = filledSlots.map((slot) => viewImages[slot]!.path)
+      const imageDataArray = filledSlots.map((slot) => viewImages[slot]!.data)
+
       const job = {
         id: crypto.randomUUID(),
-        imageFile: imagePath,
+        imageFile: imagePaths[0],
         status: 'uploading' as const,
         progress: 0,
         createdAt: Date.now(),
@@ -23,7 +30,7 @@ export function useGeneration() {
       setCurrentJob(job)
 
       try {
-        const { jobId } = await generateFromImage(imagePath, generationOptions, activeCollectionId, selectedImageData ?? undefined)
+        const { jobId } = await generateFromImage(imagePaths, generationOptions, activeCollectionId, imageDataArray, filledSlots as string[])
 
         updateCurrentJob({ status: 'generating', progress: 0 })
 
@@ -36,7 +43,7 @@ export function useGeneration() {
         })
       }
     },
-    [generateFromImage, pollJobStatus, setCurrentJob, updateCurrentJob, addToWorkspace, activeCollectionId]
+    [generateFromImage, pollJobStatus, setCurrentJob, updateCurrentJob, addToWorkspace, activeCollectionId, viewImages]
   )
 
   const pollUntilDone = async (jobId: string) => {

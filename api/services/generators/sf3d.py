@@ -9,7 +9,7 @@ import threading
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, List, Optional, Union
 
 from PIL import Image
 
@@ -69,11 +69,15 @@ class SF3DGenerator(BaseGenerator):
 
     def generate(
         self,
-        image_bytes: bytes,
+        image_bytes: Union[bytes, List[bytes]],
         params: dict,
         progress_cb: Optional[Callable[[int, str], None]] = None,
     ) -> Path:
         import torch
+
+        # SF3D only supports single-image input; use first image if list provided
+        if isinstance(image_bytes, list):
+            image_bytes = image_bytes[0]
 
         vertex_count = int(params.get("vertex_count", 10000))
         remesh       = str(params.get("remesh", "quad"))

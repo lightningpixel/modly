@@ -2,7 +2,7 @@ import asyncio
 import threading
 import traceback
 import uuid
-from typing import Dict
+from typing import Dict, List
 from fastapi import APIRouter, File, Form, UploadFile, HTTPException, BackgroundTasks
 from services.generators.base import smooth_progress
 
@@ -18,7 +18,8 @@ _jobs: Dict[str, JobStatus] = {}
 @router.post("/from-image")
 async def generate_from_image(
     background_tasks: BackgroundTasks,
-    image: UploadFile = File(...),
+    image: List[UploadFile] = File(...),
+    view_labels: str = Form(""),
     model_id: str = Form("sf3d"),
     collection: str = Form("Default"),
     vertex_count: int = Form(10000),
@@ -30,8 +31,9 @@ async def generate_from_image(
     seed: int = Form(-1),
     num_inference_steps: int = Form(30),
 ):
-    if not image.content_type or not image.content_type.startswith("image/"):
-        raise HTTPException(400, "File must be an image")
+    for img in image:
+        if not img.content_type or not img.content_type.startswith("image/"):
+            raise HTTPException(400, "All files must be images")
 
     if remesh not in ("quad", "triangle", "none"):
         raise HTTPException(400, "remesh must be 'quad', 'triangle', or 'none'")
@@ -56,8 +58,12 @@ async def generate_from_image(
 
     generator_registry.switch_model(model_id)
 
-    job_id      = str(uuid.uuid4())
-    image_bytes = await image.read()
+    job_id = str(uuid.uuid4())
+    image_bytes_list = [await img.read() for img in image]
+    # Pass single bytes for backward compat, list for multi-view
+    image_data = image_bytes_list[0] if len(image_bytes_list) == 1 else image_bytes_list
+    # Parse view labels (e.g. "front,back" → ["front", "back"])
+    parsed_view_labels = [v.strip() for v in view_labels.split(",") if v.strip()] if view_labels else []
     params      = {
         "vertex_count":       vertex_count,
         "remesh":             remesh,
@@ -67,12 +73,13 @@ async def generate_from_image(
         "guidance_scale":       guidance_scale,
         "seed":                 seed,
         "num_inference_steps":  num_inference_steps,
+        "view_labels":          parsed_view_labels,
     }
 
     job = JobStatus(job_id=job_id, status="pending", progress=0)
     _jobs[job_id] = job
 
-    background_tasks.add_task(_run_generation, job_id, image_bytes, params, collection)
+    background_tasks.add_task(_run_generation, job_id, image_data, params, collection)
 
     return {"job_id": job_id}
 
@@ -86,7 +93,7 @@ async def job_status(job_id: str):
     return job
 
 
-async def _run_generation(job_id: str, image_bytes: bytes, params: dict, collection: str = "Default") -> None:
+async def _run_generation(job_id: str, image_bytes, params: dict, collection: str = "Default") -> None:
     job = _jobs[job_id]
     job.status = "running"
 
