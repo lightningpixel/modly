@@ -89,6 +89,10 @@ interface AppState {
   runSetup:       () => Promise<void>
   saveDataDir:    (baseDir: string) => Promise<void>
 
+  // Patch auto-update
+  patchUpdateReady: boolean
+  setPatchUpdateReady: (ready: boolean) => void
+
   // Error modal
   errorModal: string | null
   showError: (message: string) => void
@@ -144,6 +148,9 @@ export const useAppStore = create<AppState>()(
         // Fire and forget — progress comes via IPC events
         window.electron.setup.run()
       },
+
+      patchUpdateReady: false,
+      setPatchUpdateReady: (ready) => set({ patchUpdateReady: ready }),
 
       errorModal: null,
       showError: (message) => set({ errorModal: message }),

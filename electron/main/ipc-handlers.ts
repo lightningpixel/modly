@@ -1,4 +1,5 @@
 import { ipcMain, BrowserWindow, dialog, app } from 'electron'
+import { autoUpdater } from 'electron-updater'
 import { join } from 'path'
 import { rm as rmAsync, readFile, writeFile, mkdir, readdir, rename, cp } from 'fs/promises'
 import { existsSync, readdirSync, statSync } from 'fs'
@@ -542,6 +543,22 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     } catch (err) {
       return { success: false, error: String(err) }
     }
+  })
+
+  // Auto-updater
+  ipcMain.handle('updater:check', async () => {
+    if (!app.isPackaged) return { success: false }
+    try {
+      await autoUpdater.checkForUpdates()
+      return { success: true }
+    } catch (err) {
+      logger.error(`[updater:check] ${err}`)
+      return { success: false }
+    }
+  })
+
+  ipcMain.handle('updater:quitAndInstall', () => {
+    autoUpdater.quitAndInstall(false, true)
   })
 
   // Update FastAPI paths at runtime (without restarting)

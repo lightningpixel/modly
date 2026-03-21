@@ -148,6 +148,22 @@ contextBridge.exposeInMainWorld('electron', {
     offInstallProgress: () => ipcRenderer.removeAllListeners('extensions:installProgress'),
   },
 
+  // Auto-updater
+  updater: {
+    check: (): Promise<{ success: boolean }> =>
+      ipcRenderer.invoke('updater:check'),
+    quitAndInstall: (): Promise<void> =>
+      ipcRenderer.invoke('updater:quitAndInstall'),
+    onPatchReady: (cb: (data: { version: string }) => void) => {
+      ipcRenderer.on('updater:patch-ready', (_event, data) => cb(data))
+    },
+    offPatchReady: () => ipcRenderer.removeAllListeners('updater:patch-ready'),
+    onMajorMinorAvailable: (cb: (data: { version: string }) => void) => {
+      ipcRenderer.on('updater:major-minor-available', (_event, data) => cb(data))
+    },
+    offMajorMinorAvailable: () => ipcRenderer.removeAllListeners('updater:major-minor-available'),
+  },
+
   // First-run setup
   setup: {
     check:        (): Promise<{ needed: boolean; defaultDataDir: string }> =>

@@ -28,19 +28,25 @@ jobs:
       - name: Download Python embed
         run: node scripts/download-python-embed.js
 
+      - name: Create draft release
+        run: |
+          gh release create ${{ github.ref_name }} \
+            --title "Modly Beta ${{ github.ref_name }}" \
+            --generate-notes \
+            --draft \
+            --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build & Package (Windows)
-        run: npx electron-vite build && npx electron-builder --win --publish never
+        run: npx electron-vite build && npx electron-builder --win --publish always
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
-
-      - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-installer
-          path: dist/*.exe
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ─── Linux build ─────────────────────────────────────────────────────────────
   build-linux:
+    needs: build-windows
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -59,38 +65,6 @@ jobs:
         run: sudo apt-get install -y rpm
 
       - name: Build & Package (Linux)
-        run: npx electron-vite build && npx electron-builder --linux --publish never
-
-      - name: Upload Linux artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-installer
-          path: dist/*.AppImage
-
-  # ─── Create GitHub Release ───────────────────────────────────────────────────
-  release:
-    needs: [build-windows, build-linux]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download Windows artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-installer
-          path: artifacts/windows
-
-      - name: Download Linux artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: linux-installer
-          path: artifacts/linux
-
-      - name: Create GitHub Release
-        run: |
-          gh release create ${{ github.ref_name }} \
-            artifacts/windows/*.exe \
-            artifacts/linux/*.AppImage \
-            --title "Modly Beta ${{ github.ref_name }}" \
-            --generate-notes \
-            --repo ${{ github.repository }}
+        run: npx electron-vite build && npx electron-builder --linux --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,4 +1,7 @@
+import { useAppStore } from '@shared/stores/appStore'
+
 export default function TopBar(): JSX.Element {
+  const { patchUpdateReady } = useAppStore()
 
   const handleMinimize = () => window.electron.window.minimize()
   const handleMaximize = () => window.electron.window.maximize()
@@ -28,6 +31,19 @@ export default function TopBar(): JSX.Element {
 
       {/* Spacer */}
       <div className="flex-1" />
+
+      {/* Patch update badge */}
+      {patchUpdateReady && (
+        <div className="flex items-center gap-2 mr-3 px-3 py-1 rounded-full bg-accent/15 border border-accent/30 text-xs text-accent-light no-drag">
+          <span>Update ready</span>
+          <button
+            onClick={() => window.electron.updater.quitAndInstall()}
+            className="ml-1 px-2 py-0.5 rounded-full bg-accent hover:bg-accent-dark text-white text-[11px] font-medium transition-colors"
+          >
+            Restart
+          </button>
+        </div>
+      )}
 
       {/* Window controls */}
       <div className="flex items-center gap-1 no-drag">
