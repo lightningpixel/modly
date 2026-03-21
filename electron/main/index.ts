@@ -4,6 +4,7 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { setupIpcHandlers } from './ipc-handlers'
 import { PythonBridge } from './python-bridge'
 import { logger, archiveCurrentSession } from './logger'
+import { initAutoUpdater } from './updater'
 
 let mainWindow: BrowserWindow | null = null
 let pythonBridge: PythonBridge | null = null
@@ -73,6 +74,7 @@ app.whenReady().then(async () => {
   pythonBridge = new PythonBridge()
   pythonBridge.setWindowGetter(() => mainWindow)
   setupIpcHandlers(pythonBridge, () => mainWindow)
+  initAutoUpdater(() => mainWindow)
 
   createWindow()
 

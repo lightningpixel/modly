@@ -81,6 +81,14 @@ declare global {
         onError:      (cb: (data: { message: string }) => void) => void
         offError:     () => void
       }
+      updater: {
+        check:                 () => Promise<{ success: boolean }>
+        quitAndInstall:        () => Promise<void>
+        onPatchReady:          (cb: (data: { version: string }) => void) => void
+        offPatchReady:         () => void
+        onMajorMinorAvailable: (cb: (data: { version: string }) => void) => void
+        offMajorMinorAvailable: () => void
+      }
       extensions: {
         list: () => Promise<Array<{
           id:           string
