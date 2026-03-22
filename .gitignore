@@ -5,6 +5,14 @@ dist/
 # Generated at build time by scripts/download-python-embed.js
 resources/python-embed/
 resources/get-pip.py
+builds/
+
+# Local setup/build artifacts
+api/python_setup.json
+api/texture_baker/build/
+api/uv_unwrapper/build/
+api/texture_baker/texture_baker/_C*.so
+api/uv_unwrapper/uv_unwrapper/_C*.so
 
 # Python
 api/__pycache__/
@@ -32,4 +40,3 @@ Thumbs.db
 # Env
 .env
 .env.local
-
