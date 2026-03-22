@@ -16,6 +16,7 @@ export class PythonBridge {
   private ready = false
   private startPromise: Promise<void> | null = null
   private getWindow: (() => BrowserWindow | null) | null = null
+  private intentionalStop = false
 
   setWindowGetter(fn: () => BrowserWindow | null): void {
     this.getWindow = fn
@@ -78,7 +79,7 @@ export class PythonBridge {
       console.log('[PythonBridge] Process exited with code', code)
       this.ready = false
       this.process = null
-      if (wasReady) {
+      if (wasReady && !this.intentionalStop) {
         this.getWindow()?.webContents.send('python:crashed', { code })
       }
     })
@@ -98,6 +99,14 @@ export class PythonBridge {
       proc.kill('SIGTERM')
     }
     console.log('[PythonBridge] Stopped')
+  }
+
+  async restart(): Promise<void> {
+    console.log('[PythonBridge] Restarting to free memory…')
+    this.intentionalStop = true
+    await this.stop()
+    this.intentionalStop = false
+    await this.start()
   }
 
   private emitTqdmLog(raw: string): void {

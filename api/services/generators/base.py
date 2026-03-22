@@ -77,6 +77,25 @@ class BaseGenerator(ABC):
     def unload(self) -> None:
         """Release memory. Can be overridden if needed."""
         self._model = None
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+        # Force the OS to reclaim unused memory from this process
+        try:
+            import ctypes
+            import sys
+            if sys.platform == "win32":
+                kernel32 = ctypes.windll.kernel32
+                kernel32.SetProcessWorkingSetSizeEx(
+                    kernel32.GetCurrentProcess(), -1, -1, 0
+                )
+        except Exception:
+            pass
 
     def is_loaded(self) -> bool:
         return self._model is not None

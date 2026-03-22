@@ -43,6 +43,16 @@ async def switch_model(model_id: str):
 async def unload_all_models():
     """Unloads all models from memory to free VRAM/RAM."""
     generator_registry.unload_all()
+    # Force Python to release memory back to the OS
+    import gc
+    gc.collect()
+    try:
+        import ctypes, sys
+        if sys.platform == "win32":
+            k32 = ctypes.windll.kernel32
+            k32.SetProcessWorkingSetSizeEx(k32.GetCurrentProcess(), -1, -1, 0)
+    except Exception:
+        pass
     return {"unloaded": True}
 
 

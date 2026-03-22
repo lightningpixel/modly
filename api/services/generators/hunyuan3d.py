@@ -69,15 +69,6 @@ class Hunyuan3DGenerator(BaseGenerator):
         self._model = pipeline
         print(f"[Hunyuan3DGenerator] Loaded on {device}.")
 
-    def unload(self) -> None:
-        super().unload()
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except ImportError:
-            pass
-
     # ------------------------------------------------------------------ #
     # Inference
     # ------------------------------------------------------------------ #
