@@ -9,8 +9,26 @@ permissions:
   contents: write
 
 jobs:
+  # ─── Create a single release ────────────────────────────────────────────────
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create release
+        run: |
+          gh release create ${{ github.ref_name }} \
+            --title "Modly Beta ${{ github.ref_name }}" \
+            --generate-notes \
+            --latest \
+            --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   # ─── Windows build ────────────────────────────────────────────────────────────
   build-windows:
+    needs: create-release
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -28,25 +46,27 @@ jobs:
       - name: Download Python embed
         run: node scripts/download-python-embed.js
 
-      - name: Create draft release
-        run: |
-          gh release create ${{ github.ref_name }} \
-            --title "Modly Beta ${{ github.ref_name }}" \
-            --generate-notes \
-            --draft \
-            --repo ${{ github.repository }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Build & Package (Windows)
-        run: npx electron-vite build && npx electron-builder --win --publish always
+        shell: bash
+        run: npx electron-vite build && npx electron-builder --win --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Upload assets to release
+        shell: bash
+        run: |
+          gh release upload ${{ github.ref_name }} \
+            dist/*.exe \
+            dist/*.exe.blockmap \
+            dist/latest.yml \
+            --repo ${{ github.repository }} \
+            --clobber
+        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ─── Linux build ─────────────────────────────────────────────────────────────
   build-linux:
-    needs: build-windows
+    needs: create-release
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -61,10 +81,15 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Install Linux build dependencies
-        run: sudo apt-get install -y rpm
-
       - name: Build & Package (Linux)
-        run: npx electron-vite build && npx electron-builder --linux --publish always
+        run: npx electron-vite build && npx electron-builder --linux --publish never
+
+      - name: Upload assets to release
+        run: |
+          gh release upload ${{ github.ref_name }} \
+            dist/*.AppImage \
+            dist/latest-linux.yml \
+            --repo ${{ github.repository }} \
+            --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
