@@ -86,7 +86,13 @@
     },
     "linux": {
       "target": "AppImage",
-      "icon": "resources/icons/icon.png"
+      "icon": "resources/icons/icon.png",
+      "extraResources": [
+        {
+          "from": "resources/python-embed",
+          "to": "python-embed"
+        }
+      ]
     }
   }
 }

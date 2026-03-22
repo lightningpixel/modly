@@ -48,9 +48,12 @@ function CheckingPanel(): JSX.Element {
 }
 
 const STEPS = [
+  { key: 'python',        label: 'Finding Python' },
+  { key: 'venv',          label: 'Creating environment' },
   { key: 'enabling-site', label: 'Preparing Python' },
   { key: 'pip',           label: 'Installing pip' },
   { key: 'packages',      label: 'Installing packages' },
+  { key: 'extensions',    label: 'Compiling extensions' },
 ] as const
 
 function stepIndex(step: string): number {

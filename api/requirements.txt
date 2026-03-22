@@ -1,7 +1,5 @@
-# PyTorch CUDA — index primaire pour torch/torchvision
-# cu128 = CUDA 12.8 (driver ≥520, RTX 30xx/40xx/50xx)
-# Changer cu128 → cu126 si le driver est plus ancien
---index-url https://download.pytorch.org/whl/cu128
+# PyTorch index URL is set automatically at install time based on detected GPU.
+# Do NOT add --index-url here — it is passed by python-setup.ts.
 --extra-index-url https://pypi.org/simple
 
 # Web server
@@ -21,13 +19,17 @@ pillow>=11.0.0
 trimesh>=4.5.0
 numpy>=1.26.0
 rembg>=2.0.0          # background removal (SF3D + Hunyuan3D)
-onnxruntime-gpu>=1.17.0  # runtime ONNX requis par rembg (GPU-accelerated)
+onnxruntime>=1.17.0      # runtime ONNX requis par rembg (CPU — GPU variant is NVIDIA-only)
 einops>=0.7.0          # tensor ops used by Hunyuan3D / hy3dshape pipeline
 pymeshlab>=2023.12     # mesh processing required by hy3dshape postprocessors
 xatlas>=0.0.8          # UV unwrapping for Hunyuan3D texture generation
 pygltflib>=1.15.0      # GLB/GLTF I/O for Hunyuan3D texture pipeline
 
 opencv-python-headless>=4.8.0  # required by hy3dgen.shapegen.preprocessors (cv2)
+omegaconf>=2.3.0               # required by hy3dshape (Hunyuan3D 2.1)
+timm>=1.0.0                    # required by hy3dshape (vision transformer)
+torchdiffeq>=0.2.5             # required by hy3dshape (ODE solver)
+pybind11>=2.12.0               # required to compile C++ extensions (differentiable_renderer)
 
 # Utils
 aiofiles==24.1.0

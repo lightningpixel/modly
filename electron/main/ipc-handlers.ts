@@ -30,15 +30,23 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
   ipcMain.on('window:close', () => getWindow()?.close())
 
-  // Setup handlers — skipped in dev (uses .venv instead of python-embed)
+  // Setup handlers — in dev mode, check for api/.venv; in packaged mode, use userData venv
   ipcMain.handle('setup:check', async () => {
-    if (!app.isPackaged) return { needed: false }
+    if (!app.isPackaged) {
+      const apiDir = join(app.getAppPath(), 'api')
+      const venvPython = process.platform === 'win32'
+        ? join(apiDir, '.venv', 'Scripts', 'python.exe')
+        : join(apiDir, '.venv', 'bin', 'python')
+      return { needed: !existsSync(venvPython) }
+    }
     const userData = app.getPath('userData')
     return { needed: checkSetupNeeded(userData) }
   })
 
   ipcMain.handle('setup:run', async () => {
-    const userData = app.getPath('userData')
+    const userData = !app.isPackaged
+      ? join(app.getAppPath(), 'api')
+      : app.getPath('userData')
     const win = getWindow()
     if (!win) return { success: false, error: 'No window available' }
     try {

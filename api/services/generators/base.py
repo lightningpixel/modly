@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Callable, Optional
 
 
+class GenerationCancelled(Exception):
+    """Raised when the user cancels a running generation."""
+    pass
+
+
 def smooth_progress(
     progress_cb: Callable[[int, str], None],
     start: int,
@@ -141,6 +146,11 @@ class BaseGenerator(ABC):
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
+
+    def _check_cancelled(self, cancel_event: Optional[threading.Event]) -> None:
+        """Raises GenerationCancelled if the cancel event is set."""
+        if cancel_event is not None and cancel_event.is_set():
+            raise GenerationCancelled("Generation was cancelled by the user.")
 
     def _report(
         self,
