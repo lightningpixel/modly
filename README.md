@@ -70,6 +70,8 @@ Modly supports external AI model extensions. Each extension is a GitHub reposito
 | Extension | Model | URL |
 |-----------|-------|-----|
 | [modly-hunyuan3d-mini-extension](https://github.com/lightningpixel/modly-hunyuan3d-mini-extension) | Hunyuan3D 2 Mini | https://github.com/lightningpixel/modly-hunyuan3d-mini-extension |
+| [modly-triposg-extension](https://github.com/lightningpixel/modly-triposg-extension) | TripoSG | https://github.com/lightningpixel/modly-triposg-extension |
+| [modly-trellis2-extension](https://github.com/lightningpixel/modly-trellis2-extension) | TRELLIS.2 | https://github.com/lightningpixel/modly-trellis2-extension |
 
 ### How to install an extension
 
