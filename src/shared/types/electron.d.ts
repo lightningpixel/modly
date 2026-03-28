@@ -44,8 +44,8 @@ declare global {
         deleteDirectory: (dirPath: string) => Promise<{ success: boolean; error?: string }>
       }
       settings: {
-        get: () => Promise<{ modelsDir: string; workspaceDir: string; extensionsDir: string }>
-        set: (patch: { modelsDir?: string; workspaceDir?: string; extensionsDir?: string }) => Promise<{ modelsDir: string; workspaceDir: string; extensionsDir: string }>
+        get: () => Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string }>
+        set: (patch: { modelsDir?: string; workspaceDir?: string; workflowsDir?: string; extensionsDir?: string }) => Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string }>
       }
       cache: {
         clear: () => Promise<{ success: boolean; error?: string }>

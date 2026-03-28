@@ -70,6 +70,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     setSettings(userData, {
       modelsDir:        join(baseDir, 'models'),
       workspaceDir:     join(baseDir, 'workspace'),
+      workflowsDir:     join(baseDir, 'workflows'),
       extensionsDir:    join(baseDir, 'extensions'),
       dependenciesDir:  join(baseDir, 'dependencies'),
     })
@@ -611,7 +612,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   // ── Workflows ────────────────────────────────────────────────────────────
 
   function workflowsDir(): string {
-    const dir = join(app.getPath('userData'), 'workflows')
+    const dir = getSettings(app.getPath('userData')).workflowsDir
     if (!existsSync(dir)) require('fs').mkdirSync(dir, { recursive: true })
     return dir
   }

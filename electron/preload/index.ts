@@ -45,9 +45,9 @@ contextBridge.exposeInMainWorld('electron', {
 
   // Settings
   settings: {
-    get: (): Promise<{ modelsDir: string; workspaceDir: string; extensionsDir: string }> =>
+    get: (): Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string }> =>
       ipcRenderer.invoke('settings:get'),
-    set: (patch: { modelsDir?: string; workspaceDir?: string; extensionsDir?: string }): Promise<{ modelsDir: string; workspaceDir: string; extensionsDir: string }> =>
+    set: (patch: { modelsDir?: string; workspaceDir?: string; workflowsDir?: string; extensionsDir?: string }): Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string }> =>
       ipcRenderer.invoke('settings:set', patch),
   },
 

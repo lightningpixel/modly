@@ -1,11 +1,10 @@
 import { useState } from 'react'
 import { useAppStore } from '@shared/stores/appStore'
 import { useGeneration } from '@shared/hooks/useGeneration'
-import ImageUpload from './components/ImageUpload'
-import GenerationOptions from './components/GenerationOptions'
 import GenerationHUD from './components/GenerationHUD'
 import WorkspacePanel from './components/WorkspacePanel'
 import Viewer3D from './components/Viewer3D'
+import WorkflowPanel from './components/WorkflowPanel'
 
 export default function GeneratePage(): JSX.Element {
   const selectedImagePath = useAppStore((s) => s.selectedImagePath)
@@ -27,11 +26,7 @@ export default function GeneratePage(): JSX.Element {
   return (
     <>
       <div className="flex flex-col w-80 border-r border-zinc-800 bg-surface-400">
-        {/* Scrollable content */}
-        <div className="flex-1 overflow-y-auto">
-          <ImageUpload />
-          <GenerationOptions />
-        </div>
+        <WorkflowPanel />
 
         {/* Sticky bottom: Generate / Stop button */}
         <div className="p-4 border-t border-zinc-800">

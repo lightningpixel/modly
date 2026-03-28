@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, existsSync } from 'fs'
 export interface AppSettings {
   modelsDir:        string
   workspaceDir:     string
+  workflowsDir:     string
   extensionsDir:    string
   dependenciesDir:  string
 }
@@ -16,6 +17,7 @@ export function getSettings(userData: string): AppSettings {
   const defaults: AppSettings = {
     modelsDir:        join(userData, 'models'),
     workspaceDir:     join(userData, 'workspace'),
+    workflowsDir:     join(userData, 'workflows'),
     extensionsDir:    join(userData, 'extensions'),
     dependenciesDir:  join(userData, 'dependencies'),
   }
