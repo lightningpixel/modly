@@ -96,6 +96,7 @@ export default function WorkspacePanel(): JSX.Element {
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
+  const [collapsed, setCollapsed] = useState(true)
 
   const isGenerating = currentJob?.status === 'uploading' || currentJob?.status === 'generating'
   const activeCollection = collections.find((c) => c.id === activeCollectionId)
@@ -136,16 +137,18 @@ export default function WorkspacePanel(): JSX.Element {
   }
 
   return (
-    <div className="absolute bottom-8 right-4 z-10 flex flex-col rounded-2xl border border-zinc-700/60 bg-zinc-900/90 backdrop-blur-md shadow-2xl overflow-hidden w-[500px]">
+    <div className={`absolute bottom-8 right-4 z-10 flex flex-col rounded-2xl border border-zinc-700/60 bg-zinc-900/90 backdrop-blur-md shadow-2xl overflow-hidden ${collapsed ? 'w-auto' : 'w-[500px]'}`}>
       {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-800/80 shrink-0">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-400 shrink-0">
-          <circle cx="12" cy="12" r="10" />
-          <polyline points="12 6 12 12 16 14" />
-        </svg>
+      <div onClick={collapsed ? () => setCollapsed(false) : undefined} className={`flex items-center gap-2 px-3 py-2 shrink-0 ${!collapsed ? 'border-b border-zinc-800/80' : 'cursor-pointer'}`}>
+        {!collapsed && (
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-400 shrink-0">
+            <circle cx="12" cy="12" r="10" />
+            <polyline points="12 6 12 12 16 14" />
+          </svg>
+        )}
         <span className="text-sm font-medium text-zinc-200 shrink-0">Workspace</span>
 
-        {creating ? (
+        {!collapsed && (creating ? (
           <input
             autoFocus
             type="text"
@@ -171,40 +174,55 @@ export default function WorkspacePanel(): JSX.Element {
               </option>
             ))}
           </select>
-        )}
+        ))}
 
-        {!creating && jobs.length > 0 && (
+        {!collapsed && !creating && jobs.length > 0 && (
           <span className="px-1.5 py-0.5 text-[10px] font-medium bg-zinc-800 text-zinc-400 rounded-md shrink-0">
             {jobs.length}
           </span>
         )}
 
+        <div className="flex-1" />
+
+        {!collapsed && (
+          <button
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => { setCreating((v) => !v); setNewName('') }}
+            title="New collection"
+            className={`shrink-0 w-6 h-6 flex items-center justify-center rounded-lg transition-colors ${
+              creating
+                ? 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300'
+                : 'bg-accent hover:bg-accent-dark text-white'
+            }`}
+          >
+            {creating ? (
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            ) : (
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            )}
+          </button>
+        )}
+
         <button
           onMouseDown={(e) => e.preventDefault()}
-          onClick={() => { setCreating((v) => !v); setNewName('') }}
-          title="New collection"
-          className={`shrink-0 w-6 h-6 flex items-center justify-center rounded-lg transition-colors ${
-            creating
-              ? 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300'
-              : 'bg-accent hover:bg-accent-dark text-white'
-          }`}
+          onClick={(e) => { e.stopPropagation(); setCollapsed((v) => !v); setCreating(false) }}
+          title={collapsed ? 'Expand' : 'Collapse'}
+          className="shrink-0 w-6 h-6 flex items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700 transition-colors"
         >
-          {creating ? (
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-              <line x1="18" y1="6" x2="6" y2="18" />
-              <line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          ) : (
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-              <line x1="12" y1="5" x2="12" y2="19" />
-              <line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-          )}
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+            <polyline points={collapsed ? '18 15 12 9 6 15' : '6 9 12 15 18 9'} />
+          </svg>
         </button>
       </div>
 
       {/* Content */}
-      <div className="p-2 overflow-y-auto h-[300px]">
+      {!collapsed && <div className="p-2 overflow-y-auto h-[300px]">
         {jobs.length === 0 ? (
           <div className="w-full h-full flex flex-col items-center justify-center gap-2 text-zinc-700">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="0.75">
@@ -216,7 +234,7 @@ export default function WorkspacePanel(): JSX.Element {
             </p>
           </div>
         ) : (
-          <div className="grid grid-cols-4 gap-1.5 w-full h-full overflow-hidden content-start">
+          <div className="grid grid-cols-4 gap-1.5 w-full content-start">
             {jobs.map((job) => (
               <ThumbnailItem
                 key={job.id}
@@ -229,8 +247,7 @@ export default function WorkspacePanel(): JSX.Element {
             ))}
           </div>
         )}
-      </div>
-
+      </div>}
 
       {pendingDeleteId && (
         <ConfirmModal
