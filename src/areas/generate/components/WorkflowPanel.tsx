@@ -445,10 +445,11 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
 // ─── Main panel ───────────────────────────────────────────────────────────────
 
 export default function WorkflowPanel() {
-  const { workflows, load }    = useWorkflowsStore()
+  const { workflows, load, activeId } = useWorkflowsStore()
   const { modelExtensions, processExtensions } = useExtensionsStore()
   const loadExtensions         = useExtensionsStore((s) => s.loadExtensions)
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const { navigate }           = useNavStore()
+  const [selectedId, setSelectedId] = useState<string | null>(activeId)
 
   const allExtensions = useMemo(
     () => buildAllWorkflowExtensions(modelExtensions, processExtensions),
@@ -456,6 +457,11 @@ export default function WorkflowPanel() {
   )
 
   useEffect(() => { load(); loadExtensions() }, [])
+
+  // Sync when navigated here from the workflow editor (activeId set externally)
+  useEffect(() => {
+    if (activeId) setSelectedId(activeId)
+  }, [activeId])
 
   useEffect(() => {
     if (!selectedId && workflows.length > 0) setSelectedId(workflows[0].id)
@@ -469,7 +475,24 @@ export default function WorkflowPanel() {
       {/* Header */}
       <div className="shrink-0 px-4 pt-3 pb-3 border-b border-zinc-800 flex flex-col gap-3">
         <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-500">Workflow</h2>
-        <WorkflowDropdown workflows={workflows} value={selectedId} onChange={setSelectedId} />
+        <div className="flex items-center gap-2">
+          <div className="flex-1 min-w-0">
+            <WorkflowDropdown workflows={workflows} value={selectedId} onChange={setSelectedId} />
+          </div>
+          {selectedId && (
+            <button
+              onClick={() => { useWorkflowsStore.getState().setActive(selectedId!); navigate('workflows') }}
+              title="Edit workflow"
+              className="shrink-0 p-1.5 rounded-lg border border-zinc-700 bg-zinc-800/60 text-zinc-400
+                         hover:text-zinc-100 hover:bg-zinc-700 hover:border-zinc-600 transition-colors"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+              </svg>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Canvas or empty state */}

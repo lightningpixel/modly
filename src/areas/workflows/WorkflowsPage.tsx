@@ -18,7 +18,6 @@ import { useNavStore } from '@shared/stores/navStore'
 import type { Workflow, WFNode, WFEdge, WFNodeData } from '@shared/types/electron.d'
 import { buildAllWorkflowExtensions, getWorkflowExtension } from './mockExtensions'
 import type { WorkflowExtension } from './mockExtensions'
-import { useWorkflowRunner } from './useWorkflowRunner'
 import ExtensionNode from './nodes/ExtensionNode'
 import ImageNode     from './nodes/ImageNode'
 import TextNode      from './nodes/TextNode'
@@ -248,30 +247,159 @@ function PanelToggleIcon({ open }: { open: boolean }) {
   )
 }
 
+// ─── Node palette (Space to open) ────────────────────────────────────────────
+
+const BUILTIN_NODES = [
+  { type: 'imageNode',  label: 'Image',        color: '#38bdf8', description: 'Image input' },
+  { type: 'textNode',   label: 'Text',          color: '#fbbf24', description: 'Text input' },
+  { type: 'outputNode', label: 'Add to Scene',  color: '#a78bfa', description: 'Output node' },
+]
+
+function NodePalette({
+  allExtensions,
+  onSelect,
+  onClose,
+}: {
+  allExtensions: WorkflowExtension[]
+  onSelect: (type: string, extensionId?: string) => void
+  onClose: () => void
+}) {
+  const [query, setQuery] = useState('')
+  const [activeIndex, setActiveIndex] = useState(0)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const q = query.trim().toLowerCase()
+
+  const filteredNodes = BUILTIN_NODES.filter(
+    (n) => !q || n.label.toLowerCase().includes(q) || n.description.toLowerCase().includes(q),
+  )
+  const filteredExts = allExtensions.filter(
+    (e) => !q || e.name.toLowerCase().includes(q) || (e.description ?? '').toLowerCase().includes(q),
+  )
+
+  const total = filteredNodes.length + filteredExts.length
+
+  useEffect(() => { setActiveIndex(0) }, [query])
+  useEffect(() => { inputRef.current?.focus() }, [])
+
+  const handleKey = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') { onClose(); return }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActiveIndex((i) => Math.min(i + 1, total - 1)); return }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); setActiveIndex((i) => Math.max(i - 1, 0)); return }
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      if (activeIndex < filteredNodes.length) {
+        onSelect(filteredNodes[activeIndex].type)
+      } else {
+        const ext = filteredExts[activeIndex - filteredNodes.length]
+        if (ext) onSelect('extensionNode', ext.id)
+      }
+    }
+  }, [activeIndex, filteredNodes, filteredExts, total, onSelect, onClose])
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh]" onMouseDown={onClose}>
+      <div
+        className="w-full max-w-md bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl overflow-hidden"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        {/* Search input */}
+        <div className="flex items-center gap-3 px-4 py-3 border-b border-zinc-800">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-zinc-500 shrink-0">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+          </svg>
+          <input
+            ref={inputRef}
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={handleKey}
+            placeholder="Search nodes and extensions…"
+            className="flex-1 bg-transparent text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none"
+          />
+          <kbd className="text-[10px] text-zinc-600 bg-zinc-800 px-1.5 py-0.5 rounded border border-zinc-700">Esc</kbd>
+        </div>
+
+        {/* Results */}
+        <div className="max-h-80 overflow-y-auto py-1.5">
+          {filteredNodes.length > 0 && (
+            <div>
+              <p className="px-4 py-1.5 text-[9px] font-bold uppercase tracking-widest text-zinc-600">Nodes</p>
+              {filteredNodes.map((n, i) => (
+                <button
+                  key={n.type}
+                  onMouseEnter={() => setActiveIndex(i)}
+                  onClick={() => onSelect(n.type)}
+                  className={`w-full flex items-center gap-3 px-4 py-2.5 transition-colors ${activeIndex === i ? 'bg-zinc-800' : 'hover:bg-zinc-800/50'}`}
+                >
+                  <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: n.color }} />
+                  <span className="text-sm text-zinc-200">{n.label}</span>
+                  <span className="text-xs text-zinc-600 ml-auto">{n.description}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {filteredExts.length > 0 && (
+            <div>
+              <p className="px-4 py-1.5 text-[9px] font-bold uppercase tracking-widest text-zinc-600">Extensions</p>
+              {filteredExts.map((ext, i) => {
+                const idx = filteredNodes.length + i
+                return (
+                  <button
+                    key={ext.id}
+                    onMouseEnter={() => setActiveIndex(idx)}
+                    onClick={() => onSelect('extensionNode', ext.id)}
+                    className={`w-full flex items-center gap-3 px-4 py-2.5 transition-colors ${activeIndex === idx ? 'bg-zinc-800' : 'hover:bg-zinc-800/50'}`}
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-violet-400" />
+                    <span className="text-sm text-zinc-200">{ext.name}</span>
+                    <div className="flex items-center gap-1 ml-auto shrink-0">
+                      <span className="text-[10px] text-zinc-500">{ext.input}</span>
+                      <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-zinc-700">
+                        <path d="M5 12h14M13 6l6 6-6 6"/>
+                      </svg>
+                      <span className="text-[10px] text-zinc-500">{ext.output}</span>
+                    </div>
+                  </button>
+                )
+              })}
+            </div>
+          )}
+
+          {total === 0 && (
+            <p className="px-4 py-6 text-sm text-zinc-600 text-center">No results for "{query}"</p>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Workflow canvas (inner, requires ReactFlowProvider) ──────────────────────
 
 function WorkflowCanvasInner({
-  workflow, allExtensions, onSave, onDelete, onExport, panelOpen, onTogglePanel,
+  workflow, allExtensions, onSave, onDelete, onExport, panelOpen, onTogglePanel, onRunInGenerate,
 }: {
-  workflow:       Workflow
-  allExtensions:  WorkflowExtension[]
-  onSave:         (w: Workflow) => void
-  onDelete:       () => void
-  onExport:       () => void
-  panelOpen:      boolean
-  onTogglePanel:  () => void
+  workflow:         Workflow
+  allExtensions:    WorkflowExtension[]
+  onSave:           (w: Workflow) => void
+  onDelete:         () => void
+  onExport:         () => void
+  panelOpen:        boolean
+  onTogglePanel:    () => void
+  onRunInGenerate:  (wf: Workflow) => void
 }) {
-  const { navigate }        = useNavStore()
   const { screenToFlowPosition, updateNodeData } = useReactFlow()
 
   const [nodes, setNodes, onNodesChange] = useNodesState(workflow.nodes as Node[])
   const [edges, setEdges, onEdgesChange] = useEdgesState(workflow.edges as Edge[])
   const [name, setName]       = useState(workflow.name)
   const [editingName, setEditingName] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const { runState, run, cancel, reset } = useWorkflowRunner(allExtensions)
 
   // Re-sync when workflow switches
   useEffect(() => {
@@ -279,13 +407,6 @@ function WorkflowCanvasInner({
     setEdges(workflow.edges as Edge[])
     setName(workflow.name)
   }, [workflow.id])
-
-  // Update output node when run completes
-  useEffect(() => {
-    if (runState.status !== 'done' || !runState.outputUrl) return
-    const outputNode = nodes.find((n) => n.type === 'outputNode')
-    if (outputNode) updateNodeData(outputNode.id, { params: { outputUrl: runState.outputUrl } })
-  }, [runState.status, runState.outputUrl])
 
   // Auto-save debounced
   useEffect(() => {
@@ -332,17 +453,47 @@ function WorkflowCanvasInner({
     }])
   }, [screenToFlowPosition, setNodes])
 
+  // Space → open palette (ignore when typing in an input)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return
+      const tag = (e.target as HTMLElement).tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return
+      e.preventDefault()
+      setPaletteOpen(true)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
+  const addNodeFromPalette = useCallback((type: string, extensionId?: string) => {
+    const position = screenToFlowPosition({
+      x: window.innerWidth  / 2,
+      y: window.innerHeight / 2,
+    })
+    setNodes((nds) => [...nds, {
+      id: newId(), type, position,
+      data: { extensionId, enabled: true, params: {} } as WFNodeData,
+    }])
+    setPaletteOpen(false)
+  }, [screenToFlowPosition, setNodes])
+
   const handleRun = useCallback(() => {
-    const wf: Workflow = { ...workflow, name, nodes: nodes as WFNode[], edges: edges as WFEdge[] }
-    const imageNode = nodes.find((n) => n.type === 'imageNode')
-    const filePath = (imageNode?.data as WFNodeData | undefined)?.params?.filePath as string ?? ''
-    const preview  = (imageNode?.data as WFNodeData | undefined)?.params?.preview  as string | undefined
-    reset()
-    run(wf, filePath, preview)
-  }, [workflow, name, nodes, edges, run, reset])
+    const wf: Workflow = { ...workflow, name, nodes: nodes as WFNode[], edges: edges as WFEdge[], updatedAt: new Date().toISOString() }
+    onSave(wf)
+    onRunInGenerate(wf)
+  }, [workflow, name, nodes, edges, onSave, onRunInGenerate])
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden">
+
+      {paletteOpen && (
+        <NodePalette
+          allExtensions={allExtensions}
+          onSelect={addNodeFromPalette}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
 
       {/* Header toolbar */}
       <div className="flex items-center gap-2 px-4 py-2.5 border-b border-zinc-800 shrink-0 bg-zinc-950/20">
@@ -364,25 +515,12 @@ function WorkflowCanvasInner({
         <div className="flex items-center gap-1">
           {/* Run / Cancel */}
           <button
-            onClick={runState.status === 'running' ? cancel : handleRun}
-            disabled={false}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-              runState.status === 'running'
-                ? 'bg-red-950/30 border-red-800/40 text-red-400 hover:bg-red-950/50'
-                : 'bg-accent/10 border-accent/30 text-accent-light hover:bg-accent/20 hover:border-accent/50'
-            }`}
+            onClick={handleRun}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border transition-colors
+                       bg-accent/10 border-accent/30 text-accent-light hover:bg-accent/20 hover:border-accent/50"
           >
-            {runState.status === 'running' ? (
-              <>
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12"/></svg>
-                <span className="text-[11px] font-semibold">Cancel</span>
-              </>
-            ) : (
-              <>
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                <span className="text-[11px] font-semibold">Run</span>
-              </>
-            )}
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            <span className="text-[11px] font-semibold">Run</span>
           </button>
 
           {/* Export */}
@@ -410,46 +548,6 @@ function WorkflowCanvasInner({
           </button>
         </div>
       </div>
-
-      {/* Run status bar */}
-      {runState.status !== 'idle' && (
-        <div className={`px-4 py-2.5 border-b border-zinc-800 shrink-0 ${
-          runState.status === 'done'  ? 'bg-emerald-950/25' :
-          runState.status === 'error' ? 'bg-red-950/25'     : 'bg-zinc-950/60'
-        }`}>
-          {runState.status === 'running' && (
-            <div className="flex flex-col gap-1.5">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] text-zinc-400">
-                  Node {runState.blockIndex + 1}/{runState.blockTotal} — {runState.blockStep}
-                </span>
-                <span className="text-[10px] text-zinc-600">{runState.blockProgress}%</span>
-              </div>
-              <div className="h-0.5 rounded-full bg-zinc-800">
-                <div className="h-0.5 rounded-full bg-accent transition-all duration-500" style={{ width: `${runState.blockProgress}%` }} />
-              </div>
-            </div>
-          )}
-          {runState.status === 'done' && (
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] text-emerald-400 font-medium">✓ Complete</span>
-              {runState.outputUrl && (
-                <button onClick={() => navigate('workspace')} className="text-[10px] text-zinc-400 hover:text-zinc-200 transition-colors">
-                  View in workspace →
-                </button>
-              )}
-              {runState.outputPath && (
-                <span className="text-[10px] text-zinc-500 truncate max-w-[260px]" title={runState.outputPath}>
-                  {runState.outputPath.split(/[\\/]/).pop()}
-                </span>
-              )}
-            </div>
-          )}
-          {runState.status === 'error' && (
-            <span className="text-[10px] text-red-400">{runState.error}</span>
-          )}
-        </div>
-      )}
 
       {/* React Flow canvas */}
       <div className="flex-1 relative" onDragOver={onDragOver} onDrop={onDrop}>
@@ -494,6 +592,7 @@ function WorkflowCanvasInner({
 export default function WorkflowsPage(): JSX.Element {
   const { workflows, loading, activeId, load, save, remove, importFile, exportFile, setActive } = useWorkflowsStore()
   const { modelExtensions, processExtensions, loadExtensions } = useExtensionsStore()
+  const { navigate } = useNavStore()
   const [panelOpen, setPanelOpen] = useState(true)
 
   const allExtensions = useMemo(
@@ -569,6 +668,7 @@ export default function WorkflowsPage(): JSX.Element {
               onExport={() => exportFile(activeWorkflow)}
               panelOpen={panelOpen}
               onTogglePanel={() => setPanelOpen((o) => !o)}
+              onRunInGenerate={(wf) => { save(wf); setActive(wf.id); navigate('generate') }}
             />
           </ReactFlowProvider>
         ) : (
