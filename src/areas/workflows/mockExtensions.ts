@@ -3,16 +3,18 @@ export type { ParamSchema } from '@shared/types/electron.d'
 import type { ParamSchema } from '@shared/types/electron.d'
 
 export interface WorkflowExtension {
-  id:          string   // "ext_id/node_id"
-  extensionId: string   // "ext_id" (for IPC calls)
-  nodeId:      string   // "node_id"
-  name:        string
-  description: string
-  input:       'image' | 'text' | 'mesh'
-  output:      'image' | 'text' | 'mesh'
-  params:      ParamSchema[]
-  builtin:     boolean
-  type:        'model' | 'process'
+  id:              string   // "ext_id/node_id"
+  extensionId:     string   // "ext_id" (for IPC calls)
+  extensionName:   string   // display name of the parent extension
+  extensionAuthor: string   // author of the parent extension
+  nodeId:          string   // "node_id"
+  name:            string
+  description:     string
+  input:           'image' | 'text' | 'mesh'
+  output:          'image' | 'text' | 'mesh'
+  params:          ParamSchema[]
+  builtin:         boolean
+  type:            'model' | 'process'
 }
 
 export function buildAllWorkflowExtensions(
@@ -24,16 +26,18 @@ export function buildAllWorkflowExtensions(
   for (const ext of processExtensions) {
     for (const node of ext.nodes) {
       result.push({
-        id:          `${ext.id}/${node.id}`,
-        extensionId: ext.id,
-        nodeId:      node.id,
-        name:        node.name,
-        description: ext.description ?? '',
-        input:       node.input,
-        output:      node.output,
-        params:      node.paramsSchema as ParamSchema[],
-        builtin:     ext.builtin,
-        type:        'process',
+        id:              `${ext.id}/${node.id}`,
+        extensionId:     ext.id,
+        extensionName:   ext.name,
+        extensionAuthor: ext.author ?? '',
+        nodeId:          node.id,
+        name:            node.name,
+        description:     ext.description ?? '',
+        input:           node.input,
+        output:          node.output,
+        params:          node.paramsSchema as ParamSchema[],
+        builtin:         ext.builtin,
+        type:            'process',
       })
     }
   }
@@ -41,16 +45,18 @@ export function buildAllWorkflowExtensions(
   for (const ext of modelExtensions) {
     for (const node of ext.nodes) {
       result.push({
-        id:          `${ext.id}/${node.id}`,
-        extensionId: ext.id,
-        nodeId:      node.id,
-        name:        node.name,
-        description: ext.description ?? '',
-        input:       node.input,
-        output:      node.output,
-        params:      node.paramsSchema as ParamSchema[],
-        builtin:     ext.builtin,
-        type:        'model',
+        id:              `${ext.id}/${node.id}`,
+        extensionId:     ext.id,
+        extensionName:   ext.name,
+        extensionAuthor: ext.author ?? '',
+        nodeId:          node.id,
+        name:            node.name,
+        description:     ext.description ?? '',
+        input:           node.input,
+        output:          node.output,
+        params:          node.paramsSchema as ParamSchema[],
+        builtin:         ext.builtin,
+        type:            'model',
       })
     }
   }

@@ -93,9 +93,38 @@ function WorkflowCard({ workflow, active, onClick }: { workflow: Workflow; activ
 const PANEL_MIN = 240
 const PANEL_MAX = 860
 
+const PANEL_BUILTIN_NODES = [
+  { type: 'imageNode',  label: 'Image',        color: '#38bdf8', icon: <><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></> },
+  { type: 'textNode',   label: 'Text',          color: '#fbbf24', icon: <><path d="M17 6.1H3M21 12.1H3M15.1 18H3"/></> },
+  { type: 'outputNode', label: 'Add to Scene',  color: '#a78bfa', icon: <><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></> },
+]
+
+function ExtGroupHeader({ title, author, expanded, onToggle, count }: { title: string; author?: string; expanded: boolean; onToggle: () => void; count: number }) {
+  return (
+    <button
+      onClick={onToggle}
+      className="flex items-center gap-2 w-full px-1 py-1.5 group"
+    >
+      <svg
+        width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+        className="text-zinc-600 group-hover:text-zinc-400 transition-colors shrink-0"
+        style={{ transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s ease' }}
+      >
+        <polyline points="9 18 15 12 9 6"/>
+      </svg>
+      <div className="flex flex-col items-start min-w-0">
+        <span className="text-[11px] font-semibold text-zinc-400 group-hover:text-zinc-200 transition-colors truncate leading-tight">{title}</span>
+        {author && <span className="text-[9px] text-zinc-600 truncate leading-tight">{author}</span>}
+      </div>
+      <span className="ml-auto text-[9px] text-zinc-700 shrink-0">{count}</span>
+    </button>
+  )
+}
+
 function ExtensionsPanel({ allExtensions, open }: { allExtensions: WorkflowExtension[]; open: boolean }) {
-  const [search, setSearch] = useState('')
-  const [width, setWidth]   = useState(288)
+  const [search, setSearch]       = useState('')
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
+  const [width, setWidth]         = useState(288)
   const dragging = useRef(false)
   const startX   = useRef(0)
   const startW   = useRef(0)
@@ -118,32 +147,52 @@ function ExtensionsPanel({ allExtensions, open }: { allExtensions: WorkflowExten
   const cols      = width >= 580 ? 3 : width >= 370 ? 2 : 1
   const gridClass = cols === 3 ? 'grid-cols-3' : cols === 2 ? 'grid-cols-2' : 'grid-cols-1'
   const query     = search.trim().toLowerCase()
-  const visible   = allExtensions.filter((e) => !query || e.name.toLowerCase().includes(query))
+
+  const toggleGroup = (id: string) => setCollapsed((c) => ({ ...c, [id]: !c[id] }))
+  const isExpanded  = (id: string, hasMatches: boolean) => (query && hasMatches) || !collapsed[id]
+
+  // Base group
+  const filteredBuiltinNodes = PANEL_BUILTIN_NODES.filter((n) => !query || n.label.toLowerCase().includes(query))
+  const filteredBuiltinExts  = allExtensions.filter((e) => e.builtin && (!query || e.name.toLowerCase().includes(query)))
+  const baseCount            = filteredBuiltinNodes.length + filteredBuiltinExts.length
+  const baseVisible          = !query || baseCount > 0
+
+  // Non-builtin groups: grouped by extensionId
+  const nonBuiltinMap = useMemo(() => {
+    const map = new Map<string, { extensionName: string; nodes: WorkflowExtension[] }>()
+    for (const ext of allExtensions) {
+      if (ext.builtin) continue
+      if (!map.has(ext.extensionId)) map.set(ext.extensionId, { extensionName: ext.extensionName, nodes: [] })
+      map.get(ext.extensionId)!.nodes.push(ext)
+    }
+    return map
+  }, [allExtensions])
 
   return (
     <div
       style={{ width: open ? width : 0 }}
       className="flex overflow-hidden border-l border-zinc-800 transition-[width] duration-300 ease-in-out shrink-0"
     >
-        {/* Inner content at fixed width so it doesn't squish during animation */}
-        <div className="flex shrink-0" style={{ width }}>
+      <div className="flex shrink-0" style={{ width }}>
 
-          {/* Resize handle */}
-          <div
-            onMouseDown={(e) => {
-              dragging.current = true; startX.current = e.clientX; startW.current = width
-              document.body.style.cursor = 'col-resize'; e.preventDefault()
-            }}
-            className="w-1 shrink-0 hover:bg-zinc-600 active:bg-accent/60 cursor-col-resize transition-colors self-stretch"
-          />
+        {/* Resize handle */}
+        <div
+          onMouseDown={(e) => {
+            dragging.current = true; startX.current = e.clientX; startW.current = width
+            document.body.style.cursor = 'col-resize'; e.preventDefault()
+          }}
+          className="w-1 shrink-0 hover:bg-zinc-600 active:bg-accent/60 cursor-col-resize transition-colors self-stretch"
+        />
 
-          <div className="flex flex-col flex-1 min-w-0 bg-zinc-950/30">
-            <div className="px-4 py-3 border-b border-zinc-800">
-              <h2 className="text-xs font-semibold text-zinc-300">Extensions</h2>
-              <p className="text-[10px] text-zinc-600 mt-0.5">Drag onto canvas</p>
-            </div>
+        <div className="flex flex-col flex-1 min-w-0 bg-zinc-950/30">
 
-        {allExtensions.length > 0 && (
+          {/* Header */}
+          <div className="px-4 py-3 border-b border-zinc-800">
+            <h2 className="text-xs font-semibold text-zinc-300">Extensions</h2>
+            <p className="text-[10px] text-zinc-600 mt-0.5">Drag onto canvas</p>
+          </div>
+
+          {/* Search */}
           <div className="px-3 pt-2.5 pb-2 border-b border-zinc-800">
             <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-zinc-800/60 border border-zinc-700/60 focus-within:border-zinc-600">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-zinc-500 shrink-0">
@@ -153,7 +202,7 @@ function ExtensionsPanel({ allExtensions, open }: { allExtensions: WorkflowExten
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search extensions…"
+                placeholder="Search…"
                 className="flex-1 bg-transparent text-[11px] text-zinc-200 placeholder-zinc-600 focus:outline-none min-w-0"
               />
               {search && (
@@ -165,72 +214,108 @@ function ExtensionsPanel({ allExtensions, open }: { allExtensions: WorkflowExten
               )}
             </div>
           </div>
-        )}
 
-        <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-4">
-          {/* Built-in nodes */}
-          <div className="flex flex-col gap-2">
-            <p className="text-[9px] font-bold uppercase tracking-widest text-zinc-600">Nodes</p>
-            <div className={`grid ${gridClass} gap-2`}>
-              {[
-                { type: 'imageNode',  label: 'Image',  color: '#38bdf8', icon: <><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></> },
-                { type: 'textNode',   label: 'Text',   color: '#fbbf24', icon: <><path d="M17 6.1H3M21 12.1H3M15.1 18H3"/></> },
-                { type: 'outputNode', label: 'Add to Scene', color: '#a78bfa', icon: <><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></> },
-              ].map(({ type, label, color, icon }) => (
-                <div
-                  key={type}
-                  draggable
-                  onDragStart={(e) => { e.dataTransfer.setData(DRAG_NODE_KEY, type); e.dataTransfer.effectAllowed = 'copy' }}
-                  className="flex flex-col gap-1.5 px-3 py-3 rounded-lg border border-zinc-800 bg-zinc-900 transition-colors cursor-grab hover:bg-zinc-800/60 hover:border-zinc-700 active:cursor-grabbing"
-                >
-                  <div className="flex items-center gap-1.5">
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" className="shrink-0">{icon}</svg>
-                    <p className="text-[11px] font-semibold text-zinc-200 truncate">{label}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
+          {/* Groups */}
+          <div className="flex-1 overflow-y-auto px-3 py-2 flex flex-col gap-0.5">
 
-          {/* Extensions */}
-          {allExtensions.length === 0 ? (
-            <p className="text-[11px] text-zinc-600 text-center pt-2">No extensions installed</p>
-          ) : (
-            <div className="flex flex-col gap-2">
-              <p className="text-[9px] font-bold uppercase tracking-widest text-zinc-600">Extensions</p>
-              <div className={`grid ${gridClass} gap-2`}>
-              {visible.map((ext) => (
-                  <div
-                    key={ext.id}
-                    draggable
-                    onDragStart={(e) => { e.dataTransfer.setData(DRAG_KEY, ext.id); e.dataTransfer.effectAllowed = 'copy' }}
-                    className="flex flex-col gap-1.5 px-3 py-3 rounded-lg border border-zinc-800 bg-zinc-900 transition-colors cursor-grab hover:bg-zinc-800/60 hover:border-zinc-700 active:cursor-grabbing"
-                  >
-                    <p className="text-[11px] font-semibold text-zinc-200 truncate">{ext.name}</p>
-                    {ext.builtin && (
-                      <span className="self-start text-[8px] font-bold uppercase tracking-wide px-1 py-0.5 rounded bg-zinc-700/60 text-zinc-400">built-in</span>
-                    )}
-                    {ext.description && cols === 1 && (
-                      <p className="text-[10px] text-zinc-500 leading-relaxed">{ext.description}</p>
-                    )}
-                    <div className="flex justify-end mt-0.5">
-                      <div className="flex items-center gap-1">
-                        <IoBadge type={ext.input} />
-                        <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-zinc-600 shrink-0">
-                          <path d="M5 12h14M13 6l6 6-6 6"/>
-                        </svg>
-                        <IoBadge type={ext.output} />
+            {/* ── Base group ── */}
+            {baseVisible && (
+              <div>
+                <ExtGroupHeader
+                  title="Base"
+                  expanded={isExpanded('base', baseCount > 0)}
+                  onToggle={() => toggleGroup('base')}
+                  count={baseCount}
+                />
+                {isExpanded('base', baseCount > 0) && (
+                  <div className={`grid ${gridClass} gap-2 mt-1.5 mb-3`}>
+                    {filteredBuiltinNodes.map(({ type, label, color, icon }) => (
+                      <div
+                        key={type}
+                        draggable
+                        onDragStart={(e) => { e.dataTransfer.setData(DRAG_NODE_KEY, type); e.dataTransfer.effectAllowed = 'copy' }}
+                        className="flex flex-col gap-2 px-3 py-3 rounded-lg border border-zinc-800 bg-zinc-900 transition-colors cursor-grab hover:bg-zinc-800/60 hover:border-zinc-700 active:cursor-grabbing"
+                      >
+                        <div className="flex items-center gap-2">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" className="shrink-0">{icon}</svg>
+                          <p className="text-xs font-semibold text-zinc-200 truncate">{label}</p>
+                        </div>
                       </div>
-                    </div>
+                    ))}
+                    {filteredBuiltinExts.map((ext) => (
+                      <div
+                        key={ext.id}
+                        draggable
+                        onDragStart={(e) => { e.dataTransfer.setData(DRAG_KEY, ext.id); e.dataTransfer.effectAllowed = 'copy' }}
+                        className="flex flex-col gap-2 px-3 py-3 rounded-lg border border-zinc-800 bg-zinc-900 transition-colors cursor-grab hover:bg-zinc-800/60 hover:border-zinc-700 active:cursor-grabbing"
+                      >
+                        <p className="text-xs font-semibold text-zinc-200 truncate">{ext.name}</p>
+                        <div className="flex items-center gap-1 mt-auto">
+                          <IoBadge type={ext.input} />
+                          <svg width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-zinc-600 shrink-0">
+                            <path d="M5 12h14M13 6l6 6-6 6"/>
+                          </svg>
+                          <IoBadge type={ext.output} />
+                        </div>
+                      </div>
+                    ))}
                   </div>
-              ))}
+                )}
               </div>
-            </div>
-          )}
+            )}
+
+            {/* ── Non-builtin extension groups ── */}
+            {[...nonBuiltinMap.entries()].map(([extId, { extensionName, nodes }]) => {
+              const filtered = nodes.filter((e) => !query || e.name.toLowerCase().includes(query))
+              if (query && filtered.length === 0) return null
+              const displayNodes = query ? filtered : nodes
+              const expanded = isExpanded(extId, filtered.length > 0)
+
+              return (
+                <div key={extId}>
+                  <ExtGroupHeader
+                    title={extensionName}
+                    author={displayNodes[0]?.extensionAuthor}
+                    expanded={expanded}
+                    onToggle={() => toggleGroup(extId)}
+                    count={displayNodes.length}
+                  />
+                  {expanded && (
+                    <div className={`grid ${gridClass} gap-2 mt-1.5 mb-3`}>
+                      {displayNodes.map((ext) => (
+                        <div
+                          key={ext.id}
+                          draggable
+                          onDragStart={(e) => { e.dataTransfer.setData(DRAG_KEY, ext.id); e.dataTransfer.effectAllowed = 'copy' }}
+                          className="flex flex-col gap-2 px-3 py-3 rounded-lg border border-zinc-800 bg-zinc-900 transition-colors cursor-grab hover:bg-zinc-800/60 hover:border-zinc-700 active:cursor-grabbing"
+                        >
+                          <p className="text-xs font-semibold text-zinc-200 truncate">{ext.name}</p>
+                          {ext.description && cols === 1 && (
+                            <p className="text-[10px] text-zinc-500 leading-relaxed line-clamp-2">{ext.description}</p>
+                          )}
+                          <div className="flex items-center gap-1 mt-auto">
+                            <IoBadge type={ext.input} />
+                            <svg width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-zinc-600 shrink-0">
+                              <path d="M5 12h14M13 6l6 6-6 6"/>
+                            </svg>
+                            <IoBadge type={ext.output} />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+
+            {/* Empty state */}
+            {query && baseCount === 0 && [...nonBuiltinMap.values()].every((g) => !g.nodes.some((e) => e.name.toLowerCase().includes(query))) && (
+              <p className="text-[11px] text-zinc-600 text-center pt-4">No results for "{query}"</p>
+            )}
+
+          </div>
         </div>
       </div>
-
-        </div>
     </div>
   )
 }
@@ -255,6 +340,18 @@ const BUILTIN_NODES = [
   { type: 'outputNode', label: 'Add to Scene',  color: '#a78bfa', description: 'Output node' },
 ]
 
+type PaletteItem =
+  | { kind: 'node'; data: typeof BUILTIN_NODES[0] }
+  | { kind: 'ext';  data: WorkflowExtension }
+
+type PaletteGroup = {
+  id:       string
+  title:    string
+  author?:  string
+  expanded: boolean
+  items:    Array<PaletteItem & { flatIdx: number }>
+}
+
 function NodePalette({
   allExtensions,
   onSelect,
@@ -264,41 +361,82 @@ function NodePalette({
   onSelect: (type: string, extensionId?: string) => void
   onClose: () => void
 }) {
-  const [query, setQuery] = useState('')
+  const [query,       setQuery]       = useState('')
+  const [collapsed,   setCollapsed]   = useState<Record<string, boolean>>({})
   const [activeIndex, setActiveIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const q = query.trim().toLowerCase()
 
-  const filteredNodes = BUILTIN_NODES.filter(
-    (n) => !q || n.label.toLowerCase().includes(q) || n.description.toLowerCase().includes(q),
-  )
-  const filteredExts = allExtensions.filter(
-    (e) => !q || e.name.toLowerCase().includes(q) || (e.description ?? '').toLowerCase().includes(q),
-  )
+  const nonBuiltinMap = useMemo(() => {
+    const map = new Map<string, { extensionName: string; extensionAuthor: string; nodes: WorkflowExtension[] }>()
+    for (const ext of allExtensions) {
+      if (ext.builtin) continue
+      if (!map.has(ext.extensionId)) map.set(ext.extensionId, { extensionName: ext.extensionName, extensionAuthor: ext.extensionAuthor, nodes: [] })
+      map.get(ext.extensionId)!.nodes.push(ext)
+    }
+    return map
+  }, [allExtensions])
 
-  const total = filteredNodes.length + filteredExts.length
+  const toggleGroup = (id: string) => setCollapsed((c) => ({ ...c, [id]: !c[id] }))
+  const isExpanded  = (id: string, hasMatches: boolean) => (!!q && hasMatches) || !collapsed[id]
+
+  // Build groups with pre-assigned flat indices (drives keyboard nav)
+  const { groups, totalItems } = useMemo(() => {
+    const groups: PaletteGroup[] = []
+    let flatIdx = 0
+
+    // Base group
+    const filteredBuiltinNodes = BUILTIN_NODES.filter((n) => !q || n.label.toLowerCase().includes(q) || n.description.toLowerCase().includes(q))
+    const filteredBuiltinExts  = allExtensions.filter((e) => e.builtin && (!q || e.name.toLowerCase().includes(q) || (e.description ?? '').toLowerCase().includes(q)))
+    const baseCount   = filteredBuiltinNodes.length + filteredBuiltinExts.length
+    const baseVisible = !q || baseCount > 0
+    const baseExp     = isExpanded('base', baseCount > 0)
+
+    if (baseVisible) {
+      const items: PaletteGroup['items'] = []
+      if (baseExp) {
+        filteredBuiltinNodes.forEach((n) => items.push({ kind: 'node', data: n, flatIdx: flatIdx++ }))
+        filteredBuiltinExts.forEach((e)  => items.push({ kind: 'ext',  data: e, flatIdx: flatIdx++ }))
+      }
+      groups.push({ id: 'base', title: 'Base', expanded: baseExp, items })
+    }
+
+    // Non-builtin groups
+    for (const [extId, { extensionName, extensionAuthor, nodes }] of nonBuiltinMap) {
+      const filtered     = nodes.filter((e) => !q || e.name.toLowerCase().includes(q) || (e.description ?? '').toLowerCase().includes(q))
+      if (q && filtered.length === 0) continue
+      const displayNodes = q ? filtered : nodes
+      const expanded     = isExpanded(extId, filtered.length > 0)
+      const items: PaletteGroup['items'] = []
+      if (expanded) displayNodes.forEach((e) => items.push({ kind: 'ext', data: e, flatIdx: flatIdx++ }))
+      groups.push({ id: extId, title: extensionName, author: extensionAuthor || undefined, expanded, items })
+    }
+
+    return { groups, totalItems: flatIdx }
+  }, [q, allExtensions, nonBuiltinMap, collapsed])
 
   useEffect(() => { setActiveIndex(0) }, [query])
   useEffect(() => { inputRef.current?.focus() }, [])
 
+  // Flat list for Enter key (derived from groups)
+  const flatItems = useMemo(() => groups.flatMap((g) => g.items), [groups])
+
   const handleKey = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Escape') { onClose(); return }
-    if (e.key === 'ArrowDown') { e.preventDefault(); setActiveIndex((i) => Math.min(i + 1, total - 1)); return }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActiveIndex((i) => Math.min(i + 1, totalItems - 1)); return }
     if (e.key === 'ArrowUp')   { e.preventDefault(); setActiveIndex((i) => Math.max(i - 1, 0)); return }
     if (e.key === 'Enter') {
       e.preventDefault()
-      if (activeIndex < filteredNodes.length) {
-        onSelect(filteredNodes[activeIndex].type)
-      } else {
-        const ext = filteredExts[activeIndex - filteredNodes.length]
-        if (ext) onSelect('extensionNode', ext.id)
-      }
+      const item = flatItems[activeIndex]
+      if (!item) return
+      if (item.kind === 'node') onSelect(item.data.type)
+      else onSelect('extensionNode', item.data.id)
     }
-  }, [activeIndex, filteredNodes, filteredExts, total, onSelect, onClose])
+  }, [activeIndex, flatItems, totalItems, onSelect, onClose])
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh]" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-black/40 backdrop-blur-[2px]" onMouseDown={onClose}>
       <div
         className="w-full max-w-md bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl overflow-hidden"
         onMouseDown={(e) => e.stopPropagation()}
@@ -320,54 +458,73 @@ function NodePalette({
           <kbd className="text-[10px] text-zinc-600 bg-zinc-800 px-1.5 py-0.5 rounded border border-zinc-700">Esc</kbd>
         </div>
 
-        {/* Results */}
-        <div className="max-h-80 overflow-y-auto py-1.5">
-          {filteredNodes.length > 0 && (
-            <div>
-              <p className="px-4 py-1.5 text-[9px] font-bold uppercase tracking-widest text-zinc-600">Nodes</p>
-              {filteredNodes.map((n, i) => (
-                <button
-                  key={n.type}
-                  onMouseEnter={() => setActiveIndex(i)}
-                  onClick={() => onSelect(n.type)}
-                  className={`w-full flex items-center gap-3 px-4 py-2.5 transition-colors ${activeIndex === i ? 'bg-zinc-800' : 'hover:bg-zinc-800/50'}`}
-                >
-                  <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: n.color }} />
-                  <span className="text-sm text-zinc-200">{n.label}</span>
-                  <span className="text-xs text-zinc-600 ml-auto">{n.description}</span>
-                </button>
-              ))}
-            </div>
-          )}
+        {/* Groups */}
+        <div className="max-h-96 overflow-y-auto py-1.5">
+          {groups.map((group) => (
+            <div key={group.id}>
 
-          {filteredExts.length > 0 && (
-            <div>
-              <p className="px-4 py-1.5 text-[9px] font-bold uppercase tracking-widest text-zinc-600">Extensions</p>
-              {filteredExts.map((ext, i) => {
-                const idx = filteredNodes.length + i
+              {/* Group header */}
+              <button
+                onClick={() => toggleGroup(group.id)}
+                className="flex items-center gap-2 w-full px-4 py-2 group hover:bg-zinc-800/30 transition-colors"
+              >
+                <svg
+                  width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+                  className="text-zinc-600 group-hover:text-zinc-400 transition-colors shrink-0"
+                  style={{ transform: group.expanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s ease' }}
+                >
+                  <polyline points="9 18 15 12 9 6"/>
+                </svg>
+                <div className="flex items-baseline gap-2 min-w-0">
+                  <span className="text-[11px] font-semibold text-zinc-400 group-hover:text-zinc-200 transition-colors">{group.title}</span>
+                  {group.author && <span className="text-[10px] text-zinc-600 truncate">{group.author}</span>}
+                </div>
+                <span className="ml-auto text-[10px] text-zinc-700 shrink-0">{group.items.length}</span>
+              </button>
+
+              {/* Group items */}
+              {group.expanded && group.items.map((item) => {
+                const isActive = activeIndex === item.flatIdx
+                if (item.kind === 'node') {
+                  const n = item.data
+                  return (
+                    <button
+                      key={n.type}
+                      onMouseEnter={() => setActiveIndex(item.flatIdx)}
+                      onClick={() => onSelect(n.type)}
+                      className={`w-full flex items-center gap-3 px-4 pl-9 py-2.5 transition-colors ${isActive ? 'bg-zinc-800' : 'hover:bg-zinc-800/50'}`}
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: n.color }} />
+                      <span className="text-sm text-zinc-200">{n.label}</span>
+                      <span className="text-xs text-zinc-600 ml-auto">{n.description}</span>
+                    </button>
+                  )
+                }
+                const e = item.data
                 return (
                   <button
-                    key={ext.id}
-                    onMouseEnter={() => setActiveIndex(idx)}
-                    onClick={() => onSelect('extensionNode', ext.id)}
-                    className={`w-full flex items-center gap-3 px-4 py-2.5 transition-colors ${activeIndex === idx ? 'bg-zinc-800' : 'hover:bg-zinc-800/50'}`}
+                    key={e.id}
+                    onMouseEnter={() => setActiveIndex(item.flatIdx)}
+                    onClick={() => onSelect('extensionNode', e.id)}
+                    className={`w-full flex items-center gap-3 px-4 pl-9 py-2.5 transition-colors ${isActive ? 'bg-zinc-800' : 'hover:bg-zinc-800/50'}`}
                   >
                     <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-violet-400" />
-                    <span className="text-sm text-zinc-200">{ext.name}</span>
+                    <span className="text-sm text-zinc-200">{e.name}</span>
                     <div className="flex items-center gap-1 ml-auto shrink-0">
-                      <span className="text-[10px] text-zinc-500">{ext.input}</span>
+                      <span className="text-[10px] text-zinc-500">{e.input}</span>
                       <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-zinc-700">
                         <path d="M5 12h14M13 6l6 6-6 6"/>
                       </svg>
-                      <span className="text-[10px] text-zinc-500">{ext.output}</span>
+                      <span className="text-[10px] text-zinc-500">{e.output}</span>
                     </div>
                   </button>
                 )
               })}
-            </div>
-          )}
 
-          {total === 0 && (
+            </div>
+          ))}
+
+          {totalItems === 0 && groups.length === 0 && (
             <p className="px-4 py-6 text-sm text-zinc-600 text-center">No results for "{query}"</p>
           )}
         </div>
