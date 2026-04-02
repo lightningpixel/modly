@@ -898,34 +898,34 @@ function WorkflowCanvasInner({
       )}
 
       {/* Header toolbar */}
-      <div className="flex items-center gap-1.5 px-3 py-2 border-b border-zinc-800 shrink-0 bg-zinc-950/20">
+      <div className="flex items-center gap-2 px-5 py-3 border-b border-zinc-800 shrink-0 bg-zinc-950/20">
 
         {/* New */}
         <button
           onClick={onNew}
           title="New workflow"
-          className="flex items-center gap-1 px-2 py-1 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 transition-colors shrink-0"
+          className="flex items-center gap-2 px-3.5 py-2 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 transition-colors shrink-0"
         >
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
             <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
           </svg>
-          <span className="text-[11px] font-medium">New</span>
+          <span className="text-sm font-medium">New</span>
         </button>
 
         {/* Import */}
         <button
           onClick={onImport}
           title="Import workflow"
-          className="flex items-center gap-1 px-2 py-1 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 transition-colors shrink-0"
+          className="flex items-center gap-2 px-3.5 py-2 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 transition-colors shrink-0"
         >
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
             <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
           </svg>
-          <span className="text-[11px] font-medium">Import</span>
+          <span className="text-sm font-medium">Import</span>
         </button>
 
-        <div className="w-px h-4 bg-zinc-800 mx-0.5 shrink-0" />
+        <div className="w-px h-6 bg-zinc-800 mx-0.5 shrink-0" />
 
         {/* Name input */}
         <input
@@ -933,25 +933,8 @@ function WorkflowCanvasInner({
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
           placeholder="Workflow name…"
-          className="flex-1 min-w-0 bg-zinc-800 border border-zinc-700/80 rounded-md px-2 py-1 text-[11px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-accent/60"
+          className="flex-1 min-w-0 bg-zinc-800 border border-zinc-700/80 rounded-md px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-accent/60"
         />
-
-        {/* Info hint */}
-        <div className="group relative shrink-0">
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-500/10 border border-amber-500/20 text-amber-400 hover:bg-amber-500/15 hover:border-amber-500/30 cursor-default transition-colors min-w-0">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" className="shrink-0">
-              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
-            </svg>
-            <span className="text-[10px] font-medium truncate">Model extensions require their weights to be downloaded before running. If you've already installed them, you're good to go — otherwise head to the Extensions page to download them.</span>
-          </div>
-          <div className="absolute top-full left-0 mt-1.5 z-50 w-80 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity">
-            <div className="bg-zinc-900 border border-zinc-700/60 rounded-xl px-3.5 py-3 shadow-xl">
-              <p className="text-[11px] text-zinc-300 leading-relaxed">
-                Model extensions require their weights to be downloaded before running. If you've already installed them, you're good to go — otherwise head to the <span className="text-amber-400 font-medium">Extensions</span> page to download them.
-              </p>
-            </div>
-          </div>
-        </div>
 
         <div className="flex-1" />
 
@@ -959,20 +942,20 @@ function WorkflowCanvasInner({
           {/* Run */}
           <button
             onClick={handleRun}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border transition-colors
+            className="flex items-center gap-2 px-4 py-2 rounded-lg border transition-colors
                        bg-accent/10 border-accent/30 text-accent-light hover:bg-accent/20 hover:border-accent/50"
           >
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-            <span className="text-[11px] font-semibold">Run</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            <span className="text-sm font-semibold">Run</span>
           </button>
 
           {/* Export */}
           <button
             onClick={onExport}
-            className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 transition-colors"
+            className="p-2.5 rounded-lg text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 transition-colors"
             title="Export JSON"
           >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
               <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
             </svg>
@@ -981,10 +964,10 @@ function WorkflowCanvasInner({
           {/* Delete */}
           <button
             onClick={onDelete}
-            className="p-1.5 rounded-lg text-zinc-600 hover:text-red-400 hover:bg-red-950/30 border border-zinc-800 hover:border-red-800/40 transition-colors"
+            className="p-2.5 rounded-lg text-zinc-600 hover:text-red-400 hover:bg-red-950/30 border border-zinc-800 hover:border-red-800/40 transition-colors"
             title="Delete workflow"
           >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <polyline points="3 6 5 6 21 6"/>
               <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
             </svg>
@@ -994,7 +977,7 @@ function WorkflowCanvasInner({
           <button
             onClick={() => setHelpOpen(true)}
             title="How workflows work"
-            className="p-1.5 rounded-lg text-zinc-600 hover:text-zinc-200 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 transition-colors font-semibold text-[11px] w-[26px] h-[26px] flex items-center justify-center"
+            className="p-2.5 rounded-lg text-zinc-600 hover:text-zinc-200 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 transition-colors font-semibold text-sm w-[34px] h-[34px] flex items-center justify-center"
           >
             ?
           </button>
@@ -1062,8 +1045,7 @@ export default function WorkflowsPage(): JSX.Element {
   const { workflows, loading, activeId, load, save, remove, importFile, exportFile, setActive } = useWorkflowsStore()
   const { modelExtensions, processExtensions, loadExtensions } = useExtensionsStore()
   const { navigate } = useNavStore()
-  const [panelOpen,    setPanelOpen]    = useState(false)
-  const [newModalOpen, setNewModalOpen] = useState(false)
+  const [panelOpen, setPanelOpen] = useState(true)
 
   const allExtensions = useMemo(
     () => buildAllWorkflowExtensions(modelExtensions, processExtensions),
@@ -1086,14 +1068,6 @@ export default function WorkflowsPage(): JSX.Element {
     const wf = newWorkflow()
     await save(wf)
     setActive(wf.id)
-    setNewModalOpen(false)
-  }
-
-  async function handleCreateTemplate() {
-    const wf = newWorkflowFromTemplate()
-    await save(wf)
-    setActive(wf.id)
-    setNewModalOpen(false)
   }
 
   async function handleImport() {
@@ -1103,14 +1077,6 @@ export default function WorkflowsPage(): JSX.Element {
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden">
-
-      {newModalOpen && (
-        <NewWorkflowModal
-          onBlank={handleCreateBlank}
-          onTemplate={handleCreateTemplate}
-          onClose={() => setNewModalOpen(false)}
-        />
-      )}
 
       {/* Tab bar */}
       {!loading && (
@@ -1156,7 +1122,7 @@ export default function WorkflowsPage(): JSX.Element {
               panelOpen={panelOpen}
               onTogglePanel={() => setPanelOpen((o) => !o)}
               onRunInGenerate={(wf) => { save(wf); setActive(wf.id); navigate('generate') }}
-              onNew={() => setNewModalOpen(true)}
+              onNew={handleCreateBlank}
               onImport={handleImport}
             />
           </ReactFlowProvider>
@@ -1171,7 +1137,7 @@ export default function WorkflowsPage(): JSX.Element {
               <p className="text-xs mt-1">Create one to get started</p>
             </div>
             <div className="flex items-center gap-2 mt-2">
-              <button onClick={() => setNewModalOpen(true)} className="px-4 py-2 rounded-lg bg-accent text-white text-xs font-semibold hover:bg-accent/90 transition-colors">
+              <button onClick={handleCreateBlank} className="px-4 py-2 rounded-lg bg-accent text-white text-xs font-semibold hover:bg-accent/90 transition-colors">
                 New Workflow
               </button>
               <button onClick={handleImport} className="px-4 py-2 rounded-lg border border-zinc-700 text-zinc-300 text-xs font-semibold hover:bg-zinc-800 transition-colors">

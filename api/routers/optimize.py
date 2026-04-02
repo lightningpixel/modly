@@ -4,7 +4,13 @@ import shutil
 import tempfile
 import uuid
 
-import pymeshlab
+try:
+    import pymeshlab as _pymeshlab
+    _PYMESHLAB_AVAILABLE = True
+except ImportError:
+    _pymeshlab = None
+    _PYMESHLAB_AVAILABLE = False
+
 import trimesh
 import trimesh.visual
 from fastapi import APIRouter, HTTPException, UploadFile, File
@@ -28,8 +34,14 @@ class SmoothRequest(BaseModel):
     iterations: int
 
 
+def _require_pymeshlab():
+    if not _PYMESHLAB_AVAILABLE:
+        raise HTTPException(503, "pymeshlab is unavailable on this system (DLL blocked by Windows Application Control policy)")
+
+
 @router.post("/mesh")
 def optimize_mesh(body: OptimizeRequest):
+    _require_pymeshlab()
     target_faces = max(100, min(500_000, body.target_faces))
 
     # Security: prevent path traversal
@@ -72,7 +84,7 @@ def _decimate(input_path: str, target_faces: int, tmp_dir: str) -> trimesh.Trime
     else:
         geom = loaded
 
-    ms = pymeshlab.MeshSet()
+    ms = _pymeshlab.MeshSet()
 
     if _has_texture(geom):
         # ── Textured path: OBJ intermediate to preserve UV coordinates ──────
@@ -131,6 +143,7 @@ def _decimate(input_path: str, target_faces: int, tmp_dir: str) -> trimesh.Trime
 
 @router.post("/smooth")
 def smooth_mesh(body: SmoothRequest):
+    _require_pymeshlab()
     iterations = max(1, min(20, body.iterations))
 
     input_path = (WORKSPACE_DIR / body.path).resolve()
@@ -162,7 +175,7 @@ def _smooth(input_path: str, iterations: int, tmp_dir: str) -> trimesh.Trimesh:
     else:
         geom = loaded
 
-    ms = pymeshlab.MeshSet()
+    ms = _pymeshlab.MeshSet()
 
     if _has_texture(geom):
         obj_in  = os.path.join(tmp_dir, "input.obj")

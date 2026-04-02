@@ -22,39 +22,58 @@ type WindowGetter = () => BrowserWindow | null
 
 // ─── GPU detect (best-effort, no Python required) ─────────────────────────────
 
-function detectGpuSm(): Promise<number> {
+interface GpuInfo { sm: number; cudaVersion: number }
+
+function detectGpuInfo(): Promise<GpuInfo> {
   return new Promise((resolve) => {
-    const proc = spawn('nvidia-smi', ['--query-gpu=compute_cap', '--format=csv,noheader'], {
+    // Query compute cap + driver version in one call
+    const proc = spawn('nvidia-smi', ['--query-gpu=compute_cap,driver_version', '--format=csv,noheader'], {
       stdio: ['ignore', 'pipe', 'ignore'],
     })
     let out = ''
     proc.stdout?.on('data', (d: Buffer) => { out += d.toString() })
     proc.on('close', (code) => {
       if (code === 0) {
-        const cap = out.trim().split('\n')[0].trim()   // e.g. "8.6"
-        const sm  = Math.round(parseFloat(cap) * 10)   // → 86
-        resolve(isNaN(sm) ? 86 : sm)
+        const line   = out.trim().split('\n')[0].trim()        // e.g. "8.6, 551.61"
+        const parts  = line.split(',').map(s => s.trim())
+        const sm     = Math.round(parseFloat(parts[0] ?? '') * 10)  // → 86
+        // Derive max supported CUDA version from driver version
+        // Driver ≥ 520 → CUDA 11.8, ≥ 525 → 12.0, ≥ 530 → 12.1, ≥ 535 → 12.2,
+        // ≥ 545 → 12.3, ≥ 550 → 12.4, ≥ 555 → 12.5, ≥ 560 → 12.6
+        const driverMajor = parseInt((parts[1] ?? '').split('.')[0] ?? '0', 10)
+        let cudaVersion = 118  // safe minimum
+        if      (driverMajor >= 570) cudaVersion = 128  // Blackwell (RTX 50xx, sm_120)
+        else if (driverMajor >= 560) cudaVersion = 126
+        else if (driverMajor >= 555) cudaVersion = 125
+        else if (driverMajor >= 550) cudaVersion = 124
+        else if (driverMajor >= 545) cudaVersion = 123
+        else if (driverMajor >= 535) cudaVersion = 122
+        else if (driverMajor >= 530) cudaVersion = 121
+        else if (driverMajor >= 525) cudaVersion = 120
+        else if (driverMajor >= 520) cudaVersion = 118
+        resolve({ sm: isNaN(sm) ? 86 : sm, cudaVersion })
       } else {
-        resolve(86)   // no GPU or nvidia-smi missing — assume Ampere as safe default
+        resolve({ sm: 86, cudaVersion: 118 })
       }
     })
-    proc.on('error', () => resolve(86))
+    proc.on('error', () => resolve({ sm: 86, cudaVersion: 118 }))
   })
 }
 
 // ─── Run an extension's setup.py directly (no FastAPI needed) ─────────────────
 
 function runExtensionSetup(
-  extDir:  string,
-  gpuSm:   number,
-  onLog?:  (line: string) => void,
+  extDir:      string,
+  gpuSm:       number,
+  cudaVersion: number,
+  onLog?:      (line: string) => void,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const userData  = app.getPath('userData')
     const pythonExe = getVenvPythonExe(userData)
     const setupPy   = join(extDir, 'setup.py')
 
-    const args = JSON.stringify({ python_exe: pythonExe, ext_dir: extDir, gpu_sm: gpuSm })
+    const args = JSON.stringify({ python_exe: pythonExe, ext_dir: extDir, gpu_sm: gpuSm, cuda_version: cudaVersion })
     const proc = spawn(pythonExe, [setupPy, args], {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -682,9 +701,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         // 6b. Model extension: run setup.py directly (no FastAPI required)
         if (existsSync(join(destDir, 'setup.py'))) {
           emit({ step: 'setting_up', message: 'Setting up Python environment…' })
-          const gpuSm = await detectGpuSm()
+          const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
           try {
-            await runExtensionSetup(destDir, gpuSm, (line) => {
+            await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
               logger.info(`[ext-setup] ${line}`)
               emit({ step: 'setting_up', message: line })
             })
@@ -746,8 +765,8 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       if (!existsSync(join(extDir, 'setup.py'))) {
         return { success: false, error: 'No setup.py found for this extension' }
       }
-      const gpuSm = await detectGpuSm()
-      await runExtensionSetup(extDir, gpuSm, (line) => logger.info(`[ext-repair] ${line}`))
+      const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
+      await runExtensionSetup(extDir, gpuSm, cudaVersion, (line) => logger.info(`[ext-repair] ${line}`))
       try {
         await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
       } catch { /* ignore if Python is not running yet */ }
