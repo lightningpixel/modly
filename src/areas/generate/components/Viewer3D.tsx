@@ -1,7 +1,7 @@
-import { Component, Suspense, useEffect, useRef, useState } from 'react'
+import { Component, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode, ErrorInfo } from 'react'
 import { Canvas, useThree } from '@react-three/fiber'
-import { OrbitControls, useGLTF } from '@react-three/drei'
+import { GizmoHelper, OrbitControls, useGizmoContext, useGLTF } from '@react-three/drei'
 import * as THREE from 'three'
 import { useGeneration } from '@shared/hooks/useGeneration'
 import { useAppStore } from '@shared/stores/appStore'
@@ -213,6 +213,79 @@ function MeshModel({ url, jobId, viewMode, onStats }: MeshModelProps): JSX.Eleme
 }
 
 // ---------------------------------------------------------------------------
+// Orientation gizmo — coloured bubbles only (X/Y/Z)
+// ---------------------------------------------------------------------------
+
+function makeAxisLabelTexture(letter: string, bg: string): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = 64
+  const ctx = canvas.getContext('2d')!
+  ctx.beginPath()
+  ctx.arc(32, 32, 16, 0, 2 * Math.PI)
+  ctx.closePath()
+  ctx.fillStyle = bg
+  ctx.fill()
+  ctx.font = '18px Arial, sans-serif'
+  ctx.textAlign = 'center'
+  ctx.fillStyle = '#ffffff'
+  ctx.fillText(letter, 32, 41)
+  return new THREE.CanvasTexture(canvas)
+}
+
+const GIZMO_AXES: {
+  letter: string
+  color: string
+  pos: [number, number, number]
+  lineRotation: [number, number, number]
+}[] = [
+  { letter: 'X', color: '#f87171', pos: [1, 0, 0], lineRotation: [0, 0, 0] },
+  { letter: 'Y', color: '#4ade80', pos: [0, 1, 0], lineRotation: [0, 0, Math.PI / 2] },
+  { letter: 'Z', color: '#60a5fa', pos: [0, 0, 1], lineRotation: [0, -Math.PI / 2, 0] },
+]
+
+function AxisLine({ color, rotation }: { color: string; rotation: [number, number, number] }) {
+  return (
+    <group rotation={rotation}>
+      <mesh position={[0.4, 0, 0]}>
+        <boxGeometry args={[0.8, 0.05, 0.05]} />
+        <meshBasicMaterial color={color} toneMapped={false} />
+      </mesh>
+    </group>
+  )
+}
+
+function AxisBubble({ letter, color, pos }: { letter: string; color: string; pos: [number, number, number] }) {
+  const { tweenCamera } = useGizmoContext()
+  const texture = useMemo(() => makeAxisLabelTexture(letter, color), [letter, color])
+  const [hovered, setHovered] = useState(false)
+
+  return (
+    <sprite
+      position={pos}
+      scale={hovered ? 1.2 : 1}
+      onPointerDown={(e) => { tweenCamera(e.object.position); e.stopPropagation() }}
+      onPointerOver={(e) => { e.stopPropagation(); setHovered(true) }}
+      onPointerOut={() => setHovered(false)}
+    >
+      <spriteMaterial map={texture} alphaTest={0.3} toneMapped={false} />
+    </sprite>
+  )
+}
+
+function GizmoBubbles() {
+  return (
+    <group scale={40}>
+      {GIZMO_AXES.map((axis) => (
+        <AxisLine key={`line-${axis.letter}`} color={axis.color} rotation={axis.lineRotation} />
+      ))}
+      {GIZMO_AXES.map((axis) => (
+        <AxisBubble key={axis.letter} {...axis} />
+      ))}
+    </group>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // EmptyState
 // ---------------------------------------------------------------------------
 
@@ -297,6 +370,7 @@ export default function Viewer3D(): JSX.Element {
           )}
 
           <OrbitControls
+            makeDefault
             enablePan
             enableZoom
             enableRotate
@@ -305,6 +379,10 @@ export default function Viewer3D(): JSX.Element {
             autoRotate={autoRotate}
             autoRotateSpeed={1.5}
           />
+
+          <GizmoHelper alignment="top-right" margin={[72, 72]}>
+            <GizmoBubbles />
+          </GizmoHelper>
         </Canvas>
 
         {/* Left toolbar — visible only when a model is loaded */}
