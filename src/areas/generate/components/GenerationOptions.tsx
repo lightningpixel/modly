@@ -84,24 +84,42 @@ function FloatParam({ schema, value, onChange }: { schema: ParamSchema; value: a
   )
 }
 
+function IntInput({ value, onChange, placeholder, className }: { value: number; onChange: (v: number) => void; placeholder?: string; className: string }) {
+  const [text, setText] = useState(String(value))
+  const prevValue = useRef(value)
+  if (prevValue.current !== value && parseInt(text, 10) !== value) {
+    prevValue.current = value
+    setText(String(value))
+  }
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      value={text}
+      placeholder={placeholder}
+      onChange={(e) => {
+        const raw = e.target.value
+        if (raw !== '' && raw !== '-' && !/^-?\d+$/.test(raw)) return
+        setText(raw)
+        const n = parseInt(raw, 10)
+        if (!isNaN(n)) { prevValue.current = n; onChange(n) }
+      }}
+      className={className}
+    />
+  )
+}
+
 function IntParam({ schema, value, onChange }: { schema: ParamSchema; value: any; onChange: (v: any) => void }): JSX.Element {
   const isSeed = schema.id === 'seed'
   return (
     <div className="flex flex-col gap-1.5">
       <FieldLabel label={schema.label} tooltip={schema.tooltip} />
       <div className="flex items-center gap-2">
-        <input
-          type="number"
-          lang="en"
-          min={isSeed ? -1 : schema.min}
-          max={schema.max}
+        <IntInput
           value={value}
+          onChange={onChange}
           placeholder={isSeed ? '-1 = random' : undefined}
-          onChange={(e) => {
-            const v = parseInt(e.target.value)
-            onChange(isNaN(v) ? schema.default : v)
-          }}
-          className="w-full px-3 py-1.5 text-xs rounded-lg bg-zinc-900 border border-zinc-700/60 text-zinc-200 focus:outline-none focus:border-zinc-500 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+          className="w-full px-3 py-1.5 text-xs rounded-lg bg-zinc-900 border border-zinc-700/60 text-zinc-200 focus:outline-none focus:border-zinc-500"
         />
         {isSeed && (
           <button

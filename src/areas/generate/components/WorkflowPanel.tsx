@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ReactFlowProvider,
   useNodesState, useEdgesState, useReactFlow,
@@ -9,7 +9,7 @@ import { useWorkflowsStore }   from '@shared/stores/workflowsStore'
 import { useAppStore }         from '@shared/stores/appStore'
 import { useExtensionsStore }  from '@shared/stores/extensionsStore'
 import { useNavStore }         from '@shared/stores/navStore'
-import { useWorkflowRunner }   from '@areas/workflows/useWorkflowRunner'
+import { useWorkflowRunStore } from '@areas/workflows/workflowRunStore'
 import { buildAllWorkflowExtensions, getWorkflowExtension } from '@areas/workflows/mockExtensions'
 import type { WorkflowExtension } from '@areas/workflows/mockExtensions'
 import type { Workflow, WFNode, WFEdge, ParamSchema } from '@shared/types/electron.d'
@@ -58,6 +58,54 @@ function mimeFromPath(p: string): string {
 
 const inputCls = 'w-full bg-zinc-800 border border-zinc-700/80 rounded-md px-2 py-1 text-[11px] text-zinc-200 focus:outline-none focus:border-accent/60'
 
+function IntInput({ value, onChange, className }: { value: number; onChange: (v: number) => void; className: string }) {
+  const [text, setText] = useState(String(value))
+  const prevValue = useRef(value)
+  if (prevValue.current !== value && parseInt(text, 10) !== value) {
+    prevValue.current = value
+    setText(String(value))
+  }
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      value={text}
+      onChange={(e) => {
+        const raw = e.target.value
+        if (raw !== '' && raw !== '-' && !/^-?\d+$/.test(raw)) return
+        setText(raw)
+        const n = parseInt(raw, 10)
+        if (!isNaN(n)) { prevValue.current = n; onChange(n) }
+      }}
+      className={className}
+    />
+  )
+}
+
+function FloatInput({ value, onChange, className }: { value: number; onChange: (v: number) => void; className: string }) {
+  const [text, setText] = useState(String(value))
+  const prevValue = useRef(value)
+  if (prevValue.current !== value && parseFloat(text.replace(',', '.')) !== value) {
+    prevValue.current = value
+    setText(String(value))
+  }
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={text}
+      onChange={(e) => {
+        const raw = e.target.value.replace(',', '.')
+        if (raw !== '' && raw !== '-' && raw !== '.' && !/^-?\d*\.?\d*$/.test(raw)) return
+        setText(e.target.value)
+        const num = parseFloat(raw)
+        if (!isNaN(num)) { prevValue.current = num; onChange(num) }
+      }}
+      className={className}
+    />
+  )
+}
+
 function ParamField({ param, value, onChange }: {
   param:    ParamSchema
   value:    number | string
@@ -88,12 +136,11 @@ function ParamField({ param, value, onChange }: {
       </div>
     )
   }
-  return (
-    <input type="number" lang="en" value={value as number} min={param.min} max={param.max}
-      step={param.step ?? (param.type === 'float' ? 0.1 : 1)}
-      onChange={(e) => onChange(param.type === 'float' ? parseFloat(e.target.value) : parseInt(e.target.value, 10))}
-      className={inputCls} />
-  )
+  if (param.type === 'float') {
+    return <FloatInput value={value as number} onChange={(v) => onChange(v)} className={inputCls} />
+  }
+  // int
+  return <IntInput value={value as number} onChange={(v) => onChange(v)} className={inputCls} />
 }
 
 // ─── Workflow dropdown ────────────────────────────────────────────────────────
@@ -362,8 +409,8 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
     ))
   }, [setNodes])
 
-  const { setCurrentJob, updateCurrentJob, selectedImagePath, selectedImageData } = useAppStore()
-  const { runState, run, cancel } = useWorkflowRunner(allExtensions)
+  const { setCurrentJob } = useAppStore()
+  const { runState, run, cancel } = useWorkflowRunStore()
   const isRunning = runState.status === 'running'
 
   // Update AddToScene node when run completes
@@ -372,21 +419,6 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
     const out = nodes.find((n) => n.type === 'outputNode')
     if (out) updateNodeData(out.id, { params: { outputUrl: runState.outputUrl } })
   }, [runState.status, runState.outputUrl])
-
-  // Sync runState → currentJob
-  useEffect(() => {
-    if (runState.status === 'running') {
-      const total   = runState.blockTotal
-      const overall = total > 0
-        ? Math.round((runState.blockIndex / total) * 100 + runState.blockProgress / total)
-        : runState.blockProgress
-      updateCurrentJob({ status: 'generating', progress: overall, step: runState.blockStep })
-    } else if (runState.status === 'done') {
-      updateCurrentJob({ status: 'done', progress: 100, outputUrl: runState.outputUrl })
-    } else if (runState.status === 'error') {
-      updateCurrentJob({ status: 'error', error: runState.error })
-    }
-  }, [runState])
 
   // Type mismatch detection
   const typeMismatch = useMemo(() => {
@@ -418,28 +450,9 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
   )
 
   const handleGenerate = useCallback(() => {
-    const imageNode = nodes.find((n) => n.type === 'imageNode')
-    const imagePath = (imageNode?.data?.params?.filePath as string | undefined) ?? selectedImagePath ?? ''
-    const imageData = selectedImageData ?? undefined
-
-    // Capture the current mesh URL *before* setCurrentJob overwrites it
-    const currentMeshUrl = useAppStore.getState().currentJob?.outputUrl
-
-    setCurrentJob({
-      id: crypto.randomUUID(),
-      imageFile: imagePath,
-      status: 'uploading',
-      progress: 0,
-      createdAt: Date.now(),
-    })
-
-    run(
-      { ...workflow, nodes: nodes as WFNode[], edges: edges as WFEdge[] },
-      imagePath,
-      imageData,
-      currentMeshUrl,
-    )
-  }, [nodes, edges, workflow, selectedImagePath, selectedImageData, allExtensions, setCurrentJob, run])
+    const wf: Workflow = { ...workflow, nodes: nodes as WFNode[], edges: edges as WFEdge[] }
+    run(wf, allExtensions)
+  }, [nodes, edges, workflow, allExtensions, run])
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
@@ -495,7 +508,7 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
           </div>
         )}
         {isRunning ? (
-          <button onClick={() => { cancel(); setCurrentJob(null) }}
+          <button onClick={() => cancel()}
             className="w-full py-2.5 rounded-lg text-sm font-semibold bg-red-600 hover:bg-red-700 text-white transition-colors">
             Stop
           </button>

@@ -25,6 +25,55 @@ const TAG_CLS: Record<string, string> = {
 
 const inputCls = 'w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1 text-[11px] text-zinc-200 focus:outline-none focus:border-accent/60'
 
+function IntInput({ value, onChange, className }: { value: number; onChange: (v: number) => void; className: string }) {
+  const [text, setText] = useState(String(value))
+  const prevValue = useRef(value)
+  if (prevValue.current !== value && parseInt(text, 10) !== value) {
+    prevValue.current = value
+    setText(String(value))
+  }
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      value={text}
+      onChange={(e) => {
+        const raw = e.target.value
+        if (raw !== '' && raw !== '-' && !/^-?\d+$/.test(raw)) return
+        setText(raw)
+        const n = parseInt(raw, 10)
+        if (!isNaN(n)) { prevValue.current = n; onChange(n) }
+      }}
+      className={className}
+    />
+  )
+}
+
+function FloatInput({ value, onChange, className }: { value: number; onChange: (v: number) => void; className: string }) {
+  const [text, setText] = useState(String(value))
+  // Sync when external value changes (e.g. reset)
+  const prevValue = useRef(value)
+  if (prevValue.current !== value && parseFloat(text.replace(',', '.')) !== value) {
+    prevValue.current = value
+    setText(String(value))
+  }
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={text}
+      onChange={(e) => {
+        const raw = e.target.value.replace(',', '.')
+        if (raw !== '' && raw !== '-' && raw !== '.' && !/^-?\d*\.?\d*$/.test(raw)) return
+        setText(e.target.value)
+        const num = parseFloat(raw)
+        if (!isNaN(num)) { prevValue.current = num; onChange(num) }
+      }}
+      className={className}
+    />
+  )
+}
+
 function ParamControl({ param, value, onChange }: {
   param:    ParamSchema
   value:    number | string
@@ -58,12 +107,11 @@ function ParamControl({ param, value, onChange }: {
       </div>
     )
   }
-  return (
-    <input type="number" lang="en" value={value as number} min={param.min} max={param.max}
-      step={param.step ?? (param.type === 'float' ? 0.1 : 1)}
-      onChange={(e) => onChange(param.type === 'float' ? parseFloat(e.target.value) : parseInt(e.target.value, 10))}
-      className={inputCls} />
-  )
+  if (param.type === 'float') {
+    return <FloatInput value={value as number} onChange={(v) => onChange(v)} className={inputCls} />
+  }
+  // int
+  return <IntInput value={value as number} onChange={(v) => onChange(v)} className={inputCls} />
 }
 
 // ─── ExtensionNode ────────────────────────────────────────────────────────────

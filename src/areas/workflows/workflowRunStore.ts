@@ -76,6 +76,11 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
     const ordered      = topoSort(workflow.nodes, workflow.edges)
     const execNodes    = ordered.filter((n) => n.type === 'extensionNode' && n.data.enabled)
 
+    // Capture before setCurrentJob overwrites currentJob
+    const selectedImagePath = appState.selectedImagePath ?? ''
+    const selectedImageData = appState.selectedImageData ?? undefined
+    const currentMeshUrl    = appState.currentJob?.outputUrl
+
     set({
       activeWorkflowId: workflow.id,
       runState: { status: 'running', blockIndex: 0, blockTotal: execNodes.length, blockProgress: 0, blockStep: 'Starting…' },
@@ -83,7 +88,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
 
     appState.setCurrentJob({
       id: crypto.randomUUID(),
-      imageFile: '',
+      imageFile: selectedImagePath,
       status: 'generating',
       progress: 0,
       createdAt: Date.now(),
@@ -94,10 +99,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
       const settings     = await window.electron.settings.get()
       const workspaceDir = settings.workspaceDir.replace(/\\/g, '/')
 
-      const nodeOutputs       = new Map<string, { filePath?: string; text?: string }>()
-      const selectedImagePath = useAppStore.getState().selectedImagePath ?? ''
-      const selectedImageData = useAppStore.getState().selectedImageData ?? undefined
-      const currentMeshUrl    = useAppStore.getState().currentJob?.outputUrl
+      const nodeOutputs = new Map<string, { filePath?: string; text?: string }>()
 
       // Pre-populate source nodes
       for (const node of ordered) {
