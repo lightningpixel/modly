@@ -9,6 +9,11 @@ contextBridge.exposeInMainWorld('electron', {
     close:    () => ipcRenderer.send('window:close')
   },
 
+  // Shell utilities
+  shell: {
+    openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
+  },
+
   // Python / FastAPI bridge
   python: {
     start:     (): Promise<{ success: boolean; port?: number; error?: string }> =>
@@ -29,25 +34,31 @@ contextBridge.exposeInMainWorld('electron', {
   fs: {
     selectImage:       (): Promise<string | null> =>
       ipcRenderer.invoke('fs:selectImage'),
+    selectMeshFile:    (): Promise<string | null> =>
+      ipcRenderer.invoke('fs:selectMeshFile'),
     saveModel:         (defaultName: string): Promise<string | null> =>
       ipcRenderer.invoke('fs:saveModel', defaultName),
     readFileBase64:    (filePath: string): Promise<string> =>
       ipcRenderer.invoke('fs:readFileBase64', filePath),
     selectDirectory:   (): Promise<string | null> =>
       ipcRenderer.invoke('fs:selectDirectory'),
+    savePath:          (args: { filters: { name: string; extensions: string[] }[]; defaultPath?: string }): Promise<string | null> =>
+      ipcRenderer.invoke('fs:savePath', args),
     listDir:           (dirPath: string): Promise<string[]> =>
       ipcRenderer.invoke('fs:listDir', dirPath),
     moveDirectory:     (args: { src: string; dest: string }): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('fs:moveDirectory', args),
     deleteDirectory:   (dirPath: string): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('fs:deleteDirectory', dirPath),
+    readScreenshotDataUrl: (filename: string): Promise<string> =>
+      ipcRenderer.invoke('fs:readScreenshotDataUrl', filename),
   },
 
   // Settings
   settings: {
-    get: (): Promise<{ modelsDir: string; workspaceDir: string; extensionsDir: string }> =>
+    get: (): Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string }> =>
       ipcRenderer.invoke('settings:get'),
-    set: (patch: { modelsDir?: string; workspaceDir?: string; extensionsDir?: string }): Promise<{ modelsDir: string; workspaceDir: string; extensionsDir: string }> =>
+    set: (patch: { modelsDir?: string; workspaceDir?: string; workflowsDir?: string; extensionsDir?: string }): Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string }> =>
       ipcRenderer.invoke('settings:set', patch),
   },
 
@@ -116,31 +127,33 @@ contextBridge.exposeInMainWorld('electron', {
 
   // Extensions
   extensions: {
-    list: (): Promise<Array<{
-      id: string; name: string; version?: string
-      description?: string; author?: string
-      trusted: boolean
-      models: { id: string; name: string; repoId: string; description?: string }[]
-    }>> => ipcRenderer.invoke('extensions:list'),
+    list: (): Promise<unknown[]> =>
+      ipcRenderer.invoke('extensions:list'),
 
     installFromGitHub: (url: string): Promise<{
       success: boolean; error?: string
       extensionId?: string
-      extension?: {
-        id: string; name: string; version?: string; description?: string
-        author?: string; trusted: boolean
-        models: { id: string; name: string; repoId: string; description?: string }[]
-      }
+      extension?: unknown
     }> => ipcRenderer.invoke('extensions:installFromGitHub', url),
 
     uninstall: (extensionId: string): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('extensions:uninstall', extensionId),
 
+    repair: (extensionId: string): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke('extensions:repair', extensionId),
+
     reload: (): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('extensions:reload'),
 
+    runProcess: (
+      extensionId: string,
+      input:       { filePath?: string; text?: string; nodeId?: string },
+      params:      Record<string, unknown>,
+    ): Promise<{ success: boolean; result?: { filePath?: string; text?: string }; error?: string }> =>
+      ipcRenderer.invoke('extensions:runProcess', extensionId, input, params),
+
     onInstallProgress: (cb: (data: {
-      step: 'downloading' | 'extracting' | 'validating' | 'done' | 'error'
+      step: 'downloading' | 'extracting' | 'validating' | 'setting_up' | 'done' | 'error'
       percent?: number
       extensionId?: string
       message?: string
@@ -150,16 +163,25 @@ contextBridge.exposeInMainWorld('electron', {
     offInstallProgress: () => ipcRenderer.removeAllListeners('extensions:installProgress'),
   },
 
+  // Workflows
+  workflows: {
+    list:   ():                                              Promise<unknown[]>                            => ipcRenderer.invoke('workflows:list'),
+    save:   (workflow: { id: string; [key: string]: unknown }): Promise<{ success: boolean; error?: string }> => ipcRenderer.invoke('workflows:save', workflow),
+    delete: (id: string):                                   Promise<{ success: boolean; error?: string }> => ipcRenderer.invoke('workflows:delete', id),
+    import: ():                                             Promise<{ success: boolean; error?: string; workflow?: unknown }> => ipcRenderer.invoke('workflows:import'),
+    export: (workflow: { id: string; name?: string; [key: string]: unknown }): Promise<{ success: boolean; error?: string }> => ipcRenderer.invoke('workflows:export', workflow),
+  },
+
   // Auto-updater
   updater: {
     check: (): Promise<{ success: boolean }> =>
       ipcRenderer.invoke('updater:check'),
     quitAndInstall: (): Promise<void> =>
       ipcRenderer.invoke('updater:quitAndInstall'),
-    onPatchReady: (cb: (data: { version: string }) => void) => {
-      ipcRenderer.on('updater:patch-ready', (_event, data) => cb(data))
+    onApplying: (cb: (data: { version: string }) => void) => {
+      ipcRenderer.on('updater:applying', (_event, data) => cb(data))
     },
-    offPatchReady: () => ipcRenderer.removeAllListeners('updater:patch-ready'),
+    offApplying: () => ipcRenderer.removeAllListeners('updater:applying'),
     onMajorMinorAvailable: (cb: (data: { version: string }) => void) => {
       ipcRenderer.on('updater:major-minor-available', (_event, data) => cb(data))
     },

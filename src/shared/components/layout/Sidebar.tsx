@@ -1,5 +1,4 @@
 import { useNavStore, type Page } from '@shared/stores/navStore'
-import { useCollectionsStore } from '@shared/stores/collectionsStore'
 
 const NAV_ITEMS: { id: Page; label: string; icon: JSX.Element }[] = [
   {
@@ -12,23 +11,26 @@ const NAV_ITEMS: { id: Page; label: string; icon: JSX.Element }[] = [
     )
   },
   {
-    id: 'models',
-    label: 'Models',
+    id: 'workflows',
+    label: 'Workflows',
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+        <rect x="3" y="3" width="6" height="5" rx="1" />
+        <rect x="3" y="11" width="6" height="5" rx="1" />
+        <rect x="3" y="19" width="6" height="2" rx="1" />
+        <path d="M9 5.5h3.5a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H9" />
+        <rect x="13.5" y="3" width="7.5" height="16" rx="1" />
       </svg>
     )
   },
   {
-    id: 'workspace',
-    label: 'Workspace',
+    id: 'models',
+    label: 'Extensions',
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-        <rect x="3" y="3" width="7" height="7" rx="1" />
-        <rect x="14" y="3" width="7" height="7" rx="1" />
-        <rect x="3" y="14" width="7" height="7" rx="1" />
-        <rect x="14" y="14" width="7" height="7" rx="1" />
+        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+        <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+        <line x1="12" y1="22.08" x2="12" y2="12" />
       </svg>
     )
   },
@@ -46,15 +48,11 @@ const NAV_ITEMS: { id: Page; label: string; icon: JSX.Element }[] = [
 
 export default function Sidebar(): JSX.Element {
   const { currentPage, navigate } = useNavStore()
-  const workspaceCount = useCollectionsStore((s) =>
-    s.collections.find((c) => c.id === s.activeCollectionId)?.jobs.length ?? 0
-  )
 
   return (
     <aside className="flex flex-col w-14 bg-surface-500 border-r border-zinc-800 py-2">
       {NAV_ITEMS.map((item) => {
         const active = currentPage === item.id
-        const badge = item.id === 'workspace' && workspaceCount > 0 ? workspaceCount : null
         return (
           <button
             key={item.id}
@@ -70,11 +68,6 @@ export default function Sidebar(): JSX.Element {
           >
             {item.icon}
             {item.label}
-            {badge !== null && (
-              <span className="absolute top-1 right-1 min-w-[14px] h-[14px] px-0.5 rounded-full bg-accent text-white text-[8px] font-bold flex items-center justify-center leading-none">
-                {badge > 99 ? '99+' : badge}
-              </span>
-            )}
           </button>
         )
       })}

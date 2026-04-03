@@ -16,5 +16,9 @@
       "@styles/*":     ["./src/styles/*"]
     }
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*"],
+  "exclude": [
+    "src/areas/workflows/nodes/mesh-exporter",
+    "src/areas/workflows/nodes/mesh-optimizer"
+  ]
 }

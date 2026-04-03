@@ -7,7 +7,6 @@ To add a new model: create a folder in extensions/ with
   - generator.py   (class extending BaseGenerator)
 No other file needs to be modified.
 """
-import base64
 import importlib.util
 import json
 import os
@@ -16,50 +15,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from services.generators.base import BaseGenerator
-
-# ------------------------------------------------------------------ #
-# Signature verification
-# ------------------------------------------------------------------ #
-
-_PUBLIC_KEY_PATH = Path(__file__).parent.parent / "resources" / "public_key.pem"
-
-
-def _verify_signature(generator_path: Path, manifest: dict) -> tuple:
-    """
-    Verifies the signature of a generator.py file against the manifest.
-
-    Returns (is_verified: bool, status: str) where status is one of:
-      "verified"  — signature present and valid
-      "unsigned"  — no signature in manifest (third-party extension)
-      "invalid"   — signature present but verification failed (tampered file)
-      "error"     — verification could not be performed
-    """
-    signature_b64 = manifest.get("signature")
-
-    if not signature_b64:
-        return False, "unsigned"
-
-    if not _PUBLIC_KEY_PATH.exists():
-        print(f"[Registry] WARNING: public_key.pem not found at {_PUBLIC_KEY_PATH}, skipping verification")
-        return False, "error"
-
-    try:
-        from cryptography.exceptions import InvalidSignature
-        from cryptography.hazmat.primitives.serialization import load_pem_public_key
-
-        public_key        = load_pem_public_key(_PUBLIC_KEY_PATH.read_bytes())
-        signature         = base64.b64decode(signature_b64)
-        generator_content = generator_path.read_bytes().replace(b"\r\n", b"\n")
-
-        try:
-            public_key.verify(signature, generator_content)
-            return True, "verified"
-        except InvalidSignature:
-            return False, "invalid"
-
-    except Exception as exc:
-        print(f"[Registry] WARNING: Signature verification error: {exc}")
-        return False, "error"
+from services.extension_process import ExtensionProcess, _venv_python
 
 # ------------------------------------------------------------------ #
 # Global paths
@@ -90,7 +46,8 @@ def _discover_extensions() -> Dict[str, Tuple[type, dict]]:
     """
     Scans EXTENSIONS_DIR to find valid extensions.
     Each extension must have manifest.json + generator.py.
-    Returns {model_id: (GeneratorClass, manifest_dict)}.
+    Returns {full_id: (GeneratorClass, node_manifest, ext_dir)}
+    where full_id is "ext_id/node_id".
     """
     result: Dict[str, Tuple[type, dict]] = {}
 
@@ -117,53 +74,61 @@ def _discover_extensions() -> Dict[str, Tuple[type, dict]]:
             ext_id     = manifest["id"]
             class_name = manifest["generator_class"]
 
-            # Verify signature before loading
-            is_verified, sig_status = _verify_signature(generator_path, manifest)
-            manifest["_verified"]   = is_verified
-            manifest["_sig_status"] = sig_status
+            nodes = [n for n in manifest.get("nodes", []) if n.get("id")]
 
-            if sig_status == "invalid":
-                print(
-                    f"[Registry] SECURITY: Extension '{ext_dir.name}' has an INVALID signature. "
-                    "The generator.py may have been tampered with. Skipping."
-                )
-                continue
-            elif sig_status == "unsigned":
-                print(
-                    f"[Registry] WARNING: Extension '{ext_dir.name}' is unsigned "
-                    "(unverified third-party extension). Loading with caution."
-                )
-            elif sig_status == "verified":
-                print(f"[Registry] OK: Extension '{ext_dir.name}' signature verified.")
+            # --- Subprocess mode (new): venv present → use ExtensionProcess ---
+            # Also force subprocess mode for extensions that ship a build_vendor.py
+            # but whose vendor/ directory hasn't been built yet: this surfaces a
+            # loadError in the UI (Repair button) so the user can run setup.py.
+            has_venv         = _venv_python(ext_dir).exists()
+            has_build_vendor = (ext_dir / "build_vendor.py").exists()
+            vendor_built     = (ext_dir / "vendor").exists()
+            subprocess_mode  = has_venv or (has_build_vendor and not vendor_built)
 
-            # Dynamically load the generator.py module
-            module_name = f"extensions.{ext_id}.generator"
-            spec   = importlib.util.spec_from_file_location(module_name, generator_path)
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = module
-            spec.loader.exec_module(module)
+            cls_or_None = None
+            if not subprocess_mode:
+                # --- Direct mode (legacy): no venv → load generator.py directly ---
+                module_name = f"extensions.{ext_id}.generator"
+                spec   = importlib.util.spec_from_file_location(module_name, generator_path)
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                spec.loader.exec_module(module)
+                cls_or_None = getattr(module, class_name)
 
-            cls = getattr(module, class_name)
-
-            # Multi-variant: register one generator per variant if manifest.models[] is present
-            variants = [v for v in manifest.get("models", []) if v.get("id") and v.get("hf_repo")]
-            if variants:
-                for variant in variants:
-                    variant_manifest = {
+            if nodes:
+                for node in nodes:
+                    node_manifest = {
                         **manifest,
-                        "id":      variant["id"],
-                        "name":    variant.get("name", variant["id"]),
-                        "hf_repo": variant["hf_repo"],
+                        "id":               f"{ext_id}/{node['id']}",
+                        "ext_id":           ext_id,
+                        "node_id":          node["id"],
+                        "name":             node.get("name", node["id"]),
+                        "hf_repo":          node.get("hf_repo", ""),
+                        "download_check":   node.get("download_check", ""),
+                        "hf_skip_prefixes": node.get("hf_skip_prefixes", []),
+                        "params_schema":    node.get("params_schema", []),
+                        "input":            node.get("input", "image"),
+                        "output":           node.get("output", "mesh"),
                     }
-                    # Per-variant fields override the top-level ones if present
-                    for field in ("hf_skip_prefixes", "download_check"):
-                        if field in variant:
-                            variant_manifest[field] = variant[field]
-                    result[variant["id"]] = (cls, variant_manifest)
-                    print(f"[Registry] Loaded extension variant: {variant['id']} (from '{ext_id}')")
+                    full_id = f"{ext_id}/{node['id']}"
+                    result[full_id] = (cls_or_None, node_manifest, ext_dir)
+                    if subprocess_mode:
+                        if has_venv:
+                            print(f"[Registry] Loaded subprocess node: {full_id}")
+                        else:
+                            print(f"[Registry] Node '{full_id}' needs setup (venv missing)")
+                    else:
+                        print(f"[Registry] Loaded node: {full_id} ({class_name})")
             else:
-                result[ext_id] = (cls, manifest)
-                print(f"[Registry] Loaded extension: {ext_id} ({class_name})")
+                # No nodes defined — register by ext_id as fallback
+                result[ext_id] = (cls_or_None, manifest, ext_dir)
+                if subprocess_mode:
+                    if has_venv:
+                        print(f"[Registry] Loaded subprocess extension: {ext_id}")
+                    else:
+                        print(f"[Registry] Extension '{ext_id}' needs setup (venv missing)")
+                else:
+                    print(f"[Registry] Loaded extension: {ext_id} ({class_name})")
 
         except Exception as exc:
             print(f"[Registry] ERROR loading extension '{ext_dir.name}': {exc}")
@@ -186,17 +151,30 @@ class GeneratorRegistry:
         """Discovers and instantiates all extensions. Call at startup."""
         extensions = _discover_extensions()
 
-        for model_id, (cls, manifest) in extensions.items():
+        for model_id, entry in extensions.items():
+            cls, manifest, ext_dir = entry
             try:
-                gen = cls(MODELS_DIR / model_id, WORKSPACE_DIR)
-                # Inject manifest fields onto the generator
-                gen.hf_repo          = manifest.get("hf_repo", "")
-                gen.hf_skip_prefixes = manifest.get("hf_skip_prefixes", [])
-                gen.download_check   = manifest.get("download_check", "")
-                gen._params_schema   = manifest.get("params_schema", [])
+                if cls is None:
+                    # Subprocess mode: venv must exist
+                    if not _venv_python(ext_dir).exists():
+                        raise RuntimeError(
+                            "venv not found — extension needs setup. "
+                            "Click 'Repair' on the Models page to run setup.py."
+                        )
+                    # Subprocess mode: wrap in ExtensionProcess
+                    gen = ExtensionProcess(ext_dir, manifest)
+                    gen.model_dir   = MODELS_DIR / model_id
+                    gen.outputs_dir = WORKSPACE_DIR
+                else:
+                    # Legacy direct mode
+                    gen = cls(MODELS_DIR / model_id, WORKSPACE_DIR)
+                    gen.hf_repo          = manifest.get("hf_repo", "")
+                    gen.hf_skip_prefixes = manifest.get("hf_skip_prefixes", [])
+                    gen.download_check   = manifest.get("download_check", "")
+                    gen._params_schema   = manifest.get("params_schema", [])
+
                 self._generators[model_id] = gen
                 self._manifests[model_id]  = manifest
-                # Clear any previous error for this extension
                 self._errors.pop(model_id, None)
             except Exception as exc:
                 msg = f"Failed to instantiate generator '{model_id}': {exc}"
@@ -248,6 +226,11 @@ class GeneratorRegistry:
         gen = self._generators[self._active_id]
         if not gen.is_loaded():
             if not gen.is_downloaded():
+                if isinstance(gen, ExtensionProcess):
+                    raise RuntimeError(
+                        f"Model '{self._active_id}' is not downloaded. "
+                        "Please install it from the Models page first."
+                    )
                 gen._auto_download()
             gen.load()
         return gen
@@ -307,8 +290,6 @@ class GeneratorRegistry:
                 "downloaded":  gen.is_downloaded(),
                 "loaded":      gen.is_loaded(),
                 "active":      model_id == self._active_id,
-                "verified":    manifest.get("_verified", False),
-                "sig_status":  manifest.get("_sig_status", "unsigned"),
             })
         return result
 
@@ -341,7 +322,10 @@ class GeneratorRegistry:
 
     def unload_all(self) -> None:
         for gen in self._generators.values():
-            gen.unload()
+            if isinstance(gen, ExtensionProcess):
+                gen.stop()
+            else:
+                gen.unload()
 
 
 # Singleton

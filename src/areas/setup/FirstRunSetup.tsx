@@ -170,6 +170,28 @@ function StartingPanel(): JSX.Element {
   )
 }
 
+function ApplyingUpdatePanel({ version }: { version: string }): JSX.Element {
+  return (
+    <div className="w-80 bg-surface-300 rounded-xl p-6">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-8 h-8 rounded-lg bg-accent/15 border border-accent/25 flex items-center justify-center shrink-0">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-accent-light">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+        </div>
+        <div>
+          <p className="text-sm font-medium text-zinc-100">Applying update {version}</p>
+          <p className="text-xs text-zinc-500 mt-0.5">The app will restart automatically</p>
+        </div>
+      </div>
+      <div className="h-1 bg-zinc-800 rounded-full overflow-hidden">
+        <div className="h-full bg-accent rounded-full animate-pulse" style={{ width: '70%' }} />
+      </div>
+    </div>
+  )
+}
+
 function ErrorPanel({ message }: { message: string | null }): JSX.Element {
   return (
     <div className="w-80 bg-surface-300 rounded-xl p-6">
@@ -190,8 +212,15 @@ function ErrorPanel({ message }: { message: string | null }): JSX.Element {
 export default function FirstRunSetup(): JSX.Element {
   const { setupStatus, setupProgress, setupError, saveDataDir, defaultDataDir, backendStatus, backendError } =
     useAppStore()
+  const [applyingVersion, setApplyingVersion] = useState<string | null>(null)
+
+  useEffect(() => {
+    window.electron.updater.onApplying(({ version }) => setApplyingVersion(`v${version}`))
+    return () => { window.electron.updater.offApplying() }
+  }, [])
 
   const renderPanel = () => {
+    if (applyingVersion) return <ApplyingUpdatePanel version={applyingVersion} />
     switch (setupStatus) {
       case 'idle':
       case 'checking':

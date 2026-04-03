@@ -1,0 +1,39 @@
+{
+  "id": "mesh-exporter",
+  "name": "Mesh Exporter",
+  "type": "process",
+  "entry": "processor.js",
+  "version": "1.0.0",
+  "author": "Modly",
+  "description": "Exports the mesh to a chosen format (GLB, STL, OBJ, PLY) at a specified output path.",
+  "nodes": [
+    {
+      "id": "export",
+      "name": "Export Mesh",
+      "input": "mesh",
+      "output": "mesh",
+      "params_schema": [
+        {
+          "id": "export_format",
+          "label": "Export Format",
+          "type": "select",
+          "default": "glb",
+          "options": [
+            { "value": "glb", "label": "GLB (Binary glTF)" },
+            { "value": "stl", "label": "STL (3D printing)" },
+            { "value": "obj", "label": "OBJ (Wavefront)" },
+            { "value": "ply", "label": "PLY (Polygon)" }
+          ],
+          "tooltip": "Output file format."
+        },
+        {
+          "id": "output_path",
+          "label": "Output Path",
+          "type": "string",
+          "default": "",
+          "tooltip": "Destination folder. Leave empty to save in the workspace Exports folder."
+        }
+      ]
+    }
+  ]
+}

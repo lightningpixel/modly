@@ -1,9 +1,112 @@
 // Type declarations for the Electron API exposed via preload
 export {}
 
+// ─── Extension types ──────────────────────────────────────────────────────────
+
+export interface ExtensionNode {
+  id:               string
+  name:             string
+  input:            'image' | 'text' | 'mesh'
+  output:           'image' | 'text' | 'mesh'
+  paramsSchema:     ParamSchema[]
+  hfRepo?:          string
+  downloadCheck?:   string
+  hfSkipPrefixes?:  string[]
+}
+
+export interface ModelExtension {
+  type:         'model'
+  id:           string
+  name:         string
+  version?:     string
+  description?: string
+  author?:      string
+  trusted:      boolean
+  builtin:      boolean
+  source?:      string
+  nodes:        ExtensionNode[]
+}
+
+export interface ParamSchema {
+  id:       string
+  label:    string
+  type:     'select' | 'int' | 'float' | 'string'
+  default:  number | string
+  options?: { value: number | string; label: string }[]
+  min?:     number
+  max?:     number
+  step?:    number
+  tooltip?: string
+}
+
+export interface ProcessExtension {
+  type:         'process'
+  id:           string
+  name:         string
+  version?:     string
+  description?: string
+  author?:      string
+  trusted:      boolean
+  builtin:      boolean
+  source?:      string
+  entry:        string
+  nodes:        ExtensionNode[]
+}
+
+export type AnyExtension = ModelExtension | ProcessExtension
+
+// ─── Process runner types ─────────────────────────────────────────────────────
+
+export interface ProcessInput {
+  filePath?: string
+  text?:     string
+  nodeId?:   string
+}
+
+export interface ProcessResult {
+  filePath?: string
+  text?:     string
+}
+
+export interface WFNodeData {
+  extensionId?:    string
+  inputType?:      'image' | 'text'
+  enabled:         boolean
+  showInGenerate?: boolean
+  params:          Record<string, unknown>
+}
+
+export interface WFNode {
+  id:       string
+  type:     string
+  position: { x: number; y: number }
+  data:     WFNodeData
+}
+
+export interface WFEdge {
+  id:            string
+  source:        string
+  target:        string
+  sourceHandle?: string | null
+  targetHandle?: string | null
+}
+
+export interface Workflow {
+  id:          string
+  name:        string
+  description: string
+  nodes:       WFNode[]
+  edges:       WFEdge[]
+  createdAt:   string
+  updatedAt:   string
+}
+
 declare global {
   interface Window {
     electron: {
+      shell: {
+        openExternal: (url: string) => Promise<void>
+      }
       window: {
         minimize: () => void
         maximize: () => void
@@ -19,16 +122,19 @@ declare global {
       }
       fs: {
         selectImage:     () => Promise<string | null>
+        selectMeshFile:  () => Promise<string | null>
         saveModel:       (defaultName: string) => Promise<string | null>
         readFileBase64:  (filePath: string) => Promise<string>
         selectDirectory: () => Promise<string | null>
+        savePath:        (args: { filters: { name: string; extensions: string[] }[]; defaultPath?: string }) => Promise<string | null>
         listDir:         (dirPath: string) => Promise<string[]>
         moveDirectory:   (args: { src: string; dest: string }) => Promise<{ success: boolean; error?: string }>
         deleteDirectory: (dirPath: string) => Promise<{ success: boolean; error?: string }>
+        readScreenshotDataUrl: (filename: string) => Promise<string>
       }
       settings: {
-        get: () => Promise<{ modelsDir: string; workspaceDir: string; extensionsDir: string }>
-        set: (patch: { modelsDir?: string; workspaceDir?: string; extensionsDir?: string }) => Promise<{ modelsDir: string; workspaceDir: string; extensionsDir: string }>
+        get: () => Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string }>
+        set: (patch: { modelsDir?: string; workspaceDir?: string; workflowsDir?: string; extensionsDir?: string }) => Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string }>
       }
       cache: {
         clear: () => Promise<{ success: boolean; error?: string }>
@@ -83,42 +189,35 @@ declare global {
         onError:      (cb: (data: { message: string }) => void) => void
         offError:     () => void
       }
+      workflows: {
+        list:   () => Promise<Workflow[]>
+        save:   (workflow: Workflow) => Promise<{ success: boolean; error?: string }>
+        delete: (id: string)        => Promise<{ success: boolean; error?: string }>
+        import: ()                  => Promise<{ success: boolean; error?: string; workflow?: Workflow }>
+        export: (workflow: Workflow) => Promise<{ success: boolean; error?: string }>
+      }
       updater: {
         check:                 () => Promise<{ success: boolean }>
         quitAndInstall:        () => Promise<void>
-        onPatchReady:          (cb: (data: { version: string }) => void) => void
-        offPatchReady:         () => void
+        onApplying:            (cb: (data: { version: string }) => void) => void
+        offApplying:           () => void
         onMajorMinorAvailable: (cb: (data: { version: string }) => void) => void
         offMajorMinorAvailable: () => void
       }
       extensions: {
-        list: () => Promise<Array<{
-          id:           string
-          name:         string
-          version?:     string
-          description?: string
-          author?:      string
-          trusted:      boolean
-          models:       { id: string; name: string; repoId: string; description?: string }[]
-        }>>
+        list:              () => Promise<AnyExtension[]>
         installFromGitHub: (url: string) => Promise<{
           success:      boolean
           error?:       string
           extensionId?: string
-          extension?: {
-            id:           string
-            name:         string
-            version?:     string
-            description?: string
-            author?:      string
-            trusted:      boolean
-            models:       { id: string; name: string; repoId: string; description?: string }[]
-          }
+          extension?:   AnyExtension
         }>
-        uninstall: (extensionId: string) => Promise<{ success: boolean; error?: string }>
-        reload:    () => Promise<{ success: boolean; error?: string; errors?: Record<string, string> }>
+        uninstall:   (extensionId: string) => Promise<{ success: boolean; error?: string }>
+        repair:      (extensionId: string) => Promise<{ success: boolean; error?: string }>
+        reload:      () => Promise<{ success: boolean; error?: string; errors?: Record<string, string> }>
+        runProcess:  (extensionId: string, input: ProcessInput, params: Record<string, unknown>) => Promise<{ success: boolean; result?: ProcessResult; error?: string }>
         onInstallProgress: (cb: (data: {
-          step:          'downloading' | 'extracting' | 'validating' | 'done' | 'error'
+          step:          'downloading' | 'extracting' | 'validating' | 'setting_up' | 'done' | 'error'
           percent?:      number
           extensionId?:  string
           message?:      string

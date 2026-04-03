@@ -1,0 +1,8 @@
+{
+  "name": "mesh-exporter",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@gltf-transform/core": "^3.9.0"
+  }
+}

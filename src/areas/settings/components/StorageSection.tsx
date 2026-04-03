@@ -72,9 +72,10 @@ function MoveFolderModal({ title, currentDir, items, itemLabel, moveLabel, moveD
 // ─── StorageSection ───────────────────────────────────────────────────────────
 
 export function StorageSection(): JSX.Element {
-  const [modelsDir,    setModelsDir]    = useState('')
-  const [workspaceDir, setWorkspaceDir] = useState('')
-  const [cacheStatus, setCacheStatus]   = useState<'idle' | 'clearing' | 'done' | 'error'>('idle')
+  const [modelsDir,     setModelsDir]     = useState('')
+  const [workspaceDir,  setWorkspaceDir]  = useState('')
+  const [workflowsDir,  setWorkflowsDir]  = useState('')
+  const [cacheStatus, setCacheStatus]     = useState<'idle' | 'clearing' | 'done' | 'error'>('idle')
 
   const [pendingModelsDir,     setPendingModelsDir]     = useState<string | null>(null)
   const [existingModels,       setExistingModels]       = useState<string[]>([])
@@ -84,10 +85,15 @@ export function StorageSection(): JSX.Element {
   const [existingWorkspaces,    setExistingWorkspaces]    = useState<string[]>([])
   const [workspaceActionStatus, setWorkspaceActionStatus] = useState<'idle' | 'busy' | 'error'>('idle')
 
+  const [pendingWorkflowsDir,   setPendingWorkflowsDir]   = useState<string | null>(null)
+  const [existingWorkflows,     setExistingWorkflows]     = useState<string[]>([])
+  const [workflowsActionStatus, setWorkflowsActionStatus] = useState<'idle' | 'busy' | 'error'>('idle')
+
   useEffect(() => {
     window.electron.settings.get().then((s) => {
       setModelsDir(s.modelsDir)
       setWorkspaceDir(s.workspaceDir)
+      setWorkflowsDir(s.workflowsDir)
     })
   }, [])
 
@@ -101,6 +107,11 @@ export function StorageSection(): JSX.Element {
     setWorkspaceDir(path)
     await window.electron.settings.set({ workspaceDir: path })
     await window.electron.api.updatePaths({ workspaceDir: path })
+  }
+
+  async function applyWorkflowsDir(path: string) {
+    setWorkflowsDir(path)
+    await window.electron.settings.set({ workflowsDir: path })
   }
 
   async function handleBrowseModels() {
@@ -129,6 +140,20 @@ export function StorageSection(): JSX.Element {
     }
 
     await applyWorkspaceDir(newPath)
+  }
+
+  async function handleBrowseWorkflows() {
+    const newPath = await window.electron.fs.selectDirectory()
+    if (!newPath || newPath === workflowsDir) return
+
+    const items = await window.electron.fs.listDir(workflowsDir)
+    if (items.length > 0) {
+      setExistingWorkflows(items)
+      setPendingWorkflowsDir(newPath)
+      return
+    }
+
+    await applyWorkflowsDir(newPath)
   }
 
   async function handleMoveModels() {
@@ -191,6 +216,36 @@ export function StorageSection(): JSX.Element {
     setWorkspaceActionStatus('idle')
   }
 
+  async function handleMoveWorkflows() {
+    if (!pendingWorkflowsDir) return
+    setWorkflowsActionStatus('busy')
+    const result = await window.electron.fs.moveDirectory({ src: workflowsDir, dest: pendingWorkflowsDir })
+    if (result.success) {
+      await applyWorkflowsDir(pendingWorkflowsDir)
+      closeWorkflowsModal()
+    } else {
+      setWorkflowsActionStatus('error')
+    }
+  }
+
+  async function handleDeleteWorkflows() {
+    if (!pendingWorkflowsDir) return
+    setWorkflowsActionStatus('busy')
+    const result = await window.electron.fs.deleteDirectory(workflowsDir)
+    if (result.success) {
+      await applyWorkflowsDir(pendingWorkflowsDir)
+      closeWorkflowsModal()
+    } else {
+      setWorkflowsActionStatus('error')
+    }
+  }
+
+  function closeWorkflowsModal() {
+    setPendingWorkflowsDir(null)
+    setExistingWorkflows([])
+    setWorkflowsActionStatus('idle')
+  }
+
   async function handleClearCache() {
     setCacheStatus('clearing')
     const result = await window.electron.cache.clear()
@@ -215,6 +270,12 @@ export function StorageSection(): JSX.Element {
             description="Where generated 3D files are saved."
             value={workspaceDir}
             onBrowse={handleBrowseWorkspace}
+          />
+          <PathRow
+            label="Workflows"
+            description="Where workflow definitions are saved."
+            value={workflowsDir}
+            onBrowse={handleBrowseWorkflows}
           />
         </Card>
 
@@ -270,6 +331,23 @@ export function StorageSection(): JSX.Element {
           onCancel={closeWorkspaceModal}
           onMove={handleMoveWorkspace}
           onDelete={handleDeleteWorkspace}
+        />
+      )}
+
+      {pendingWorkflowsDir && (
+        <MoveFolderModal
+          title="Change workflows folder"
+          currentDir={workflowsDir}
+          items={existingWorkflows}
+          itemLabel="workflow"
+          moveLabel="Move to new folder"
+          moveDesc="Transfer all workflow files to the new location."
+          deleteLabel="Delete workflows"
+          deleteDesc="Remove all workflow files from the current folder."
+          status={workflowsActionStatus}
+          onCancel={closeWorkflowsModal}
+          onMove={handleMoveWorkflows}
+          onDelete={handleDeleteWorkflows}
         />
       )}
     </Section>

@@ -1,11 +1,16 @@
-import { Component, Suspense, useEffect, useRef, useState } from 'react'
+import { Component, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode, ErrorInfo } from 'react'
 import { Canvas, useThree } from '@react-three/fiber'
-import { OrbitControls, useGLTF } from '@react-three/drei'
+import { GizmoHelper, OrbitControls, useGizmoContext, useGLTF } from '@react-three/drei'
 import * as THREE from 'three'
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh'
+
+// Patch THREE pour utiliser BVH sur tous les meshes — réduit le raycast O(N) → O(log N)
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree as any
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree as any
+THREE.Mesh.prototype.raycast = acceleratedRaycast
 import { useGeneration } from '@shared/hooks/useGeneration'
 import { useAppStore } from '@shared/stores/appStore'
-import { useCollectionsStore } from '@shared/stores/collectionsStore'
 import { ViewerToolbar, type ViewMode } from './ViewerToolbar'
 
 // ---------------------------------------------------------------------------
@@ -118,12 +123,11 @@ interface MeshModelProps {
   jobId: string
   viewMode: ViewMode
   onStats: (stats: { vertices: number; triangles: number }) => void
+  onSelect: () => void
 }
 
-function MeshModel({ url, jobId, viewMode, onStats }: MeshModelProps): JSX.Element {
+function MeshModel({ url, jobId, viewMode, onStats, onSelect }: MeshModelProps): JSX.Element {
   const { scene } = useGLTF(url)
-  const { gl } = useThree()
-  const updateWorkspaceItem = useCollectionsStore((s) => s.updateWorkspaceItem)
   const captured = useRef(false)
   const edgeHelpers = useRef<THREE.LineSegments[]>([])
 
@@ -138,9 +142,24 @@ function MeshModel({ url, jobId, viewMode, onStats }: MeshModelProps): JSX.Eleme
           materials.forEach((m: THREE.Material) => m.dispose())
         }
       })
-      gl.renderLists.dispose()
     }
   }, [url])
+
+  // Compute BVH on all geometries for fast raycasting (O(log N) vs O(N))
+  useEffect(() => {
+    scene.traverse((child) => {
+      if (child instanceof THREE.Mesh) {
+        (child.geometry as any).computeBoundsTree()
+      }
+    })
+    return () => {
+      scene.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          (child.geometry as any).disposeBoundsTree?.()
+        }
+      })
+    }
+  }, [scene])
 
   // Centre the mesh on the grid
   useEffect(() => {
@@ -165,26 +184,11 @@ function MeshModel({ url, jobId, viewMode, onStats }: MeshModelProps): JSX.Eleme
     })
     const roundedTriangles = Math.round(triangles)
     onStats({ vertices: Math.round(vertices), triangles: roundedTriangles })
-
-    // Store originalTriangles only once (before any optimization)
-    const existingJob = useCollectionsStore.getState().collections
-      .flatMap((c) => c.jobs)
-      .find((j) => j.id === jobId)
-    if (!existingJob?.originalTriangles) {
-      updateWorkspaceItem(jobId, { originalTriangles: roundedTriangles })
-    }
   }, [scene])
 
-  // Thumbnail capture
+  // Thumbnail capture (kept for future use)
   useEffect(() => {
-    if (captured.current) return
-    captured.current = true
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        const thumbnail = gl.domElement.toDataURL('image/jpeg', 0.85)
-        updateWorkspaceItem(jobId, { thumbnailUrl: thumbnail })
-      })
-    })
+    captured.current = false
   }, [url])
 
   // Material swapping based on viewMode
@@ -226,7 +230,86 @@ function MeshModel({ url, jobId, viewMode, onStats }: MeshModelProps): JSX.Eleme
     })
   }, [scene, viewMode])
 
-  return <primitive object={scene} />
+  return (
+    <primitive
+      object={scene}
+      onClick={(e: { stopPropagation: () => void }) => { e.stopPropagation(); onSelect() }}
+    />
+  )
+
+}
+
+// ---------------------------------------------------------------------------
+// Orientation gizmo — coloured bubbles only (X/Y/Z)
+// ---------------------------------------------------------------------------
+
+function makeAxisLabelTexture(letter: string, bg: string): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = 64
+  const ctx = canvas.getContext('2d')!
+  ctx.beginPath()
+  ctx.arc(32, 32, 16, 0, 2 * Math.PI)
+  ctx.closePath()
+  ctx.fillStyle = bg
+  ctx.fill()
+  ctx.font = '18px Arial, sans-serif'
+  ctx.textAlign = 'center'
+  ctx.fillStyle = '#ffffff'
+  ctx.fillText(letter, 32, 41)
+  return new THREE.CanvasTexture(canvas)
+}
+
+const GIZMO_AXES: {
+  letter: string
+  color: string
+  pos: [number, number, number]
+  lineRotation: [number, number, number]
+}[] = [
+  { letter: 'X', color: '#f87171', pos: [1, 0, 0], lineRotation: [0, 0, 0] },
+  { letter: 'Y', color: '#4ade80', pos: [0, 1, 0], lineRotation: [0, 0, Math.PI / 2] },
+  { letter: 'Z', color: '#60a5fa', pos: [0, 0, 1], lineRotation: [0, -Math.PI / 2, 0] },
+]
+
+function AxisLine({ color, rotation }: { color: string; rotation: [number, number, number] }) {
+  return (
+    <group rotation={rotation}>
+      <mesh position={[0.4, 0, 0]}>
+        <boxGeometry args={[0.8, 0.05, 0.05]} />
+        <meshBasicMaterial color={color} toneMapped={false} />
+      </mesh>
+    </group>
+  )
+}
+
+function AxisBubble({ letter, color, pos }: { letter: string; color: string; pos: [number, number, number] }) {
+  const { tweenCamera } = useGizmoContext()
+  const texture = useMemo(() => makeAxisLabelTexture(letter, color), [letter, color])
+  const [hovered, setHovered] = useState(false)
+
+  return (
+    <sprite
+      position={pos}
+      scale={hovered ? 1.2 : 1}
+      onPointerDown={(e) => { tweenCamera(e.object.position); e.stopPropagation() }}
+      onPointerOver={(e) => { e.stopPropagation(); setHovered(true) }}
+      onPointerOut={() => setHovered(false)}
+    >
+      <spriteMaterial map={texture} alphaTest={0.3} toneMapped={false} />
+    </sprite>
+  )
+}
+
+function GizmoBubbles() {
+  return (
+    <group scale={40}>
+      {GIZMO_AXES.map((axis) => (
+        <AxisLine key={`line-${axis.letter}`} color={axis.color} rotation={axis.lineRotation} />
+      ))}
+      {GIZMO_AXES.map((axis) => (
+        <AxisBubble key={axis.letter} {...axis} />
+      ))}
+    </group>
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -254,9 +337,11 @@ export default function Viewer3D(): JSX.Element {
 
   const setStoreMeshStats = useAppStore((s) => s.setMeshStats)
   const meshStats = useAppStore((s) => s.meshStats)
+  const setCurrentJob = useAppStore((s) => s.setCurrentJob)
 
   const [viewMode, setViewMode] = useState<ViewMode>('solid')
   const [autoRotate, setAutoRotate] = useState(false)
+  const [selected, setSelected] = useState(false)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   const modelUrl =
@@ -266,9 +351,23 @@ export default function Viewer3D(): JSX.Element {
 
   // Reset view state when model changes
   useEffect(() => {
+    setSelected(false)
     setViewMode('solid')
     setStoreMeshStats(null)
   }, [modelUrl])
+
+  // Delete key removes the model from the scene
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'Delete') return
+      if (document.activeElement instanceof HTMLInputElement) return
+      if (!selected) return
+      setCurrentJob(null)
+      setSelected(false)
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [selected, setCurrentJob])
 
   const handleScreenshot = () => {
     const canvas = canvasRef.current
@@ -279,15 +378,18 @@ export default function Viewer3D(): JSX.Element {
     link.click()
   }
 
+
   return (
     <ModelErrorBoundary resetKey={modelUrl} fallback={<ModelLoadError />}>
       <div className="relative w-full h-full bg-surface-400">
         {!modelUrl && <EmptyState />}
 
         <Canvas
+          onPointerMissed={() => setSelected(false)}
           camera={{ position: [0, 1.5, 4], fov: 45 }}
+          dpr={1}
           gl={{
-            antialias: true,
+            antialias: false,
             preserveDrawingBuffer: true,
             outputColorSpace: THREE.SRGBColorSpace,
             toneMapping: THREE.NeutralToneMapping,
@@ -299,7 +401,7 @@ export default function Viewer3D(): JSX.Element {
 
           <gridHelper args={[10, 20, '#3f3f46', '#27272a']} />
 
-          {modelUrl && currentJob && (
+          {modelUrl && currentJob ? (
             <Suspense fallback={null}>
               <hemisphereLight args={['#ffffff', '#444466', 1.2]} />
               <directionalLight position={[5, 8, 5]} intensity={1.5} castShadow />
@@ -309,11 +411,13 @@ export default function Viewer3D(): JSX.Element {
                 jobId={currentJob.id}
                 viewMode={viewMode}
                 onStats={setStoreMeshStats}
+                onSelect={() => setSelected(true)}
               />
             </Suspense>
-          )}
+          ) : null}
 
           <OrbitControls
+            makeDefault
             enablePan
             enableZoom
             enableRotate
@@ -321,7 +425,13 @@ export default function Viewer3D(): JSX.Element {
             maxDistance={20}
             autoRotate={autoRotate}
             autoRotateSpeed={1.5}
+            enableDamping
+            dampingFactor={0.05}
           />
+
+          <GizmoHelper alignment="top-right" margin={[72, 72]}>
+            <GizmoBubbles />
+          </GizmoHelper>
         </Canvas>
 
         {/* Left toolbar — visible only when a model is loaded */}
@@ -347,7 +457,12 @@ export default function Viewer3D(): JSX.Element {
         {/* Bottom-right hint */}
         {modelUrl && (
           <div className="absolute bottom-4 right-4 pointer-events-none">
-            <p className="text-xs text-zinc-600">Drag to rotate &bull; Scroll to zoom</p>
+            <p className="text-xs text-zinc-600">
+              {selected
+                ? <>Click mesh to select &bull; <span className="text-zinc-500">Delete</span> to remove</>
+                : 'Drag to rotate \u2022 Scroll to zoom'
+              }
+            </p>
           </div>
         )}
       </div>

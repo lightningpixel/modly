@@ -68,10 +68,6 @@ interface AppState {
   meshStats: { vertices: number; triangles: number } | null
   setMeshStats: (stats: { vertices: number; triangles: number } | null) => void
 
-  // Workspace panel
-  workspacePanelOpen: boolean
-  toggleWorkspacePanel: () => void
-
   // Setup
   setupStatus:    SetupStatus
   setupProgress:  SetupProgress | null
@@ -89,6 +85,14 @@ interface AppState {
   errorModal: string | null
   showError: (message: string) => void
   hideError: () => void
+
+  // Mesh URL history (undo/redo)
+  meshHistory: string[]
+  historyIndex: number
+  pushMeshUrl: (url: string) => void
+  undoMesh: () => void
+  redoMesh: () => void
+  clearMeshHistory: () => void
 
   // Actions
   initApp: () => Promise<void>
@@ -148,6 +152,33 @@ export const useAppStore = create<AppState>()(
       showError: (message) => set({ errorModal: message }),
       hideError: () => set({ errorModal: null }),
 
+      meshHistory: [],
+      historyIndex: -1,
+
+      pushMeshUrl: (url) => {
+        const { meshHistory, historyIndex } = get()
+        const next = [...meshHistory.slice(0, historyIndex + 1), url]
+        set({ meshHistory: next, historyIndex: next.length - 1 })
+      },
+
+      undoMesh: () => {
+        const { meshHistory, historyIndex } = get()
+        if (historyIndex <= 0) return
+        const newIndex = historyIndex - 1
+        set({ historyIndex: newIndex })
+        get().updateCurrentJob({ outputUrl: meshHistory[newIndex] })
+      },
+
+      redoMesh: () => {
+        const { meshHistory, historyIndex } = get()
+        if (historyIndex >= meshHistory.length - 1) return
+        const newIndex = historyIndex + 1
+        set({ historyIndex: newIndex })
+        get().updateCurrentJob({ outputUrl: meshHistory[newIndex] })
+      },
+
+      clearMeshHistory: () => set({ meshHistory: [], historyIndex: -1 }),
+
       currentJob: null,
       selectedImagePath: null,
       setSelectedImagePath: (path) => set({ selectedImagePath: path }),
@@ -158,9 +189,6 @@ export const useAppStore = create<AppState>()(
       generationOptions: DEFAULT_OPTIONS,
       meshStats: null,
       setMeshStats: (stats) => set({ meshStats: stats }),
-      workspacePanelOpen: false,
-      toggleWorkspacePanel: () => set((s) => ({ workspacePanelOpen: !s.workspacePanelOpen })),
-
       initApp: async () => {
         set({ backendStatus: 'starting', backendError: null })
 
@@ -199,7 +227,6 @@ export const useAppStore = create<AppState>()(
       name: 'modly-store',
       partialize: (state) => ({
         generationOptions: state.generationOptions,
-        workspacePanelOpen: state.workspacePanelOpen,
       }),
     }
   )

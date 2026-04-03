@@ -1,13 +1,13 @@
 {
   "name": "modly",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Local AI-powered 3D mesh generation from images",
   "main": "./out/main/index.js",
   "author": "Modly",
   "private": true,
   "scripts": {
-    "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "dev": "node scripts/build-builtins.mjs && electron-vite dev",
+    "build": "node scripts/build-builtins.mjs && electron-vite build",
     "preview": "electron-vite preview",
     "prepare-resources": "node scripts/download-python-embed.js",
     "package": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && npm run prepare-resources && electron-builder",
@@ -17,12 +17,16 @@
     "@electron-toolkit/utils": "^4.0.0",
     "@react-three/drei": "^9.120.0",
     "@react-three/fiber": "^8.17.10",
+    "@react-three/postprocessing": "^2.19.1",
+    "@xyflow/react": "^12.10.2",
     "axios": "^1.7.9",
     "electron-updater": "^6.8.3",
+    "esbuild": "^0.28.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tar": "^7.5.9",
     "three": "^0.171.0",
+    "three-mesh-bvh": "^0.9.9",
     "zustand": "^5.0.3"
   },
   "devDependencies": {
@@ -61,6 +65,10 @@
           "!.venv/**/*",
           "!__pycache__/**/*"
         ]
+      },
+      {
+        "from": "out/builtin-extensions",
+        "to": "builtin-extensions"
       }
     ],
     "publish": {

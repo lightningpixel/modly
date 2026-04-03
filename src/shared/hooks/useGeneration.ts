@@ -1,12 +1,9 @@
 import { useCallback, useRef } from 'react'
 import { useAppStore } from '@shared/stores/appStore'
-import { useCollectionsStore } from '@shared/stores/collectionsStore'
 import { useApi } from './useApi'
 
 export function useGeneration() {
-  const { currentJob, setCurrentJob, updateCurrentJob, generationOptions, selectedImageData } = useAppStore()
-  const addToWorkspace = useCollectionsStore((s) => s.addToWorkspace)
-  const activeCollectionId = useCollectionsStore((s) => s.activeCollectionId)
+  const { currentJob, setCurrentJob, updateCurrentJob, generationOptions, selectedImageData, pushMeshUrl, clearMeshHistory } = useAppStore()
   const { generateFromImage, pollJobStatus, cancelJob } = useApi()
   const cancelledRef = useRef(false)
   const abortControllerRef = useRef<AbortController | null>(null)
@@ -15,6 +12,7 @@ export function useGeneration() {
     async (imagePath: string) => {
       cancelledRef.current = false
       abortControllerRef.current = new AbortController()
+      clearMeshHistory()
       const job = {
         id: crypto.randomUUID(),
         imageFile: imagePath,
@@ -27,7 +25,7 @@ export function useGeneration() {
       setCurrentJob(job)
 
       try {
-        const { jobId } = await generateFromImage(imagePath, generationOptions, activeCollectionId, selectedImageData ?? undefined, abortControllerRef.current.signal)
+        const { jobId } = await generateFromImage(imagePath, generationOptions, selectedImageData ?? undefined, abortControllerRef.current.signal)
 
         if (cancelledRef.current) {
           await cancelJob(jobId)
@@ -43,13 +41,20 @@ export function useGeneration() {
           setCurrentJob(null)
           return
         }
+        let errorMessage: string
+        if (err && typeof err === 'object' && 'response' in err) {
+          const axiosErr = err as { response?: { data?: { detail?: string } }; message: string }
+          errorMessage = axiosErr.response?.data?.detail ?? axiosErr.message
+        } else {
+          errorMessage = err instanceof Error ? err.message : String(err)
+        }
         updateCurrentJob({
           status: 'error',
-          error: err instanceof Error ? err.message : String(err)
+          error: errorMessage
         })
       }
     },
-    [generateFromImage, pollJobStatus, cancelJob, setCurrentJob, updateCurrentJob, addToWorkspace, activeCollectionId]
+    [generateFromImage, pollJobStatus, cancelJob, setCurrentJob, updateCurrentJob]
   )
 
   const pollUntilDone = async (jobId: string) => {
@@ -71,8 +76,7 @@ export function useGeneration() {
 
       if (result.status === 'done') {
         updateCurrentJob({ status: 'done', progress: 100, outputUrl: result.outputUrl, originalOutputUrl: result.outputUrl })
-        const finalJob = useAppStore.getState().currentJob
-        if (finalJob) addToWorkspace(finalJob)
+        if (result.outputUrl) pushMeshUrl(result.outputUrl)
         break
       }
 

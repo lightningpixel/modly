@@ -5,6 +5,7 @@ import { setupIpcHandlers } from './ipc-handlers'
 import { PythonBridge } from './python-bridge'
 import { logger, archiveCurrentSession } from './logger'
 import { initAutoUpdater } from './updater'
+import { syncBuiltinExtensions } from './builtin-sync'
 
 let mainWindow: BrowserWindow | null = null
 let pythonBridge: PythonBridge | null = null
@@ -69,6 +70,9 @@ app.whenReady().then(async () => {
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
+
+  // Sync built-in extensions from app resources to userData
+  syncBuiltinExtensions()
 
   // Start Python FastAPI backend
   pythonBridge = new PythonBridge()

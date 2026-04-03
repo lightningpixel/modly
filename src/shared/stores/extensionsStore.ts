@@ -1,26 +1,12 @@
 import { create } from 'zustand'
+import type { ModelExtension, ProcessExtension, AnyExtension } from '@shared/types/electron.d'
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Re-exports for consumers ─────────────────────────────────────────────────
 
-export interface ExtensionVariant {
-  id:               string
-  name:             string
-  repoId:           string
-  description?:     string
-  hfSkipPrefixes?:  string[]
-}
+export type { ModelExtension, ProcessExtension, AnyExtension }
 
-export interface Extension {
-  id:           string
-  name:         string
-  version?:     string
-  description?: string
-  author?:      string
-  trusted:      boolean
-  models:       ExtensionVariant[]
-}
 
-export type InstallStep = 'downloading' | 'extracting' | 'validating' | 'done' | 'error'
+export type InstallStep = 'downloading' | 'extracting' | 'validating' | 'setting_up' | 'done' | 'error'
 
 export interface InstallProgress {
   step:         InstallStep
@@ -32,11 +18,12 @@ export interface InstallProgress {
 // ─── Store ────────────────────────────────────────────────────────────────────
 
 interface ExtensionsStore {
-  extensions:      Extension[]
-  loading:         boolean
-  installProgress: InstallProgress | null
-  installError:    string | null
-  loadErrors:      Record<string, string>
+  modelExtensions:   ModelExtension[]
+  processExtensions: ProcessExtension[]
+  loading:           boolean
+  installProgress:   InstallProgress | null
+  installError:      string | null
+  loadErrors:        Record<string, string>
 
   loadExtensions:    () => Promise<void>
   installFromGitHub: (url: string) => Promise<{ success: boolean; error?: string }>
@@ -46,19 +33,24 @@ interface ExtensionsStore {
 }
 
 export const useExtensionsStore = create<ExtensionsStore>((set, get) => ({
-  extensions:      [],
-  loading:         false,
-  installProgress: null,
-  installError:    null,
-  loadErrors:      {},
+  modelExtensions:   [],
+  processExtensions: [],
+  loading:           false,
+  installProgress:   null,
+  installError:      null,
+  loadErrors:        {},
 
   // ── Load list ──────────────────────────────────────────────────────────────
 
   async loadExtensions() {
     set({ loading: true })
     try {
-      const list = await window.electron.extensions.list()
-      set({ extensions: list, loading: false })
+      const list = (await window.electron.extensions.list()) as AnyExtension[]
+      set({
+        modelExtensions:   list.filter((e): e is ModelExtension   => e.type === 'model'),
+        processExtensions: list.filter((e): e is ProcessExtension => e.type === 'process'),
+        loading:           false,
+      })
     } catch {
       set({ loading: false })
     }
@@ -69,12 +61,11 @@ export const useExtensionsStore = create<ExtensionsStore>((set, get) => ({
   async installFromGitHub(url: string) {
     set({ installProgress: { step: 'downloading', percent: 0 }, installError: null })
 
-    // Listen to granular progress events from main process
     window.electron.extensions.onInstallProgress((data) => {
       if (data.step === 'error') {
         set({ installProgress: null, installError: data.message ?? 'Unknown error' })
       } else {
-        set({ installProgress: data })
+        set({ installProgress: data as InstallProgress })
       }
     })
 
@@ -82,13 +73,22 @@ export const useExtensionsStore = create<ExtensionsStore>((set, get) => ({
       const result = await window.electron.extensions.installFromGitHub(url)
 
       if (result.success && result.extension) {
-        // Merge the new extension into the list (or replace if already present)
+        const ext = result.extension as AnyExtension
         set((state) => {
-          const filtered = state.extensions.filter((e) => e.id !== result.extensionId)
-          return {
-            extensions:      [...filtered, result.extension!],
-            installProgress: { step: 'done', extensionId: result.extensionId },
-            installError:    null,
+          if (ext.type === 'process') {
+            const filtered = state.processExtensions.filter((e) => e.id !== ext.id)
+            return {
+              processExtensions: [...filtered, ext],
+              installProgress:   { step: 'done', extensionId: result.extensionId },
+              installError:      null,
+            }
+          } else {
+            const filtered = state.modelExtensions.filter((e) => e.id !== ext.id)
+            return {
+              modelExtensions: [...filtered, ext],
+              installProgress: { step: 'done', extensionId: result.extensionId },
+              installError:    null,
+            }
           }
         })
       } else {
@@ -111,7 +111,8 @@ export const useExtensionsStore = create<ExtensionsStore>((set, get) => ({
     const result = await window.electron.extensions.uninstall(extensionId)
     if (result.success) {
       set((state) => ({
-        extensions: state.extensions.filter((e) => e.id !== extensionId),
+        modelExtensions:   state.modelExtensions.filter((e)   => e.id !== extensionId),
+        processExtensions: state.processExtensions.filter((e) => e.id !== extensionId),
       }))
     }
     return result

@@ -91,6 +91,17 @@ async def cancel_job(job_id: str):
         _cancel_events[job_id].set()
     if job.status in ("pending", "running"):
         job.status = "cancelled"
+    # Kill the active generator subprocess immediately so inference stops now.
+    # _run_generation will catch the resulting exception, see job_id in _cancelled,
+    # and return cleanly without setting an error status.
+    try:
+        gen = generator_registry._generators.get(generator_registry._active_id)
+        if gen is not None and hasattr(gen, "_proc") and gen._proc and gen._proc.poll() is None:
+            gen._proc.kill()
+            gen._loaded = False
+            gen._proc = None
+    except Exception:
+        pass
     return {"cancelled": True}
 
 
@@ -149,9 +160,13 @@ async def _run_generation(job_id: str, image_bytes: bytes, params: dict, collect
         if job_id in _cancelled:
             return
 
-        job.status     = "done"
-        job.progress   = 100
-        job.output_url = f"/workspace/{collection}/{output_path.name}"
+        job.status   = "done"
+        job.progress = 100
+        try:
+            rel = output_path.relative_to(WORKSPACE_DIR)
+            job.output_url = f"/workspace/{rel.as_posix()}"
+        except ValueError:
+            job.output_url = f"/workspace/{collection}/{output_path.name}"
 
     except GenerationCancelled:
         job.status = "cancelled"

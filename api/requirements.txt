@@ -1,36 +1,14 @@
-# PyTorch CUDA — index primaire pour torch/torchvision
-# cu128 = CUDA 12.8 (driver ≥520, RTX 30xx/40xx/50xx)
-# Changer cu128 → cu126 si le driver est plus ancien
---index-url https://download.pytorch.org/whl/cu128
---extra-index-url https://pypi.org/simple
-
 # Web server
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 python-multipart==0.0.20
 
-# AI / ML
-torch>=2.1.0
-torchvision>=0.16.0
+# Mesh processing (optimize + export endpoints)
+trimesh>=4.5.0
+pymeshlab>=2023.12
+
+# Model downloads (HuggingFace)
 huggingface_hub>=0.27.0
 hf_xet>=0.1.0
-diffusers>=0.32.0
-transformers>=4.48.0,<5.0.0
-accelerate>=1.3.0
-pillow>=11.0.0
-trimesh>=4.5.0
-numpy>=1.26.0
-rembg>=2.0.0          # background removal (SF3D + Hunyuan3D)
-onnxruntime-gpu>=1.17.0  # runtime ONNX requis par rembg (GPU-accelerated)
-einops>=0.7.0          # tensor ops used by Hunyuan3D / hy3dshape pipeline
-pymeshlab>=2023.12     # mesh processing required by hy3dshape postprocessors
-xatlas>=0.0.8          # UV unwrapping for Hunyuan3D texture generation
-pygltflib>=1.15.0      # GLB/GLTF I/O for Hunyuan3D texture pipeline
 
-opencv-python-headless>=4.8.0  # required by hy3dgen.shapegen.preprocessors (cv2)
-peft>=0.10.0               # LoRA/adapter support required by TripoSG transformer
-scikit-image>=0.21.0       # image processing utilities required by TripoSG
-
-# Utils
-aiofiles==24.1.0
 cryptography>=42.0.0

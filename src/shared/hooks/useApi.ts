@@ -9,7 +9,6 @@ export function useApi() {
   async function generateFromImage(
     imagePath: string,
     options: GenerationOptions,
-    collection: string = 'Default',
     imageData?: string,
     signal?: AbortSignal,
   ): Promise<{ jobId: string }> {
@@ -22,7 +21,6 @@ export function useApi() {
     const formData = new FormData()
     formData.append('image', blob, filename)
     formData.append('model_id', options.modelId)
-    formData.append('collection', collection)
     formData.append('remesh', options.remesh)
     formData.append('enable_texture', String(options.enableTexture))
     formData.append('texture_resolution', String(options.textureResolution))
@@ -56,7 +54,7 @@ export function useApi() {
     return data
   }
 
-  async function getAllModelsStatus(): Promise<{ id: string; downloaded: boolean }[]> {
+  async function getAllModelsStatus(): Promise<{ id: string; name: string; downloaded: boolean }[]> {
     const { data } = await client.get('/model/all')
     return data
   }
@@ -102,5 +100,21 @@ export function useApi() {
     await client.post(`/generate/cancel/${jobId}`).catch(() => {})
   }
 
-  return { generateFromImage, pollJobStatus, cancelJob, getModelStatus, downloadModel, optimizeMesh }
+  async function smoothMesh(
+    path: string,
+    iterations: number,
+  ): Promise<{ url: string }> {
+    const { data } = await client.post<{ url: string }>('/optimize/smooth', {
+      path,
+      iterations,
+    })
+    return { url: data.url }
+  }
+
+  async function importMesh(filePath: string): Promise<{ url: string }> {
+    const { data } = await client.post<{ url: string }>('/optimize/import-by-path', { path: filePath })
+    return { url: data.url }
+  }
+
+  return { generateFromImage, pollJobStatus, cancelJob, getModelStatus, downloadModel, optimizeMesh, smoothMesh, importMesh }
 }

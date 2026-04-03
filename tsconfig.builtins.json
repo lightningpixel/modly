@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target":            "ES2022",
+    "module":            "CommonJS",
+    "moduleResolution":  "node",
+    "strict":            true,
+    "skipLibCheck":      true,
+    "outDir":            "out/builtin-extensions",
+    "rootDir":           "src/areas/workflows/nodes",
+    "declaration":       false,
+    "sourceMap":         false,
+    "esModuleInterop":   true
+  },
+  "include": [
+    "src/areas/workflows/nodes/mesh-exporter/**/*.ts",
+    "src/areas/workflows/nodes/mesh-optimizer/**/*.ts"
+  ]
+}

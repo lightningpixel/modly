@@ -1,0 +1,28 @@
+{
+  "id": "mesh-optimizer",
+  "name": "Mesh Optimizer",
+  "type": "process",
+  "entry": "processor.js",
+  "version": "1.0.0",
+  "author": "Modly",
+  "description": "Reduces mesh triangle count using quadric simplification (meshoptimizer).",
+  "nodes": [
+    {
+      "id": "optimize",
+      "name": "Optimize Mesh",
+      "input": "mesh",
+      "output": "mesh",
+      "params_schema": [
+        {
+          "id": "target_faces",
+          "label": "Target Triangles",
+          "type": "int",
+          "default": 10000,
+          "min": 100,
+          "max": 1000000,
+          "tooltip": "Target number of triangles after simplification."
+        }
+      ]
+    }
+  ]
+}

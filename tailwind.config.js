@@ -21,7 +21,16 @@ module.exports = {
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],
         mono: ['JetBrains Mono', 'monospace'],
-      }
+      },
+      keyframes: {
+        slide: {
+          '0%':   { transform: 'translateX(-100%)' },
+          '100%': { transform: 'translateX(400%)' },
+        },
+      },
+      animation: {
+        slide: 'slide 1.5s ease-in-out infinite',
+      },
     }
   },
   plugins: []

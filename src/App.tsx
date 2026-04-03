@@ -6,22 +6,18 @@ import { UpdateModal } from '@shared/components/ui/UpdateModal'
 import { ErrorModal } from '@shared/components/ui/ErrorModal'
 
 export default function App(): JSX.Element {
-  const { checkSetup, setupStatus, initApp, backendStatus, showError, setPatchUpdateReady } = useAppStore()
+  const { checkSetup, setupStatus, initApp, backendStatus, showError } = useAppStore()
   const [updateVersion, setUpdateVersion] = useState<string | null>(null)
   const [currentVersion, setCurrentVersion] = useState<string>('')
 
   useEffect(() => {
     checkSetup()
     window.electron.app.onError((message) => showError(message))
-    window.electron.updater.onPatchReady(() => {
-      setPatchUpdateReady(true)
-    })
     window.electron.updater.onMajorMinorAvailable(({ version }) => {
       setUpdateVersion(`v${version}`)
     })
     return () => {
       window.electron.app.offError()
-      window.electron.updater.offPatchReady()
       window.electron.updater.offMajorMinorAvailable()
     }
   }, [])
@@ -32,10 +28,7 @@ export default function App(): JSX.Element {
 
   useEffect(() => {
     if (backendStatus !== 'ready') return
-    window.electron.app.info().then(({ version }) => {
-      setCurrentVersion(version)
-      window.electron.updater.check()
-    })
+    window.electron.app.info().then(({ version }) => setCurrentVersion(version))
   }, [backendStatus])
 
   if (backendStatus === 'ready') return (
