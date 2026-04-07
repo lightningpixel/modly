@@ -7,8 +7,9 @@ type WindowGetter = () => BrowserWindow | null
 export function initAutoUpdater(getWindow: WindowGetter): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   autoUpdater.logger = logger as any
-  autoUpdater.autoDownload    = false
-  autoUpdater.autoInstallOnAppQuit = false
+  autoUpdater.autoDownload = false
+  autoUpdater.autoInstallOnAppQuit = true
+  autoUpdater.disableWebInstaller = true
 
   autoUpdater.on('update-available', (info) => {
     const running  = app.getVersion()
