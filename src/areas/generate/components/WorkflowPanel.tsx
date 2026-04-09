@@ -420,20 +420,30 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
     if (out) updateNodeData(out.id, { params: { outputUrl: runState.outputUrl } })
   }, [runState.status, runState.outputUrl])
 
-  // Type mismatch detection
+  // Type mismatch detection — edge-based to support multi-input nodes
   const typeMismatch = useMemo(() => {
-    const sorted   = topoSortNodes(workflow.nodes, workflow.edges)
-    const extNodes = sorted.filter((n) => n.type === 'extensionNode')
-    // Determine initial type from the actual source node in the graph
-    const firstSource = sorted.find((n) => n.type === 'imageNode' || n.type === 'meshNode' || n.type === 'textNode')
-    let prev: string = firstSource?.type === 'meshNode' ? 'mesh'
-                     : firstSource?.type === 'textNode' ? 'text'
-                     : 'image'
+    // Build a map of what type each node produces
+    const nodeOutput = new Map<string, string>()
+    for (const node of workflow.nodes) {
+      if (node.type === 'imageNode')  { nodeOutput.set(node.id, 'image'); continue }
+      if (node.type === 'meshNode')   { nodeOutput.set(node.id, 'mesh');  continue }
+      if (node.type === 'textNode')   { nodeOutput.set(node.id, 'text');  continue }
+      if (node.type === 'extensionNode') {
+        const ext = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
+        if (ext) nodeOutput.set(node.id, ext.output)
+      }
+    }
+    // For each extension node, check that every incoming edge carries an accepted type
+    const extNodes = workflow.nodes.filter((n) => n.type === 'extensionNode')
     for (const node of extNodes) {
       const ext = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
       if (!ext) continue
-      if (prev !== ext.input) return true
-      prev = ext.output
+      const accepted = ext.inputs ?? [ext.input]
+      for (const edge of workflow.edges) {
+        if (edge.target !== node.id) continue
+        const srcType = nodeOutput.get(edge.source)
+        if (srcType && !accepted.includes(srcType as any)) return true
+      }
     }
     return false
   }, [workflow, allExtensions])

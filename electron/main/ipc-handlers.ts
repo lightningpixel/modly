@@ -510,6 +510,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       id:                string
       name?:             string
       input?:            'mesh' | 'image' | 'text'
+      inputs?:           ('mesh' | 'image' | 'text')[]
       output?:           'mesh' | 'image' | 'text'
       params_schema?:    unknown[]
       hf_repo?:          string
@@ -534,6 +535,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       id:             n.id,
       name:           n.name ?? n.id,
       input:          n.input  ?? 'image' as const,
+      inputs:         n.inputs,
       output:         n.output ?? 'mesh'  as const,
       paramsSchema:   n.params_schema ?? [],
       hfRepo:         n.hf_repo,
