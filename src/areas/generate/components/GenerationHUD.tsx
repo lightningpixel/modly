@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useGeneration } from '@shared/hooks/useGeneration'
 
 function formatElapsed(seconds: number): string {
@@ -11,6 +11,15 @@ export default function GenerationHUD(): JSX.Element | null {
   const { currentJob, reset } = useGeneration()
   const [elapsed, setElapsed] = useState(0)
   const [tqdmLog, setTqdmLog] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+  const copyTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  function handleCopyError(text: string) {
+    navigator.clipboard.writeText(text)
+    setCopied(true)
+    if (copyTimeout.current) clearTimeout(copyTimeout.current)
+    copyTimeout.current = setTimeout(() => setCopied(false), 2000)
+  }
 
   const status = currentJob?.status
   const isActive = status === 'uploading' || status === 'generating'
@@ -90,12 +99,38 @@ export default function GenerationHUD(): JSX.Element | null {
             <p className="text-xs text-red-400 bg-red-950/40 border border-red-900/40 rounded-lg px-3 py-2 max-h-24 overflow-y-auto whitespace-pre-wrap break-words">
               {error}
             </p>
-            <button
-              onClick={reset}
-              className="w-full py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-sm font-medium transition-colors"
-            >
-              Try again
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={reset}
+                className="flex-1 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-sm font-medium transition-colors"
+              >
+                Try again
+              </button>
+              {error && (
+                <button
+                  onClick={() => handleCopyError(error)}
+                  title="Copy error"
+                  className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-sm font-medium transition-colors"
+                >
+                  {copied ? (
+                    <>
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-green-400">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                      <span className="text-green-400">Copied</span>
+                    </>
+                  ) : (
+                    <>
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                      </svg>
+                      <span>Copy</span>
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
           </div>
         )}
       </div>
