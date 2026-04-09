@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { useAppStore } from '@shared/stores/appStore'
 import type { GenerationJob } from '@shared/stores/appStore'
 import { useApi } from '@shared/hooks/useApi'
+import { ColorPicker } from '@shared/components/ui'
 import GenerationHUD from './components/GenerationHUD'
 import Viewer3D from './components/Viewer3D'
 import WorkflowPanel from './components/WorkflowPanel'
@@ -123,6 +124,92 @@ function DecimatePopover({
 }
 
 // ---------------------------------------------------------------------------
+// Light popover
+// ---------------------------------------------------------------------------
+
+export interface LightSettings {
+  ambientIntensity: number
+  ambientColor: string
+  mainIntensity: number
+  mainColor: string
+  fillIntensity: number
+  fillColor: string
+}
+
+export const DEFAULT_LIGHT_SETTINGS: LightSettings = {
+  ambientIntensity: 1.2,
+  ambientColor: '#ffffff',
+  mainIntensity: 1.5,
+  mainColor: '#ffffff',
+  fillIntensity: 0.6,
+  fillColor: '#ffffff',
+}
+
+function LightPopover({
+  settings,
+  onChange,
+  onClose,
+}: {
+  settings: LightSettings
+  onChange: (s: LightSettings) => void
+  onClose: () => void
+}) {
+  function lightRow(
+    label: string,
+    colorKey: keyof LightSettings,
+    intensityKey: keyof LightSettings,
+    max: number,
+  ) {
+    const intensity = settings[intensityKey] as number
+    const color = settings[colorKey] as string
+    return (
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-center gap-2">
+          <ColorPicker
+            value={color}
+            onChange={(c) => onChange({ ...settings, [colorKey]: c })}
+          />
+          <span className="text-[10px] text-zinc-400 flex-1">{label}</span>
+          <span className="text-[10px] text-zinc-500 font-mono">{intensity.toFixed(1)}</span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={max}
+          step={0.1}
+          value={intensity}
+          onChange={(e) => onChange({ ...settings, [intensityKey]: parseFloat(e.target.value) })}
+          className="w-full h-1.5 accent-violet-500 cursor-pointer"
+        />
+      </div>
+    )
+  }
+
+  return (
+    <div className="absolute top-full right-0 mt-1 z-50 bg-zinc-900 border border-zinc-700/60 rounded-xl p-3 flex flex-col gap-3 min-w-[220px] shadow-xl">
+      <div className="flex items-center justify-between">
+        <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Lighting</p>
+        <button
+          onClick={() => onChange(DEFAULT_LIGHT_SETTINGS)}
+          className="text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors"
+        >
+          Reset
+        </button>
+      </div>
+      {lightRow('Ambient', 'ambientColor', 'ambientIntensity', 3)}
+      {lightRow('Sun', 'mainColor', 'mainIntensity', 4)}
+      {lightRow('Fill', 'fillColor', 'fillIntensity', 2)}
+      <button
+        onClick={onClose}
+        className="mt-1 px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 rounded-lg transition-colors"
+      >
+        Close
+      </button>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Smooth popover
 // ---------------------------------------------------------------------------
 
@@ -191,7 +278,8 @@ function SmoothPopover({
 export default function GeneratePage(): JSX.Element {
   const [unloadStatus, setUnloadStatus] = useState<'idle' | 'done'>('idle')
   const [panelWidth, setPanelWidth] = useState(DEFAULT_WIDTH)
-  const [openPanel, setOpenPanel] = useState<'export' | 'decimate' | 'smooth' | 'import' | null>(null)
+  const [openPanel, setOpenPanel] = useState<'export' | 'decimate' | 'smooth' | 'import' | 'light' | null>(null)
+  const [lightSettings, setLightSettings] = useState<LightSettings>(DEFAULT_LIGHT_SETTINGS)
   const [decimating, setDecimating] = useState(false)
   const [smoothing, setSmoothing] = useState(false)
   const [importing, setImporting] = useState(false)
@@ -499,13 +587,46 @@ export default function GeneratePage(): JSX.Element {
                   />
                 )}
               </div>
+
             </>
           )}
+
+          {/* Light — always visible, pushed to the right */}
+          <div className="relative ml-auto">
+            <button
+              onClick={() => setOpenPanel((p) => (p === 'light' ? null : 'light'))}
+              title="Lighting"
+              className={`flex items-center justify-center w-7 h-7 rounded-lg border transition-colors
+                ${openPanel === 'light'
+                  ? 'bg-zinc-700 border-zinc-600 text-zinc-200'
+                  : 'bg-zinc-800 border-zinc-700/50 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600'
+                }`}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+                <circle cx="12" cy="12" r="4" />
+                <line x1="12" y1="2" x2="12" y2="5" />
+                <line x1="12" y1="19" x2="12" y2="22" />
+                <line x1="4.22" y1="4.22" x2="6.34" y2="6.34" />
+                <line x1="17.66" y1="17.66" x2="19.78" y2="19.78" />
+                <line x1="2" y1="12" x2="5" y2="12" />
+                <line x1="19" y1="12" x2="22" y2="12" />
+                <line x1="4.22" y1="19.78" x2="6.34" y2="17.66" />
+                <line x1="17.66" y1="6.34" x2="19.78" y2="4.22" />
+              </svg>
+            </button>
+            {openPanel === 'light' && (
+              <LightPopover
+                settings={lightSettings}
+                onChange={setLightSettings}
+                onClose={() => setOpenPanel(null)}
+              />
+            )}
+          </div>
         </div>
 
         {/* Viewer area */}
         <div className="flex-1 relative overflow-hidden">
-          <Viewer3D />
+          <Viewer3D lightSettings={lightSettings} />
           <GenerationHUD />
 
           {/* Free memory — overlay top-left */}
