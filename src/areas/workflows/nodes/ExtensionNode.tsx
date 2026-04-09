@@ -119,29 +119,113 @@ function ParamControl({ param, value, onChange }: {
 export default function ExtensionNode({ id, data, selected }: { id: string; data: WFNodeData; selected?: boolean }) {
   const { updateNodeData } = useReactFlow()
   const running = useWorkflowRunStore((s) => s.activeNodeId === id)
-  const ioRowRef           = useRef<HTMLDivElement>(null)
-  const [handleTop, setHandleTop] = useState('50%')
 
-  // Align handles with the IO row
-  useLayoutEffect(() => {
-    if (ioRowRef.current) {
-      const center = ioRowRef.current.offsetTop + ioRowRef.current.offsetHeight / 2
-      setHandleTop(`${center}px`)
-    }
-  }, [])
+  // Refs for handle alignment — support up to 2 inputs
+  const ioRowRef  = useRef<HTMLDivElement>(null)
+  const ioRow2Ref = useRef<HTMLDivElement>(null)
+  const [handleTop,  setHandleTop]  = useState('50%')
+  const [handle2Top, setHandle2Top] = useState('50%')
 
   const { modelExtensions, processExtensions } = useExtensionsStore()
   const ext = buildAllWorkflowExtensions(modelExtensions, processExtensions)
     .find((e) => e.id === data.extensionId)
 
+  const inputs      = ext?.inputs  // defined → multi-input mode
+  const isMulti     = inputs && inputs.length > 1
   const isTerminal  = ext?.id === 'mesh-exporter'
-  const inputColor  = HANDLE_COLOR[ext?.input  ?? 'image']
   const outputColor = HANDLE_COLOR[ext?.output ?? 'mesh']
   const hasParams   = (ext?.params.length ?? 0) > 0
+
+  // Align handles with their respective IO rows after mount
+  useLayoutEffect(() => {
+    if (ioRowRef.current) {
+      const center = ioRowRef.current.offsetTop + ioRowRef.current.offsetHeight / 2
+      setHandleTop(`${center}px`)
+    }
+    if (ioRow2Ref.current) {
+      const center = ioRow2Ref.current.offsetTop + ioRow2Ref.current.offsetHeight / 2
+      setHandle2Top(`${center}px`)
+    }
+  }, [isMulti])
 
   const patchParam = useCallback((key: string, val: number | string) => {
     updateNodeData(id, { params: { ...data.params, [key]: val } })
   }, [id, data.params, updateNodeData])
+
+  // ── IO subheader ─────────────────────────────────────────────────────────
+  const ioSubheader = isMulti ? (
+    // Multi-input layout: one row per input, output on first row
+    <div className="flex flex-col divide-y divide-zinc-800/40">
+      <div ref={ioRowRef} className="flex items-center justify-between px-3 py-2">
+        <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TAG_CLS[inputs[0]] ?? 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>
+          {inputs[0]}
+        </span>
+        {!isTerminal && (
+          <>
+            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-zinc-600 shrink-0">
+              <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+            </svg>
+            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TAG_CLS[ext?.output ?? ''] ?? 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>
+              {ext?.output ?? '—'}
+            </span>
+          </>
+        )}
+      </div>
+      <div ref={ioRow2Ref} className="flex items-center px-3 py-2">
+        <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TAG_CLS[inputs[1]] ?? 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>
+          {inputs[1]}
+        </span>
+      </div>
+    </div>
+  ) : (
+    // Single-input layout (existing behavior)
+    <div ref={ioRowRef} className="flex items-center justify-between px-3 py-2">
+      <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TAG_CLS[ext?.input ?? ''] ?? 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>
+        {ext?.input ?? '—'}
+      </span>
+      {!isTerminal && (
+        <>
+          <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-zinc-600 shrink-0">
+            <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+          </svg>
+          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TAG_CLS[ext?.output ?? ''] ?? 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>
+            {ext?.output ?? '—'}
+          </span>
+        </>
+      )}
+    </div>
+  )
+
+  // ── Handles ──────────────────────────────────────────────────────────────
+  const handlesEl = (
+    <>
+      {/* Primary input handle */}
+      <Handle
+        id="input-0"
+        type="target"
+        position={Position.Left}
+        style={{ background: HANDLE_COLOR[isMulti ? inputs[0] : (ext?.input ?? 'image')], width: 14, height: 14, border: '2.5px solid #18181b', top: handleTop }}
+      />
+      {/* Secondary input handle (multi-input only) */}
+      {isMulti && (
+        <Handle
+          id="input-1"
+          type="target"
+          position={Position.Left}
+          style={{ background: HANDLE_COLOR[inputs[1]], width: 14, height: 14, border: '2.5px solid #18181b', top: handle2Top }}
+        />
+      )}
+      {/* Output handle */}
+      {!isTerminal && (
+        <Handle
+          id="output"
+          type="source"
+          position={Position.Right}
+          style={{ background: outputColor, width: 14, height: 14, border: '2.5px solid #18181b', top: handleTop }}
+        />
+      )}
+    </>
+  )
 
   return (
     <BaseNode
@@ -153,31 +237,8 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
       showInGenerate={data.showInGenerate ?? false}
       collapsible={hasParams}
       minWidth={200}
-      subheader={
-        <div ref={ioRowRef} className="flex items-center justify-between px-3 py-2">
-          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TAG_CLS[ext?.input ?? ''] ?? 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>
-            {ext?.input ?? '—'}
-          </span>
-          {!isTerminal && (
-            <>
-              <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-zinc-600 shrink-0">
-                <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
-              </svg>
-              <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TAG_CLS[ext?.output ?? ''] ?? 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>
-                {ext?.output ?? '—'}
-              </span>
-            </>
-          )}
-        </div>
-      }
-      handles={<>
-        <Handle type="target" position={Position.Left}
-          style={{ background: inputColor, width: 14, height: 14, border: '2.5px solid #18181b', top: handleTop }} />
-        {!isTerminal && (
-          <Handle type="source" position={Position.Right}
-            style={{ background: outputColor, width: 14, height: 14, border: '2.5px solid #18181b', top: handleTop }} />
-        )}
-      </>}
+      subheader={ioSubheader}
+      handles={handlesEl}
     >
       {hasParams && (
         <div className="px-3 pb-3 pt-2.5 flex flex-col gap-2">

@@ -80,23 +80,31 @@ export function useWorkflowRunner(allExtensions: WorkflowExtension[]) {
       const settings     = await window.electron.settings.get()
       const workspaceDir = settings.workspaceDir.replace(/\\/g, '/')
 
-      // Track outputs per node so branches each get the correct predecessor output
-      const nodeOutputs = new Map<string, { filePath?: string; text?: string }>()
+      // Track outputs per node so branches each get the correct predecessor output.
+      // outputType distinguishes image files from mesh files for multi-input routing.
+      const nodeOutputs = new Map<string, { filePath?: string; text?: string; outputType?: string }>()
 
       // Pre-populate source nodes
       for (const node of ordered) {
-        if (node.type === 'imageNode') nodeOutputs.set(node.id, { filePath: imagePath })
+        if (node.type === 'imageNode') nodeOutputs.set(node.id, { filePath: imagePath, outputType: 'image' })
         if (node.type === 'textNode')  nodeOutputs.set(node.id, { text: node.data.params?.text as string | undefined })
         if (node.type === 'meshNode') {
           const source = node.data.params?.source as 'file' | 'current' | undefined
           if (source === 'current') {
             if (currentMeshUrl) {
-              const rel = currentMeshUrl.replace(/^\/workspace\//, '')
-              nodeOutputs.set(node.id, { filePath: `${workspaceDir}/${rel}` })
+              let meshFilePath: string
+              if (currentMeshUrl.includes('serve-file?path=')) {
+                const encoded = currentMeshUrl.split('serve-file?path=')[1]
+                meshFilePath = decodeURIComponent(encoded).replace(/\\/g, '/')
+              } else {
+                const rel = currentMeshUrl.replace(/^\/workspace\//, '')
+                meshFilePath = `${workspaceDir}/${rel}`
+              }
+              nodeOutputs.set(node.id, { filePath: meshFilePath, outputType: 'mesh' })
             }
           } else {
             const fp = node.data.params?.filePath as string | undefined
-            if (fp) nodeOutputs.set(node.id, { filePath: fp })
+            if (fp) nodeOutputs.set(node.id, { filePath: fp, outputType: 'mesh' })
           }
         }
       }
@@ -107,29 +115,63 @@ export function useWorkflowRunner(allExtensions: WorkflowExtension[]) {
         const node = execNodes[i]
         const ext  = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
 
-        // Resolve this node's input from its actual predecessors in the graph
+        // Resolve this node's inputs from its actual predecessors in the graph.
+        // For multi-input nodes, route by outputType (image vs mesh).
         let nodeInputPath: string | undefined
         let nodeInputText: string | undefined
-        for (const edge of workflow.edges.filter((e) => e.target === node.id)) {
-          const src = nodeOutputs.get(edge.source)
-          if (src?.filePath !== undefined) nodeInputPath = src.filePath
-          if (src?.text     !== undefined) nodeInputText = src.text
-        }
-        // Fallback: if no edge supplied a file/text, use the previous node's output
-        if (nodeInputPath === undefined && nodeInputText === undefined && i > 0) {
-          const prev = nodeOutputs.get(execNodes[i - 1].id)
-          if (prev?.filePath !== undefined) nodeInputPath = prev.filePath
-          if (prev?.text     !== undefined) nodeInputText = prev.text
+        let nodeInputMeshPath: string | undefined   // for multi-input: the mesh wire
+
+        const incomingEdges = workflow.edges.filter((e) => e.target === node.id)
+        if (ext?.inputs && ext.inputs.length > 1) {
+          // Multi-input: route each edge by the source node's outputType
+          for (const edge of incomingEdges) {
+            const src = nodeOutputs.get(edge.source)
+            if (!src) continue
+            if (src.outputType === 'mesh')  nodeInputMeshPath = src.filePath
+            else if (src.outputType === 'image') nodeInputPath = src.filePath
+            else if (src.filePath !== undefined) nodeInputPath = src.filePath
+            if (src.text !== undefined) nodeInputText = src.text
+          }
+        } else {
+          // Single-input: original behaviour
+          for (const edge of incomingEdges) {
+            const src = nodeOutputs.get(edge.source)
+            if (src?.filePath !== undefined) nodeInputPath = src.filePath
+            if (src?.text     !== undefined) nodeInputText = src.text
+          }
+          // Fallback: if no edge supplied a file/text, use the previous node's output
+          if (nodeInputPath === undefined && nodeInputText === undefined && i > 0) {
+            const prev = nodeOutputs.get(execNodes[i - 1].id)
+            if (prev?.filePath !== undefined) nodeInputPath = prev.filePath
+            if (prev?.text     !== undefined) nodeInputText = prev.text
+          }
         }
 
         setRunState((s) => ({ ...s, blockIndex: i, blockProgress: 0, blockStep: 'Starting…' }))
 
-        if (ext?.input === 'image' && ext?.output === 'mesh') {
+        // Model extensions always go through the HTTP API (job queue, progress, GPU).
+        // Process extensions always go through IPC runProcess (CPU, synchronous).
+        const isGeneratorNode = ext?.type === 'model'
+
+        if (isGeneratorNode) {
           // ── Generator: call Python FastAPI ──────────────────────────────────
-          const base64 = imageData ?? await window.electron.fs.readFileBase64(imagePath)
+          // For multi-input nodes, use the resolved image path (not the global imagePath)
+          const activeImagePath = nodeInputPath ?? imagePath
+          const base64 = imageData && nodeInputPath === undefined
+            ? imageData
+            : await window.electron.fs.readFileBase64(activeImagePath)
           const bytes  = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
           const blob   = new Blob([bytes], { type: 'image/png' })
-          const fname  = imagePath.split(/[\\/]/).pop() ?? 'image.png'
+          const fname  = activeImagePath.split(/[\\/]/).pop() ?? 'image.png'
+
+          // For multi-input nodes: inject the mesh input as params.mesh_path
+          const extraParams: Record<string, unknown> = {}
+          if (nodeInputMeshPath) {
+            const norm = nodeInputMeshPath.replace(/\\/g, '/')
+            extraParams.mesh_path = norm.startsWith(workspaceDir)
+              ? norm.slice(workspaceDir.length).replace(/^\//, '')
+              : norm
+          }
 
           const fd = new FormData()
           fd.append('image', blob, fname)
@@ -138,7 +180,7 @@ export function useWorkflowRunner(allExtensions: WorkflowExtension[]) {
           fd.append('remesh', 'none')
           fd.append('enable_texture', 'false')
           fd.append('texture_resolution', '1024')
-          fd.append('params', JSON.stringify(node.data.params))
+          fd.append('params', JSON.stringify({ ...node.data.params, ...extraParams }))
 
           setRunState((s) => ({ ...s, blockProgress: 5, blockStep: 'Submitting to model…' }))
 
@@ -195,8 +237,10 @@ export function useWorkflowRunner(allExtensions: WorkflowExtension[]) {
           setRunState((s) => ({ ...s, blockProgress: 100, blockStep: 'Done' }))
         }
 
-        // Store this node's output so downstream nodes (including other branches) can read it
-        nodeOutputs.set(node.id, { filePath: nodeInputPath, text: nodeInputText })
+        // Store this node's output so downstream nodes (including other branches) can read it.
+        // Tag with outputType so multi-input nodes can route by type.
+        const outputType = ext?.output ?? (nodeInputPath ? 'mesh' : undefined)
+        nodeOutputs.set(node.id, { filePath: nodeInputPath, text: nodeInputText, outputType })
       }
 
       // Determine outputUrl: prefer what feeds the outputNode (Add to Scene)

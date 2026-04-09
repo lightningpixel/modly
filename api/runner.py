@@ -109,8 +109,16 @@ def main() -> None:
     send({"type": "ready", "params_schema": schema})
 
     # Support both flat manifest (legacy) and nodes[] format.
-    # Node-level fields take precedence; fall back to top-level for compatibility.
-    node = (manifest.get("nodes") or [{}])[0]
+    # Use MODEL_DIR to find the correct node for multi-node extensions:
+    # MODEL_DIR is set by ExtensionProcess to MODELS_DIR/ext_id/node_id,
+    # so its last component matches the node id.
+    nodes = manifest.get("nodes") or []
+    node = {}
+    if nodes and _MODEL_DIR_OVERRIDE:
+        node_id = Path(_MODEL_DIR_OVERRIDE).name
+        node = next((n for n in nodes if n.get("id") == node_id), nodes[0])
+    elif nodes:
+        node = nodes[0]
 
     # Use MODEL_DIR env var (set by ExtensionProcess) when available so the
     # generator uses the exact same path that is_downloaded() checks against.

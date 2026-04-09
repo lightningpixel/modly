@@ -11,6 +11,7 @@ export interface WorkflowExtension {
   name:            string
   description:     string
   input:           'image' | 'text' | 'mesh'
+  inputs?:         ('image' | 'text' | 'mesh')[]   // multi-input; overrides input when set
   output:          'image' | 'text' | 'mesh'
   params:          ParamSchema[]
   builtin:         boolean
@@ -34,6 +35,7 @@ export function buildAllWorkflowExtensions(
         name:            node.name,
         description:     ext.description ?? '',
         input:           node.input,
+        inputs:          node.inputs,
         output:          node.output,
         params:          node.paramsSchema as ParamSchema[],
         builtin:         ext.builtin,
@@ -53,6 +55,7 @@ export function buildAllWorkflowExtensions(
         name:            node.name,
         description:     ext.description ?? '',
         input:           node.input,
+        inputs:          node.inputs,
         output:          node.output,
         params:          node.paramsSchema as ParamSchema[],
         builtin:         ext.builtin,

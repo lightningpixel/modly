@@ -7,6 +7,7 @@ export interface ExtensionNode {
   id:               string
   name:             string
   input:            'image' | 'text' | 'mesh'
+  inputs?:          ('image' | 'text' | 'mesh')[]   // multi-input nodes; overrides input when set
   output:           'image' | 'text' | 'mesh'
   paramsSchema:     ParamSchema[]
   hfRepo?:          string
