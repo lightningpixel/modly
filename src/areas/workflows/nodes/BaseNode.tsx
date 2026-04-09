@@ -1,6 +1,8 @@
-import { useState, useRef, useLayoutEffect } from 'react'
+import { useState, useRef } from 'react'
 import { NodeResizer, useReactFlow } from '@xyflow/react'
 import type { ReactNode } from 'react'
+
+const RESIZER_HANDLE_STYLE = { background: 'transparent', border: 'none', width: 12, height: 12 }
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -28,6 +30,7 @@ export interface BaseNodeProps {
   // Resize
   minWidth?:  number   // default 180
   minHeight?: number   // default 60
+  autoHeight?: boolean  // when true: node sizes to content, no vertical resize
 
   // Body content (hidden when collapsed)
   children?: ReactNode
@@ -45,27 +48,19 @@ export default function BaseNode({
   subheader, handles,
   minWidth  = 180,
   minHeight = 60,
+  autoHeight = false,
   children,
 }: BaseNodeProps) {
   const { updateNodeData, deleteElements } = useReactFlow()
   const [expanded, setExpanded] = useState(defaultExpanded)
   const rootRef = useRef<HTMLDivElement>(null)
-  const [minW, setMinW] = useState(minWidth)
-  const [minH, setMinH] = useState(minHeight)
-
-  useLayoutEffect(() => {
-    if (rootRef.current) {
-      setMinW(rootRef.current.offsetWidth)
-      setMinH(rootRef.current.offsetHeight)
-    }
-  }, [])
 
   const isDisabled = enabled === false
 
   return (
     <div
       ref={rootRef}
-      style={{ width: '100%', height: '100%' }}
+      style={autoHeight ? { width: '100%' } : { width: '100%', height: '100%' }}
       className={`relative rounded-xl border bg-zinc-900/95 backdrop-blur-sm shadow-xl transition-all flex flex-col
         ${running    ? 'border-accent shadow-[0_0_16px_rgba(99,102,241,0.35)] animate-pulse'
         : selected   ? 'border-accent/70'
@@ -73,9 +68,9 @@ export default function BaseNode({
         : 'border-zinc-700'}`}
     >
       <NodeResizer
-        minWidth={minW} minHeight={minH}
+        minWidth={minWidth} minHeight={autoHeight ? 0 : minHeight}
         lineStyle={{ borderColor: 'transparent' }}
-        handleStyle={{ background: 'transparent', border: 'none', width: 12, height: 12 }}
+        handleStyle={autoHeight ? { display: 'none' } : RESIZER_HANDLE_STYLE}
       />
 
       {/* React Flow handles — must live at root level */}
