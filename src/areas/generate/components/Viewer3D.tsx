@@ -12,6 +12,8 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast
 import { useGeneration } from '@shared/hooks/useGeneration'
 import { useAppStore } from '@shared/stores/appStore'
 import { ViewerToolbar, type ViewMode } from './ViewerToolbar'
+import type { LightSettings } from '../GeneratePage'
+import { DEFAULT_LIGHT_SETTINGS } from '../GeneratePage'
 
 // ---------------------------------------------------------------------------
 // Procedural textures
@@ -331,7 +333,7 @@ function EmptyState(): JSX.Element {
 // Viewer3D
 // ---------------------------------------------------------------------------
 
-export default function Viewer3D(): JSX.Element {
+export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS }: { lightSettings?: LightSettings }): JSX.Element {
   const { currentJob } = useGeneration()
   const apiUrl = useAppStore((s) => s.apiUrl)
 
@@ -403,9 +405,9 @@ export default function Viewer3D(): JSX.Element {
 
           {modelUrl && currentJob ? (
             <Suspense fallback={null}>
-              <hemisphereLight args={['#ffffff', '#444466', 1.2]} />
-              <directionalLight position={[5, 8, 5]} intensity={1.5} castShadow />
-              <directionalLight position={[-4, 2, -4]} intensity={0.6} />
+              <hemisphereLight args={[lightSettings.ambientColor, '#444466', lightSettings.ambientIntensity]} />
+              <directionalLight position={[5, 8, 5]} color={lightSettings.mainColor} intensity={lightSettings.mainIntensity} castShadow />
+              <directionalLight position={[-4, 2, -4]} color={lightSettings.fillColor} intensity={lightSettings.fillIntensity} />
               <MeshModel
                 url={modelUrl}
                 jobId={currentJob.id}
