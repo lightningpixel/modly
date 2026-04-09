@@ -246,7 +246,7 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
             const val = (data.params[param.id] ?? param.default) as number | string
             return (
               <div key={param.id} className="flex items-center gap-2">
-                <label className="text-[10px] text-zinc-500 w-20 shrink-0 truncate">{param.label}</label>
+                <label className="text-[10px] text-zinc-500 w-24 shrink-0 leading-tight">{param.label}</label>
                 <div className="flex-1">
                   <ParamControl param={param} value={val} onChange={(v) => patchParam(param.id, v)} />
                 </div>
