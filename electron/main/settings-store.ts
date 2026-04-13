@@ -7,6 +7,7 @@ export interface AppSettings {
   workflowsDir:     string
   extensionsDir:    string
   dependenciesDir:  string
+  hfToken?:         string
 }
 
 function settingsPath(userData: string): string {

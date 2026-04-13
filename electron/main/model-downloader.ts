@@ -4,6 +4,8 @@
  */
 import { existsSync, readdirSync, statSync, readFileSync } from 'fs'
 import { join } from 'path'
+import { getSettings } from './settings-store'
+import { app } from 'electron'
 
 export interface DownloadProgress {
   percent: number
@@ -115,6 +117,10 @@ export async function downloadModelFromHF(
   let url = `${PYTHON_API_URL}/model/hf-download?repo_id=${encodeURIComponent(repoId)}&model_id=${encodeURIComponent(modelId)}`
   if (skipPrefixes && skipPrefixes.length > 0) {
     url += `&skip_prefixes=${encodeURIComponent(JSON.stringify(skipPrefixes))}`
+  }
+  const hfToken = getSettings(app.getPath('userData')).hfToken
+  if (hfToken) {
+    url += `&token=${encodeURIComponent(hfToken)}`
   }
 
   const res = await net.fetch(url)

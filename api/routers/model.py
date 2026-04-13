@@ -68,18 +68,20 @@ async def unload_model(model_id: str):
 
 
 @router.get("/hf-download")
-async def hf_download(repo_id: str, model_id: str, skip_prefixes: Optional[str] = None):
+async def hf_download(repo_id: str, model_id: str, skip_prefixes: Optional[str] = None, token: Optional[str] = None):
     """
     Streams a HuggingFace Hub model download via SSE.
     Downloads into MODELS_DIR / model_id applying the filtering
     declared in the extension manifest (hf_skip_prefixes).
 
     skip_prefixes: JSON-encoded list of path prefixes to exclude (passed from Electron).
+    token: HuggingFace access token for gated repos (passed from Electron settings).
     Falls back to registry manifest if not provided.
 
     SSE format: data: {"percent": 0-100, "file": "...", "status": "..."}
     """
     import json as _json
+    import os
     dest_dir  = str(MODELS_DIR / model_id)
     # Prefer skip_prefixes passed directly from the client (authoritative, no registry dep)
     if skip_prefixes:
@@ -93,6 +95,9 @@ async def hf_download(repo_id: str, model_id: str, skip_prefixes: Optional[str] 
         except KeyError:
             skip_list = []
 
+    # Token: explicit param > env var
+    hf_token = token or os.environ.get("HUGGING_FACE_HUB_TOKEN") or os.environ.get("HF_TOKEN") or None
+
     async def stream():
         loop = asyncio.get_running_loop()
 
@@ -100,12 +105,12 @@ async def hf_download(repo_id: str, model_id: str, skip_prefixes: Optional[str] 
             return f"data: {json.dumps(data)}\n\n"
 
         try:
-            yield _fmt({"percent": 0, "status": "Listing repository files…"})
+            yield _fmt({"percent": 0, "status": "Listing repository files..."})
 
             def _list_files():
                 from huggingface_hub import list_repo_files
                 return [
-                    f for f in list_repo_files(repo_id)
+                    f for f in list_repo_files(repo_id, token=hf_token)
                     if not any(f.startswith(p) for p in skip_list)
                 ]
 
@@ -116,7 +121,7 @@ async def hf_download(repo_id: str, model_id: str, skip_prefixes: Optional[str] 
                 yield _fmt({"error": f"No files found in HuggingFace repo: {repo_id}"})
                 return
 
-            yield _fmt({"percent": 1, "status": f"Downloading {total} files…"})
+            yield _fmt({"percent": 1, "status": f"Downloading {total} files..."})
 
             from huggingface_hub import hf_hub_download
 
@@ -127,6 +132,7 @@ async def hf_download(repo_id: str, model_id: str, skip_prefixes: Optional[str] 
                         filename=f,
                         local_dir=dest_dir,
                         local_dir_use_symlinks=False,
+                        token=hf_token,
                     )
 
                 await loop.run_in_executor(None, _dl)

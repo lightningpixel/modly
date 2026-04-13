@@ -344,13 +344,33 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     apiUrl:    API_BASE_URL
   }))
 
-  // Settings
+  // Settings — seed HF token into main-process env at startup
+  {
+    const initialToken = getSettings(app.getPath('userData')).hfToken ?? ''
+    if (initialToken) {
+      process.env['HUGGING_FACE_HUB_TOKEN'] = initialToken
+      process.env['HF_TOKEN']               = initialToken
+    }
+  }
+
   ipcMain.handle('settings:get', () => {
     return getSettings(app.getPath('userData'))
   })
 
-  ipcMain.handle('settings:set', (_event, patch: { modelsDir?: string; workspaceDir?: string; extensionsDir?: string }) => {
-    return setSettings(app.getPath('userData'), patch)
+  ipcMain.handle('settings:set', async (_event, patch: { modelsDir?: string; workspaceDir?: string; extensionsDir?: string; hfToken?: string }) => {
+    const updated = setSettings(app.getPath('userData'), patch)
+    // Keep main-process env in sync so child processes spawned after token change inherit it
+    if (patch.hfToken !== undefined) {
+      process.env['HUGGING_FACE_HUB_TOKEN'] = patch.hfToken
+      process.env['HF_TOKEN']               = patch.hfToken
+      // Also push the token into the live FastAPI process env so extension
+      // subprocesses spawned by ExtensionProcess._build_env() pick it up
+      // without requiring a full app restart.
+      try {
+        await axios.post(`${API_BASE_URL}/settings/hf-token`, { token: patch.hfToken }, { timeout: 3000 })
+      } catch { /* FastAPI may not be running yet — ignore */ }
+    }
+    return updated
   })
 
   // Directory picker

@@ -1,3 +1,4 @@
+import os
 from fastapi import APIRouter
 from pydantic import BaseModel
 from pathlib import Path
@@ -11,6 +12,10 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 class PathsUpdate(BaseModel):
     models_dir:    Optional[str] = None
     workspace_dir: Optional[str] = None
+
+
+class TokenUpdate(BaseModel):
+    token: str
 
 
 @router.get("/paths")
@@ -31,3 +36,18 @@ async def update_paths(body: PathsUpdate):
         "models_dir":    str(reg_module.MODELS_DIR),
         "workspace_dir": str(reg_module.WORKSPACE_DIR),
     }
+
+
+@router.post("/hf-token")
+async def update_hf_token(body: TokenUpdate):
+    """
+    Update the HuggingFace token in this process's environment so that
+    extension subprocesses spawned after this call inherit the new token.
+    """
+    if body.token:
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = body.token
+        os.environ["HF_TOKEN"]               = body.token
+    else:
+        os.environ.pop("HUGGING_FACE_HUB_TOKEN", None)
+        os.environ.pop("HF_TOKEN", None)
+    return {"ok": True}
