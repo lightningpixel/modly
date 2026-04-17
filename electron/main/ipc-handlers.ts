@@ -5,7 +5,7 @@ import { join } from 'path'
 import { rm as rmAsync, readFile, writeFile, mkdir, readdir, rename, cp } from 'fs/promises'
 import { existsSync, readdirSync, statSync } from 'fs'
 import axios from 'axios'
-import tar from 'tar'
+import * as tar from 'tar'
 import { PythonBridge, API_BASE_URL } from './python-bridge'
 import {
   isModelDownloaded,
