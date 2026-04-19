@@ -147,11 +147,15 @@ function MeshModel({ url, jobId, viewMode, onStats, onSelect }: MeshModelProps):
     }
   }, [url])
 
-  // Compute BVH on all geometries for fast raycasting (O(log N) vs O(N))
+  // Compute BVH on all geometries for fast raycasting (O(log N) vs O(N)).
+  // Also force DoubleSide on every material so faces with inverted normals
+  // (a known artifact of the flexible-dual-grid mesh decoder) are still visible.
   useEffect(() => {
     scene.traverse((child) => {
       if (child instanceof THREE.Mesh) {
         (child.geometry as any).computeBoundsTree()
+        const mats = Array.isArray(child.material) ? child.material : [child.material]
+        mats.forEach((m: THREE.Material) => { m.side = THREE.DoubleSide })
       }
     })
     return () => {
