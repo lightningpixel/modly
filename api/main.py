@@ -2,6 +2,7 @@
 Modly FastAPI backend.
 Runs locally within the Electron app to provide AI inference endpoints.
 """
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +20,13 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown: unload all models
     generator_registry.unload_all()
+
+
+class _StatusFilter(logging.Filter):
+    def filter(self, record):
+        return "/generate/status/" not in record.getMessage()
+
+logging.getLogger("uvicorn.access").addFilter(_StatusFilter())
 
 
 app = FastAPI(
