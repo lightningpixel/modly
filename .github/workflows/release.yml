@@ -81,6 +81,9 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Download Python embed
+        run: node scripts/download-python-embed.js
+
       - name: Build & Package (Linux)
         run: npm run build && npx electron-builder --linux --publish never
 
