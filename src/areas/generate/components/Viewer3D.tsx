@@ -12,6 +12,8 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast
 import { useGeneration } from '@shared/hooks/useGeneration'
 import { useAppStore } from '@shared/stores/appStore'
 import { ViewerToolbar, type ViewMode } from './ViewerToolbar'
+import type { LightSettings } from '../GeneratePage'
+import { DEFAULT_LIGHT_SETTINGS } from '../GeneratePage'
 
 // ---------------------------------------------------------------------------
 // Procedural textures
@@ -145,11 +147,15 @@ function MeshModel({ url, jobId, viewMode, onStats, onSelect }: MeshModelProps):
     }
   }, [url])
 
-  // Compute BVH on all geometries for fast raycasting (O(log N) vs O(N))
+  // Compute BVH on all geometries for fast raycasting (O(log N) vs O(N)).
+  // Also force DoubleSide on every material so faces with inverted normals
+  // (a known artifact of the flexible-dual-grid mesh decoder) are still visible.
   useEffect(() => {
     scene.traverse((child) => {
       if (child instanceof THREE.Mesh) {
         (child.geometry as any).computeBoundsTree()
+        const mats = Array.isArray(child.material) ? child.material : [child.material]
+        mats.forEach((m: THREE.Material) => { m.side = THREE.DoubleSide })
       }
     })
     return () => {
@@ -331,7 +337,7 @@ function EmptyState(): JSX.Element {
 // Viewer3D
 // ---------------------------------------------------------------------------
 
-export default function Viewer3D(): JSX.Element {
+export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS }: { lightSettings?: LightSettings }): JSX.Element {
   const { currentJob } = useGeneration()
   const apiUrl = useAppStore((s) => s.apiUrl)
 
@@ -403,9 +409,8 @@ export default function Viewer3D(): JSX.Element {
 
           {modelUrl && currentJob ? (
             <Suspense fallback={null}>
-              <hemisphereLight args={['#ffffff', '#444466', 1.2]} />
-              <directionalLight position={[5, 8, 5]} intensity={1.5} castShadow />
-              <directionalLight position={[-4, 2, -4]} intensity={0.6} />
+<directionalLight position={[5, 8, 5]} color={lightSettings.mainColor} intensity={lightSettings.mainIntensity} castShadow />
+              <directionalLight position={[-4, 2, -4]} color={lightSettings.fillColor} intensity={lightSettings.fillIntensity} />
               <MeshModel
                 url={modelUrl}
                 jobId={currentJob.id}

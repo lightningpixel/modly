@@ -57,6 +57,8 @@ interface WorkflowRunStore {
   runState:         WorkflowRunState
   activeNodeId:     string | null
   activeWorkflowId: string | null
+  /** nodeId → workspace URL for image outputs (populated after each run) */
+  nodeImageOutputs: Record<string, string>
 
   run:    (workflow: Workflow, allExtensions: WorkflowExtension[]) => Promise<void>
   cancel: () => void
@@ -67,6 +69,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
   runState:         IDLE,
   activeNodeId:     null,
   activeWorkflowId: null,
+  nodeImageOutputs: {},
 
   async run(workflow, allExtensions) {
     _cancel.current = false
@@ -76,13 +79,13 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
     const ordered      = topoSort(workflow.nodes, workflow.edges)
     const execNodes    = ordered.filter((n) => n.type === 'extensionNode' && n.data.enabled)
 
-    // Capture before setCurrentJob overwrites currentJob
     const selectedImagePath = appState.selectedImagePath ?? ''
     const selectedImageData = appState.selectedImageData ?? undefined
     const currentMeshUrl    = appState.currentJob?.outputUrl
 
     set({
       activeWorkflowId: workflow.id,
+      nodeImageOutputs: {},
       runState: { status: 'running', blockIndex: 0, blockTotal: execNodes.length, blockProgress: 0, blockStep: 'Starting…' },
     })
 
@@ -95,17 +98,22 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
     })
 
     try {
-      const client       = axios.create({ baseURL: apiUrl })
-      const settings     = await window.electron.settings.get()
+      const client   = axios.create({ baseURL: apiUrl })
+      const settings = await window.electron.settings.get()
       const workspaceDir = settings.workspaceDir.replace(/\\/g, '/')
 
-      const nodeOutputs = new Map<string, { filePath?: string; text?: string }>()
+      // Clean up tmp folder from previous run
+      const tmpAbsPath = settings.workspaceDir.replace(/[\\/]+$/, '') + '/tmp'
+      window.electron.fs.deleteDirectory(tmpAbsPath).catch(() => {})
+
+      // nodeId → { filePath, text, outputType }
+      const nodeOutputs = new Map<string, { filePath?: string; text?: string; outputType?: string }>()
 
       // Pre-populate source nodes
       for (const node of ordered) {
         if (node.type === 'imageNode') {
           const fp = node.data.params?.filePath as string | undefined
-          nodeOutputs.set(node.id, { filePath: fp ?? selectedImagePath })
+          nodeOutputs.set(node.id, { filePath: fp ?? selectedImagePath, outputType: 'image' })
         }
         if (node.type === 'textNode') {
           nodeOutputs.set(node.id, { text: node.data.params?.text as string | undefined })
@@ -113,11 +121,20 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
         if (node.type === 'meshNode') {
           const source = node.data.params?.source as 'file' | 'current' | undefined
           if (source === 'current' && currentMeshUrl) {
-            const rel = currentMeshUrl.replace(/^\/workspace\//, '')
-            nodeOutputs.set(node.id, { filePath: `${workspaceDir}/${rel}` })
+            let meshFilePath: string
+            if (currentMeshUrl.includes('serve-file?path=')) {
+              // URL like /optimize/serve-file?path=D%3A%5C... → extract and decode the real path
+              const encoded = currentMeshUrl.split('serve-file?path=')[1]
+              meshFilePath = decodeURIComponent(encoded).replace(/\\/g, '/')
+            } else {
+              // URL like /workspace/Workflows/file.glb → resolve to absolute path
+              const rel = currentMeshUrl.replace(/^\/workspace\//, '')
+              meshFilePath = `${workspaceDir}/${rel}`
+            }
+            nodeOutputs.set(node.id, { filePath: meshFilePath, outputType: 'mesh' })
           } else {
             const fp = node.data.params?.filePath as string | undefined
-            if (fp) nodeOutputs.set(node.id, { filePath: fp })
+            if (fp) nodeOutputs.set(node.id, { filePath: fp, outputType: 'mesh' })
           }
         }
       }
@@ -128,18 +145,36 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
         const node = execNodes[i]
         const ext  = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
 
-        let nodeInputPath: string | undefined
-        let nodeInputText: string | undefined
-        for (const edge of workflow.edges.filter((e) => e.target === node.id)) {
-          const src = nodeOutputs.get(edge.source)
-          if (src?.filePath !== undefined) nodeInputPath = src.filePath
-          if (src?.text     !== undefined) nodeInputText = src.text
-        }
-        // Fallback: if no edge supplied a file/text, use the previous node's output
-        if (nodeInputPath === undefined && nodeInputText === undefined && i > 0) {
-          const prev = nodeOutputs.get(execNodes[i - 1].id)
-          if (prev?.filePath !== undefined) nodeInputPath = prev.filePath
-          if (prev?.text     !== undefined) nodeInputText = prev.text
+        // ── Resolve inputs ────────────────────────────────────────────────
+        let nodeInputPath:     string | undefined
+        let nodeInputText:     string | undefined
+        let nodeInputMeshPath: string | undefined
+
+        const incomingEdges = workflow.edges.filter((e) => e.target === node.id)
+
+        if (ext?.inputs && ext.inputs.length > 1) {
+          // Multi-input: route each incoming edge by the source node's outputType
+          for (const edge of incomingEdges) {
+            const src = nodeOutputs.get(edge.source)
+            if (!src) continue
+            if (src.outputType === 'mesh')        nodeInputMeshPath = src.filePath
+            else if (src.outputType === 'image')  nodeInputPath     = src.filePath
+            else if (src.filePath !== undefined)  nodeInputPath     = src.filePath
+            if (src.text !== undefined)           nodeInputText     = src.text
+          }
+        } else {
+          // Single-input
+          for (const edge of incomingEdges) {
+            const src = nodeOutputs.get(edge.source)
+            if (src?.filePath !== undefined) nodeInputPath = src.filePath
+            if (src?.text     !== undefined) nodeInputText = src.text
+          }
+          // Fallback to previous node's output
+          if (nodeInputPath === undefined && nodeInputText === undefined && i > 0) {
+            const prev = nodeOutputs.get(execNodes[i - 1].id)
+            if (prev?.filePath !== undefined) nodeInputPath = prev.filePath
+            if (prev?.text     !== undefined) nodeInputText = prev.text
+          }
         }
 
         set((s) => ({
@@ -147,12 +182,27 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
           runState: { ...s.runState, blockIndex: i, blockProgress: 0, blockStep: 'Starting…' },
         }))
 
-        if (ext?.input === 'image' && ext?.output === 'mesh') {
-          const imagePath = nodeInputPath ?? selectedImagePath
-          const base64    = selectedImageData ?? await window.electron.fs.readFileBase64(imagePath)
-          const bytes     = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
-          const blob      = new Blob([bytes], { type: 'image/png' })
-          const fname     = imagePath.split(/[\\/]/).pop() ?? 'image.png'
+        // ── Model extensions → HTTP API ───────────────────────────────────
+        // Process extensions → IPC runProcess
+        const isModelNode = ext?.type === 'model'
+
+        if (isModelNode) {
+          const activeImagePath = nodeInputPath ?? selectedImagePath
+          const base64 = selectedImageData && nodeInputPath === undefined
+            ? selectedImageData
+            : await window.electron.fs.readFileBase64(activeImagePath)
+          const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+          const blob  = new Blob([bytes], { type: 'image/png' })
+          const fname = activeImagePath.split(/[\\/]/).pop() ?? 'image.png'
+
+          // For multi-input nodes: inject mesh path as params.mesh_path
+          const extraParams: Record<string, unknown> = {}
+          if (nodeInputMeshPath) {
+            const norm = nodeInputMeshPath.replace(/\\/g, '/')
+            extraParams.mesh_path = norm.startsWith(workspaceDir)
+              ? norm.slice(workspaceDir.length).replace(/^\//, '')
+              : norm
+          }
 
           const fd = new FormData()
           fd.append('image', blob, fname)
@@ -161,7 +211,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
           fd.append('remesh', 'none')
           fd.append('enable_texture', 'false')
           fd.append('texture_resolution', '1024')
-          fd.append('params', JSON.stringify(node.data.params))
+          fd.append('params', JSON.stringify({ ...node.data.params, ...extraParams }))
 
           set((s) => ({ runState: { ...s.runState, blockProgress: 5, blockStep: 'Submitting to model…' } }))
 
@@ -204,6 +254,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
           }
 
         } else {
+          // ── Process extension → IPC ─────────────────────────────────────
           const parts  = (node.data.extensionId ?? '').split('/')
           const extId  = parts[0]
           const nodeId = parts[1] ?? ''
@@ -218,10 +269,23 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
           set((s) => ({ runState: { ...s.runState, blockProgress: 100, blockStep: 'Done' } }))
         }
 
-        nodeOutputs.set(node.id, { filePath: nodeInputPath, text: nodeInputText })
+        // Store output with type for downstream routing
+        const outputType = ext?.output ?? (nodeInputPath ? 'mesh' : undefined)
+        nodeOutputs.set(node.id, { filePath: nodeInputPath, text: nodeInputText, outputType })
       }
 
-      // Resolve output URL
+      // ── Collect image outputs for preview nodes ───────────────────────
+      const imageOutputs: Record<string, string> = {}
+      for (const [nodeId, out] of nodeOutputs) {
+        if (out.outputType === 'image' && out.filePath) {
+          const norm = out.filePath.replace(/\\/g, '/')
+          if (norm.startsWith(workspaceDir)) {
+            imageOutputs[nodeId] = `/workspace/${norm.slice(workspaceDir.length).replace(/^\//, '')}`
+          }
+        }
+      }
+
+      // ── Resolve final output URL ──────────────────────────────────────
       let outputUrl:  string | undefined
       let outputPath: string | undefined
 
@@ -252,7 +316,8 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
       }
 
       set({
-        activeNodeId: null,
+        activeNodeId:     null,
+        nodeImageOutputs: imageOutputs,
         runState: {
           status:        'done',
           blockIndex:    execNodes.length > 0 ? execNodes.length - 1 : 0,
@@ -280,10 +345,10 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
       axios.create({ baseURL: apiUrl }).post(`/generate/cancel/${_activeJobId.current}`).catch(() => {})
       _activeJobId.current = null
     }
-    set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null })
+    set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null, nodeImageOutputs: {} })
   },
 
   reset() {
-    set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null })
+    set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null, nodeImageOutputs: {} })
   },
 }))

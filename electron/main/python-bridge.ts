@@ -51,12 +51,14 @@ export class PythonBridge {
       cwd: apiDir,
       env: {
         ...cleanPythonEnv(),
-        PYTHONUNBUFFERED:  '1',
+        PYTHONUNBUFFERED:          '1',
         // No PYTHONPATH needed — the venv's Python has its own isolated site-packages
-        MODELS_DIR:        this.resolveModelsDir(),
-        WORKSPACE_DIR:     this.resolveWorkspaceDir(),
-        EXTENSIONS_DIR:    this.resolveExtensionsDir(),
-        SELECTED_MODEL_ID: process.env['SELECTED_MODEL_ID'] ?? '',
+        MODELS_DIR:                this.resolveModelsDir(),
+        WORKSPACE_DIR:             this.resolveWorkspaceDir(),
+        EXTENSIONS_DIR:            this.resolveExtensionsDir(),
+        SELECTED_MODEL_ID:         process.env['SELECTED_MODEL_ID'] ?? '',
+        HUGGING_FACE_HUB_TOKEN:    this.resolveHfToken(),
+        HF_TOKEN:                  this.resolveHfToken(),
       }
     })
 
@@ -206,5 +208,9 @@ export class PythonBridge {
     const s = getSettings(app.getPath('userData'))
     mkdirSync(s.extensionsDir, { recursive: true })
     return s.extensionsDir
+  }
+
+  private resolveHfToken(): string {
+    return getSettings(app.getPath('userData')).hfToken ?? ''
   }
 }

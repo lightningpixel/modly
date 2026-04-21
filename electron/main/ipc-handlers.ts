@@ -5,7 +5,7 @@ import { join } from 'path'
 import { rm as rmAsync, readFile, writeFile, mkdir, readdir, rename, cp } from 'fs/promises'
 import { existsSync, readdirSync, statSync } from 'fs'
 import axios from 'axios'
-import tar from 'tar'
+import * as tar from 'tar'
 import { PythonBridge, API_BASE_URL } from './python-bridge'
 import {
   isModelDownloaded,
@@ -344,13 +344,33 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     apiUrl:    API_BASE_URL
   }))
 
-  // Settings
+  // Settings — seed HF token into main-process env at startup
+  {
+    const initialToken = getSettings(app.getPath('userData')).hfToken ?? ''
+    if (initialToken) {
+      process.env['HUGGING_FACE_HUB_TOKEN'] = initialToken
+      process.env['HF_TOKEN']               = initialToken
+    }
+  }
+
   ipcMain.handle('settings:get', () => {
     return getSettings(app.getPath('userData'))
   })
 
-  ipcMain.handle('settings:set', (_event, patch: { modelsDir?: string; workspaceDir?: string; extensionsDir?: string }) => {
-    return setSettings(app.getPath('userData'), patch)
+  ipcMain.handle('settings:set', async (_event, patch: { modelsDir?: string; workspaceDir?: string; extensionsDir?: string; hfToken?: string }) => {
+    const updated = setSettings(app.getPath('userData'), patch)
+    // Keep main-process env in sync so child processes spawned after token change inherit it
+    if (patch.hfToken !== undefined) {
+      process.env['HUGGING_FACE_HUB_TOKEN'] = patch.hfToken
+      process.env['HF_TOKEN']               = patch.hfToken
+      // Also push the token into the live FastAPI process env so extension
+      // subprocesses spawned by ExtensionProcess._build_env() pick it up
+      // without requiring a full app restart.
+      try {
+        await axios.post(`${API_BASE_URL}/settings/hf-token`, { token: patch.hfToken }, { timeout: 3000 })
+      } catch { /* FastAPI may not be running yet — ignore */ }
+    }
+    return updated
   })
 
   // Directory picker
@@ -510,6 +530,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       id:                string
       name?:             string
       input?:            'mesh' | 'image' | 'text'
+      inputs?:           ('mesh' | 'image' | 'text')[]
       output?:           'mesh' | 'image' | 'text'
       params_schema?:    unknown[]
       hf_repo?:          string
@@ -534,6 +555,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       id:             n.id,
       name:           n.name ?? n.id,
       input:          n.input  ?? 'image' as const,
+      inputs:         n.inputs,
       output:         n.output ?? 'mesh'  as const,
       paramsSchema:   n.params_schema ?? [],
       hfRepo:         n.hf_repo,
