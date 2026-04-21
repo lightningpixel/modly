@@ -409,8 +409,7 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS }: { l
 
           {modelUrl && currentJob ? (
             <Suspense fallback={null}>
-              <hemisphereLight args={[lightSettings.ambientColor, '#444466', lightSettings.ambientIntensity]} />
-              <directionalLight position={[5, 8, 5]} color={lightSettings.mainColor} intensity={lightSettings.mainIntensity} castShadow />
+<directionalLight position={[5, 8, 5]} color={lightSettings.mainColor} intensity={lightSettings.mainIntensity} castShadow />
               <directionalLight position={[-4, 2, -4]} color={lightSettings.fillColor} intensity={lightSettings.fillIntensity} />
               <MeshModel
                 url={modelUrl}

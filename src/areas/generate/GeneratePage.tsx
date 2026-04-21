@@ -128,8 +128,6 @@ function DecimatePopover({
 // ---------------------------------------------------------------------------
 
 export interface LightSettings {
-  ambientIntensity: number
-  ambientColor: string
   mainIntensity: number
   mainColor: string
   fillIntensity: number
@@ -137,8 +135,6 @@ export interface LightSettings {
 }
 
 export const DEFAULT_LIGHT_SETTINGS: LightSettings = {
-  ambientIntensity: 1.2,
-  ambientColor: '#ffffff',
   mainIntensity: 1.5,
   mainColor: '#ffffff',
   fillIntensity: 0.6,
@@ -196,7 +192,6 @@ function LightPopover({
           Reset
         </button>
       </div>
-      {lightRow('Ambient', 'ambientColor', 'ambientIntensity', 3)}
       {lightRow('Sun', 'mainColor', 'mainIntensity', 4)}
       {lightRow('Fill', 'fillColor', 'fillIntensity', 2)}
       <button
