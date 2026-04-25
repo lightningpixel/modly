@@ -488,7 +488,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   // Remote registry — list of trusted GitHub repo URLs
-  const REGISTRY_URL = 'https://raw.githubusercontent.com/liightnig125/modly-official-extension/main/registry.json'
+  const REGISTRY_URL = 'https://raw.githubusercontent.com/lightningpixel/modly-official-extension/main/registry.json'
   const REGISTRY_TTL = 5 * 60 * 1000 // 5 minutes
 
   let registryCache: { repos: Set<string>; fetchedAt: number } | null = null
