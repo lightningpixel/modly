@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useAppStore } from '@shared/stores/appStore'
+import { useAgentStore } from '@shared/stores/agentStore'
 import { useWorkflowsStore } from '@shared/stores/workflowsStore'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
 import { useWorkflowRunStore } from '@areas/workflows/workflowRunStore'
@@ -7,7 +8,7 @@ import { buildAllWorkflowExtensions } from '@areas/workflows/mockExtensions'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type ThinkingMode = 'auto' | 'on' | 'off'
+import type { ThinkingMode } from '@shared/stores/agentStore'
 
 interface Message {
   id: string
@@ -32,8 +33,6 @@ interface ActionDone {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const OLLAMA_URL  = 'http://localhost:11434'
-const OLLAMA_MODEL = 'gemma4:e4b'
 const COLLAPSE_AFTER = 4
 
 // ─── Prose renderer — basic markdown-like ────────────────────────────────────
@@ -237,18 +236,20 @@ function WorkflowProgressCard({ name }: { name: string }): JSX.Element {
 // ─── Main component ──────────────────────────────────────────────────────────
 
 export default function ChatPanel(): JSX.Element {
+  const { ollamaUrl, defaultModel, defaultThinking } = useAgentStore()
+
   const [messages, setMessages]               = useState<Message[]>([])
   const [input, setInput]                     = useState('')
   const [isLoading, setIsLoading]             = useState(false)
   const [error, setError]                     = useState<string | null>(null)
   const [showAll, setShowAll]                 = useState(false)
-  const [model, setModel]                     = useState(OLLAMA_MODEL)
+  const [model, setModel]                     = useState(defaultModel)
   const [showModelPicker, setShowModelPicker] = useState(false)
   const [ollamaModels, setOllamaModels]       = useState<string[]>([])
   const [pendingWorkflow, setPendingWorkflow]  = useState<{ id: string; name: string } | null>(null)
   const [attachments, setAttachments]         = useState<string[]>([]) // data URLs
   const [isDragging, setIsDragging]           = useState(false)
-  const [thinkingMode, setThinkingMode]       = useState<ThinkingMode>('auto')
+  const [thinkingMode, setThinkingMode]       = useState<ThinkingMode>(defaultThinking)
   const endRef                                = useRef<HTMLDivElement>(null)
   const textareaRef                           = useRef<HTMLTextAreaElement>(null)
   const modelPickerRef                        = useRef<HTMLDivElement>(null)
@@ -348,7 +349,7 @@ export default function ChatPanel(): JSX.Element {
       const res = await fetch(`${apiUrl}/agent/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: apiMessages, ollama_url: OLLAMA_URL, model, context, thinking: thinkingMode }),
+        body: JSON.stringify({ messages: apiMessages, ollama_url: ollamaUrl, model, context, thinking: thinkingMode }),
       })
       if (!res.ok) throw new Error(`API error ${res.status}`)
 
@@ -388,7 +389,7 @@ export default function ChatPanel(): JSX.Element {
 
   async function fetchOllamaModels() {
     try {
-      const res = await fetch(`${apiUrl}/agent/models?ollama_url=${encodeURIComponent(OLLAMA_URL)}`)
+      const res = await fetch(`${apiUrl}/agent/models?ollama_url=${encodeURIComponent(ollamaUrl)}`)
       const data = await res.json()
       setOllamaModels(data.models ?? [])
     } catch {
@@ -596,6 +597,7 @@ export default function ChatPanel(): JSX.Element {
             onKeyDown={handleKeyDown}
             placeholder="Ask Modly…"
             rows={1}
+            spellCheck={false}
             className="w-full bg-transparent text-[12.5px] text-zinc-200 placeholder-zinc-600 focus:outline-none resize-none leading-relaxed overflow-hidden"
           />
           <div className="flex items-center justify-between">
