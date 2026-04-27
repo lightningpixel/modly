@@ -1,0 +1,49 @@
+{
+  "id": "mesh-smoother",
+  "name": "Mesh Smoother",
+  "type": "process",
+  "entry": "processor.py",
+  "version": "1.0.0",
+  "author": "Modly",
+  "description": "Smooths mesh vertices to reduce sharp artifacts (e.g. zipper triangles from AI-generated meshes) using Taubin smoothing.",
+  "nodes": [
+    {
+      "id": "smooth",
+      "name": "Smooth",
+      "input": "mesh",
+      "output": "mesh",
+      "params_schema": [
+        {
+          "id": "iterations",
+          "label": "Iterations",
+          "type": "int",
+          "default": 5,
+          "min": 1,
+          "max": 50,
+          "tooltip": "Number of smoothing passes. More iterations = smoother result but may lose fine details."
+        },
+        {
+          "id": "lambda_",
+          "label": "Smoothing Strength",
+          "type": "float",
+          "default": 0.5,
+          "min": 0.1,
+          "max": 1.0,
+          "step": 0.05,
+          "tooltip": "Controls how far each vertex moves toward its neighbours per iteration. Lower = more conservative."
+        },
+        {
+          "id": "mode",
+          "label": "Mode",
+          "type": "select",
+          "default": "taubin",
+          "options": [
+            { "value": "taubin",    "label": "Taubin (volume-preserving)" },
+            { "value": "laplacian", "label": "Laplacian (stronger, may shrink)" }
+          ],
+          "tooltip": "Taubin alternates positive/negative steps to prevent mesh shrinkage. Laplacian is simpler but tends to shrink the mesh over many iterations."
+        }
+      ]
+    }
+  ]
+}

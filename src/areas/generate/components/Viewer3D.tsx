@@ -1,7 +1,7 @@
 import { Component, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode, ErrorInfo } from 'react'
 import { Canvas, useThree } from '@react-three/fiber'
-import { GizmoHelper, OrbitControls, useGizmoContext, useGLTF } from '@react-three/drei'
+import { Environment, GizmoHelper, Lightformer, OrbitControls, useGizmoContext, useGLTF } from '@react-three/drei'
 import * as THREE from 'three'
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh'
 
@@ -404,6 +404,12 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS }: { l
         >
           <color attach="background" args={['#18181b']} />
           <CanvasCapture domRef={canvasRef} />
+          <ambientLight intensity={0.3} />
+          <Environment background={false}>
+            <Lightformer intensity={2} position={[0, 4, 4]} scale={8} />
+            <Lightformer intensity={0.5} position={[-4, 2, -4]} scale={6} />
+            <Lightformer intensity={0.3} position={[4, 1, -4]} scale={6} />
+          </Environment>
 
           <gridHelper args={[10, 20, '#3f3f46', '#27272a']} />
 

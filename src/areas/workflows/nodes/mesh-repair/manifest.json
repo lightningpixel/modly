@@ -1,0 +1,56 @@
+{
+  "id": "mesh-repair",
+  "name": "Mesh Repair",
+  "type": "process",
+  "entry": "processor.py",
+  "version": "1.2.0",
+  "author": "Modly",
+  "description": "Repairs mesh topology: removes duplicates, degenerate faces, fixes non-manifold edges, fills simple boundary holes.",
+  "nodes": [
+    {
+      "id": "repair",
+      "name": "Repair",
+      "input": "mesh",
+      "output": "mesh",
+      "params_schema": [
+        {
+          "id": "remove_duplicates",
+          "label": "Remove Duplicates",
+          "type": "boolean",
+          "default": true,
+          "tooltip": "Remove duplicate vertices and faces."
+        },
+        {
+          "id": "remove_degenerate",
+          "label": "Remove Degenerate Faces",
+          "type": "boolean",
+          "default": true,
+          "tooltip": "Remove zero-area faces and collapsed edges."
+        },
+        {
+          "id": "fix_non_manifold",
+          "label": "Fix Non-Manifold",
+          "type": "boolean",
+          "default": true,
+          "tooltip": "Detach faces causing non-manifold edges."
+        },
+        {
+          "id": "fill_holes",
+          "label": "Fill Holes",
+          "type": "boolean",
+          "default": true,
+          "tooltip": "Fill simple boundary holes. Structural holes from AI generation may not be fillable in post-processing."
+        },
+        {
+          "id": "max_hole_size",
+          "label": "Max Hole Size",
+          "type": "int",
+          "default": 2000,
+          "min": 10,
+          "max": 10000,
+          "tooltip": "Maximum number of boundary edges of a hole to be filled. Increase if large holes remain open."
+        }
+      ]
+    }
+  ]
+}

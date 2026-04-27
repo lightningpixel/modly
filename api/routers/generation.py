@@ -174,6 +174,10 @@ async def _run_generation(job_id: str, image_bytes: bytes, params: dict, collect
         if job_id in _cancelled:
             return
         tb = traceback.format_exc()
-        print(f"[Generation ERROR] {exc}\n{tb}")
+        msg = f"[Generation ERROR] {exc}\n{tb}"
+        try:
+            print(msg)
+        except UnicodeEncodeError:
+            print(msg.encode("ascii", errors="replace").decode("ascii"))
         job.status = "error"
         job.error  = tb.strip()
