@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi import HTTPException
 
-from routers import generation, model, optimize, status, settings, extensions, export, workflow_runs
+from routers import generation, model, optimize, status, settings, extensions, export, workflow_runs, agent
 
 
 @asynccontextmanager
@@ -50,6 +50,7 @@ app.include_router(optimize.router,    prefix="/optimize")
 app.include_router(extensions.router, prefix="/extensions")
 app.include_router(export.router,          prefix="/export")
 app.include_router(workflow_runs.router,   prefix="/workflow-runs")
+app.include_router(agent.router)
 
 # Serve generated files from workspace — dynamic so path changes take effect immediately
 @app.get("/workspace/{full_path:path}")

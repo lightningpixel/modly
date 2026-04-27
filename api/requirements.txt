@@ -1,7 +1,11 @@
 # Web server
-fastapi==0.115.6
+fastapi>=0.115.6
 uvicorn[standard]==0.34.0
 python-multipart==0.0.20
+
+# Agent & MCP
+httpx>=0.27.0
+mcp>=1.0.0
 
 # Mesh processing (optimize + export endpoints)
 trimesh>=4.5.0

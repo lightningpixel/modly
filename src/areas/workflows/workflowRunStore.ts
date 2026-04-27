@@ -60,7 +60,7 @@ interface WorkflowRunStore {
   /** nodeId → workspace URL for image outputs (populated after each run) */
   nodeImageOutputs: Record<string, string>
 
-  run:    (workflow: Workflow, allExtensions: WorkflowExtension[]) => Promise<void>
+  run:    (workflow: Workflow, allExtensions: WorkflowExtension[], overrideImageData?: string) => Promise<void>
   cancel: () => void
   reset:  () => void
 }
@@ -71,7 +71,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
   activeWorkflowId: null,
   nodeImageOutputs: {},
 
-  async run(workflow, allExtensions) {
+  async run(workflow, allExtensions, overrideImageData?) {
     _cancel.current = false
 
     const appState     = useAppStore.getState()
@@ -80,7 +80,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
     const execNodes    = ordered.filter((n) => n.type === 'extensionNode' && n.data.enabled)
 
     const selectedImagePath = appState.selectedImagePath ?? ''
-    const selectedImageData = appState.selectedImageData ?? undefined
+    const selectedImageData = overrideImageData ?? appState.selectedImageData ?? undefined
     const currentMeshUrl    = appState.currentJob?.outputUrl
 
     set({
@@ -113,7 +113,10 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
       for (const node of ordered) {
         if (node.type === 'imageNode') {
           const fp = node.data.params?.filePath as string | undefined
-          nodeOutputs.set(node.id, { filePath: fp ?? selectedImagePath, outputType: 'image' })
+          // When the agent provides an override image, ignore any hardcoded filePath so the
+          // model node falls through to selectedImageData (= overrideImageData).
+          const resolvedPath = overrideImageData ? undefined : (fp ?? selectedImagePath ?? undefined)
+          nodeOutputs.set(node.id, { filePath: resolvedPath, outputType: 'image' })
         }
         if (node.type === 'textNode') {
           nodeOutputs.set(node.id, { text: node.data.params?.text as string | undefined })
