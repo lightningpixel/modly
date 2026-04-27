@@ -59,8 +59,13 @@ const processor = async (
   // error tolerance scales with aggressiveness: tighter simplification needs more room
   const error = Math.max(0.001, 1 - ratio)
 
-  context.progress(25, 'Welding vertices…')
-  await doc.transform(weld())
+  // Skip weld on large meshes — deduplication is O(N²) and stalls for millions of faces
+  if (currentFaces < 500_000) {
+    context.progress(25, 'Welding vertices…')
+    await doc.transform(weld())
+  } else {
+    context.log(`Skipping weld (${currentFaces} faces > 500k threshold)`)
+  }
 
   context.progress(55, 'Simplifying mesh…')
   await doc.transform(

@@ -69,11 +69,27 @@ def optimize_mesh(body: OptimizeRequest):
 
 
 def _has_texture(geom: trimesh.Trimesh) -> bool:
-    return (
-        isinstance(geom.visual, trimesh.visual.TextureVisuals)
-        and geom.visual.material is not None
-        and getattr(geom.visual.material, "image", None) is not None
-    )
+    if not isinstance(geom.visual, trimesh.visual.TextureVisuals):
+        return False
+    mat = geom.visual.material
+    if mat is None:
+        return False
+    # Simple material (SimpleMaterial / Material)
+    if getattr(mat, "image", None) is not None:
+        return True
+    # PBR material (from Trellis2 SLaT texturing and GLB imports)
+    if getattr(mat, "baseColorTexture", None) is not None:
+        return True
+    return False
+
+
+def _get_texture_image(geom: trimesh.Trimesh):
+    """Return the base color texture image regardless of material type."""
+    mat = geom.visual.material
+    img = getattr(mat, "image", None)
+    if img is not None:
+        return img
+    return getattr(mat, "baseColorTexture", None)
 
 
 def _decimate(input_path: str, target_faces: int, tmp_dir: str) -> trimesh.Trimesh:
@@ -93,8 +109,8 @@ def _decimate(input_path: str, target_faces: int, tmp_dir: str) -> trimesh.Trime
         tex_in  = os.path.join(tmp_dir, "texture.png")
         obj_out = os.path.join(tmp_dir, "output.obj")
 
-        # Save texture image under a known filename
-        geom.visual.material.image.save(tex_in)
+        # Save texture image under a known filename (handles PBR and simple materials)
+        _get_texture_image(geom).save(tex_in)
 
         # Export OBJ (trimesh writes UV coords + MTL)
         geom.export(obj_in)
@@ -183,7 +199,7 @@ def _smooth(input_path: str, iterations: int, tmp_dir: str) -> trimesh.Trimesh:
         tex_in  = os.path.join(tmp_dir, "texture.png")
         obj_out = os.path.join(tmp_dir, "output.obj")
 
-        geom.visual.material.image.save(tex_in)
+        _get_texture_image(geom).save(tex_in)
         geom.export(obj_in)
 
         if os.path.exists(mtl_in):
