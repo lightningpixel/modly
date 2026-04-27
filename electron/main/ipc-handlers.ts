@@ -250,17 +250,39 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   ipcMain.handle('model:delete', async (_, modelId: string): Promise<{ success: boolean; error?: string }> => {
     const modelDir = join(getSettings(app.getPath('userData')).modelsDir, modelId)
+
+    // Unload the model and wait for confirmation so file handles are released
     try {
-      await axios.post(`${API_BASE_URL}/model/unload/${encodeURIComponent(modelId)}`, {}, { timeout: 5000 })
+      await axios.post(`${API_BASE_URL}/model/unload/${encodeURIComponent(modelId)}`, {}, { timeout: 10_000 })
+      // Give the OS a moment to release file locks (Windows holds handles briefly after close)
+      await new Promise(resolve => setTimeout(resolve, 1_500))
     } catch {
-      // unload is best-effort — proceed with deletion anyway
+      // Unload failed (model may not be loaded) — still attempt deletion
     }
-    try {
-      await rmAsync(modelDir, { recursive: true, force: true })
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: String(err) }
+
+    // Retry removal — Windows may return EBUSY/EPERM if handles linger
+    const maxRetries = 3
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        await rmAsync(modelDir, { recursive: true, force: true })
+        return { success: true }
+      } catch (err: unknown) {
+        const code = (err as NodeJS.ErrnoException).code
+        const isLocked = code === 'EBUSY' || code === 'EPERM'
+        if (isLocked && attempt < maxRetries) {
+          await new Promise(resolve => setTimeout(resolve, 1_000 * attempt))
+          continue
+        }
+        return {
+          success: false,
+          error: isLocked
+            ? `Model files are still locked after ${maxRetries} attempts. Close any programs using the model and try again.`
+            : String(err),
+        }
+      }
     }
+
+    return { success: false, error: 'Unexpected error during deletion' }
   })
 
   ipcMain.handle('model:showInFolder', (_, modelId: string) => {
