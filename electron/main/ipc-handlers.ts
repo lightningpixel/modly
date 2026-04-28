@@ -6,6 +6,8 @@ import { rm as rmAsync, readFile, writeFile, mkdir, readdir, rename, cp } from '
 import { existsSync, readdirSync, statSync } from 'fs'
 import axios from 'axios'
 import * as tar from 'tar'
+import * as os from 'os'
+import { promisify } from 'util'
 import { PythonBridge, API_BASE_URL } from './python-bridge'
 import {
   isModelDownloaded,
@@ -17,16 +19,26 @@ import { checkSetupNeeded, markSetupDone, runFullSetup, getVenvPythonExe, ensure
 import { logger } from './logger'
 import { getProcessRunner, getPythonProcessRunner, getExtPythonExe, terminateProcessRunner, terminateAllProcessRunners } from './process-runner'
 import { getBuiltinExtensionsDir } from './builtin-sync'
-import { spawn } from 'child_process'
+import { spawn, execFile } from 'child_process'
 import { assertSafeExtensionId, buildExtensionBackupPath, resolveExtensionPathWithinRoot } from './extension-path-guard'
+import { isSetupFailureFatal, validateInstallManifest } from './extension-install-utils'
 
 type WindowGetter = () => BrowserWindow | null
+const pExecFile = promisify(execFile)
 
 // ─── GPU detect (best-effort, no Python required) ─────────────────────────────
 
-interface GpuInfo { sm: number; cudaVersion: number }
+interface GpuInfo {
+  sm: number
+  cudaVersion: number
+  accelerator: 'cuda' | 'mps' | 'cpu'
+}
 
 function detectGpuInfo(): Promise<GpuInfo> {
+  if (process.platform === 'darwin' && process.arch === 'arm64') {
+    return Promise.resolve({ sm: 0, cudaVersion: 0, accelerator: 'mps' })
+  }
+
   return new Promise((resolve) => {
     // Query compute cap + driver version in one call
     const proc = spawn('nvidia-smi', ['--query-gpu=compute_cap,driver_version', '--format=csv,noheader'], {
@@ -53,12 +65,12 @@ function detectGpuInfo(): Promise<GpuInfo> {
         else if (driverMajor >= 530) cudaVersion = 121
         else if (driverMajor >= 525) cudaVersion = 120
         else if (driverMajor >= 520) cudaVersion = 118
-        resolve({ sm: isNaN(sm) ? 86 : sm, cudaVersion })
+        resolve({ sm: isNaN(sm) ? 86 : sm, cudaVersion, accelerator: 'cuda' })
       } else {
-        resolve({ sm: 86, cudaVersion: 118 })
+        resolve({ sm: 0, cudaVersion: 0, accelerator: 'cpu' })
       }
     })
-    proc.on('error', () => resolve({ sm: 86, cudaVersion: 118 }))
+    proc.on('error', () => resolve({ sm: 0, cudaVersion: 0, accelerator: 'cpu' }))
   })
 }
 
@@ -76,8 +88,92 @@ function runExtensionSetup(
     const pythonExe = getVenvPythonExe(userData)
     const setupPy   = join(extDir, 'setup.py')
 
-    const args = JSON.stringify({ python_exe: pythonExe, ext_dir: extDir, gpu_sm: gpuSm, cuda_version: cudaVersion })
-    const proc = spawn(pythonExe, [setupPy, args], {
+    const accelerator = process.platform === 'darwin' && process.arch === 'arm64' ? 'mps' : gpuSm > 0 ? 'cuda' : 'cpu'
+    const args = JSON.stringify({
+      python_exe: pythonExe,
+      ext_dir: extDir,
+      gpu_sm: gpuSm,
+      cuda_version: cudaVersion,
+      accelerator,
+      platform: process.platform,
+      arch: process.arch,
+    })
+    const launcher = `
+import runpy
+import subprocess
+import sys
+
+setup_py = sys.argv[1]
+setup_args = sys.argv[2:]
+
+_original_run = subprocess.run
+_original_check_call = subprocess.check_call
+_original_check_output = subprocess.check_output
+
+def _is_cuda_torch_index(value):
+    return isinstance(value, str) and value.startswith("https://download.pytorch.org/whl/cu")
+
+def _mentions_torch(command):
+    if not isinstance(command, (list, tuple)):
+        return False
+    return any(str(part).startswith(("torch==", "torchvision==", "torchaudio==")) for part in command)
+
+def _rewrite_command(command):
+    if sys.platform != "darwin" or not _mentions_torch(command):
+        return command
+    if not isinstance(command, (list, tuple)):
+        return command
+
+    rewritten = []
+    changed = False
+    i = 0
+    while i < len(command):
+        part = command[i]
+        text = str(part)
+        if text in ("--index-url", "-i", "--extra-index-url") and i + 1 < len(command) and _is_cuda_torch_index(str(command[i + 1])):
+            changed = True
+            i += 2
+            continue
+        if text.startswith("--index-url=") or text.startswith("--extra-index-url="):
+            value = text.split("=", 1)[1]
+            if _is_cuda_torch_index(value):
+                changed = True
+                i += 1
+                continue
+        rewritten.append(part)
+        i += 1
+
+    if changed:
+        print("[Modly setup compat] Removed CUDA-only PyTorch index on macOS; pip will use macOS wheels.", file=sys.stderr)
+        return rewritten
+    return command
+
+def _patched_run(*args, **kwargs):
+    args = list(args)
+    if args:
+        args[0] = _rewrite_command(args[0])
+    return _original_run(*args, **kwargs)
+
+def _patched_check_call(*args, **kwargs):
+    args = list(args)
+    if args:
+        args[0] = _rewrite_command(args[0])
+    return _original_check_call(*args, **kwargs)
+
+def _patched_check_output(*args, **kwargs):
+    args = list(args)
+    if args:
+        args[0] = _rewrite_command(args[0])
+    return _original_check_output(*args, **kwargs)
+
+subprocess.run = _patched_run
+subprocess.check_call = _patched_check_call
+subprocess.check_output = _patched_check_output
+
+sys.argv = [setup_py] + setup_args
+runpy.run_path(setup_py, run_name="__main__")
+`
+    const proc = spawn(pythonExe, ['-c', launcher, setupPy, args], {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 
@@ -145,7 +241,12 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   ipcMain.handle('setup:check', async () => {
     const userData = app.getPath('userData')
     const defaultDataDir = join(app.getPath('documents'), 'Modly')
-    return { needed: checkSetupNeeded(userData), defaultDataDir }
+    return {
+      needed: checkSetupNeeded(userData),
+      defaultDataDir,
+      platform: process.platform,
+      arch: process.arch,
+    }
   })
 
   ipcMain.handle('setup:saveDataDir', async (_event, { baseDir }: { baseDir: string }) => {
@@ -315,22 +416,65 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     return listDownloadedModels(modelsDir)
   })
 
-  ipcMain.handle('model:isDownloaded', (_, modelId: string): boolean => {
+  ipcMain.handle('model:isDownloaded', (_, modelId: string, downloadCheck?: string): boolean => {
     const modelsDir = getSettings(app.getPath('userData')).modelsDir
-    return isModelDownloaded(modelsDir, modelId)
+    return isModelDownloaded(modelsDir, modelId, downloadCheck)
   })
 
   ipcMain.handle('model:activeDownloads', () =>
     [...activeDownloads.entries()].map(([modelId, progress]) => ({ modelId, ...progress }))
   )
 
-  ipcMain.handle('model:download', async (event, { repoId, modelId, skipPrefixes }: { repoId: string; modelId: string; skipPrefixes?: string[] }) => {
+  ipcMain.handle('model:download', async (
+    event,
+    { repoId, modelId, skipPrefixes, includePrefixes }: { repoId: string; modelId: string; skipPrefixes?: string[]; includePrefixes?: string[] },
+  ) => {
+    if (activeDownloads.has(modelId)) {
+      return { success: false, error: 'Download already in progress' }
+    }
     activeDownloads.set(modelId, { percent: 0 })
     try {
       await downloadModelFromHF(repoId, modelId, (progress) => {
         activeDownloads.set(modelId, progress)
         event.sender.send('model:downloadProgress', { modelId, ...progress })
-      }, skipPrefixes)
+      }, skipPrefixes, includePrefixes)
+      return { success: true }
+    } catch (err: any) {
+      const message = err?.message ?? String(err)
+      if (message.includes('paused')) {
+        event.sender.send('model:downloadProgress', { modelId, percent: 0, status: 'paused', paused: true })
+        return { success: false, paused: true }
+      }
+      if (message.includes('cancelled')) {
+        event.sender.send('model:downloadProgress', { modelId, percent: 0, status: 'cancelled', cancelled: true })
+        return { success: false, cancelled: true }
+      }
+      return { success: false, error: String(err) }
+    } finally {
+      activeDownloads.delete(modelId)
+    }
+  })
+
+  ipcMain.handle('model:pauseDownload', async (_, modelId: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      await axios.post(`${API_BASE_URL}/model/hf-download/pause`, null, {
+        params: { model_id: modelId },
+        timeout: 5000,
+      })
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle('model:cancelDownload', async (_, modelId: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      await axios.post(`${API_BASE_URL}/model/hf-download/cancel`, null, {
+        params: { model_id: modelId },
+        timeout: 5000,
+      })
+      const modelDir = join(getSettings(app.getPath('userData')).modelsDir, modelId)
+      await rmAsync(modelDir, { recursive: true, force: true })
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -370,11 +514,46 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   ipcMain.handle('shell:openExternal', (_, url: string) => shell.openExternal(url))
 
   // App info
+  // System memory (used/available/total bytes).
+  // On macOS, matches Activity Monitor's "Memory Used":
+  //     used = wired + active + compressed.
+  ipcMain.handle('system:memory', async () => {
+    const total = os.totalmem()
+
+    if (process.platform === 'darwin') {
+      try {
+        const { stdout } = await pExecFile('vm_stat', [])
+        const pageSizeMatch = stdout.match(/page size of (\d+) bytes/)
+        const pageSize = pageSizeMatch ? parseInt(pageSizeMatch[1]!, 10) : 16384
+
+        const pagesFor = (label: string): number => {
+          const m = stdout.match(new RegExp(`${label}:\\s+(\\d+)`))
+          return m ? parseInt(m[1]!, 10) : 0
+        }
+
+        const active = pagesFor('Pages active')
+        const wired = pagesFor('Pages wired down')
+        const compressed = pagesFor('Pages occupied by compressor')
+
+        const used = (active + wired + compressed) * pageSize
+        const available = Math.max(0, total - used)
+        return { total, used, available }
+      } catch {
+        // Fall back to total - free outside Activity Monitor semantics.
+      }
+    }
+
+    const free = os.freemem()
+    return { total, used: total - free, available: free }
+  })
+
   ipcMain.handle('app:info', () => ({
     version:   app.getVersion(),
     userData:  app.getPath('userData'),
     modelsDir: getSettings(app.getPath('userData')).modelsDir,
-    apiUrl:    API_BASE_URL
+    apiUrl:    API_BASE_URL,
+    platform:  process.platform,
+    arch:      process.arch,
   }))
 
   // Settings — seed HF token into main-process env at startup
@@ -559,6 +738,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     // extension type
     type?:  'model' | 'process'
     entry?: string
+    // Optional top-level fallbacks — applied to each node if not set on the node
+    params_schema?:  unknown[]
+    param_defaults?: Record<string, unknown>
     nodes?: {
       id:                string
       name?:             string
@@ -566,9 +748,11 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       inputs?:           ('mesh' | 'image' | 'text')[]
       output?:           'mesh' | 'image' | 'text'
       params_schema?:    unknown[]
+      param_defaults?:   Record<string, unknown>
       hf_repo?:          string
       download_check?:   string
       hf_skip_prefixes?: string[]
+      hf_include_prefixes?: string[]
     }[]
   }
 
@@ -590,10 +774,12 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       input:          n.input  ?? 'image' as const,
       inputs:         n.inputs,
       output:         n.output ?? 'mesh'  as const,
-      paramsSchema:   n.params_schema ?? [],
+      paramsSchema:   n.params_schema ?? parsed.params_schema ?? [],
+      paramDefaults:  { ...(parsed.param_defaults ?? {}), ...(n.param_defaults ?? {}) },
       hfRepo:         n.hf_repo,
       downloadCheck:  n.download_check,
       hfSkipPrefixes: n.hf_skip_prefixes,
+      hfIncludePrefixes: n.hf_include_prefixes,
     }))
 
     if (parsed.type === 'process') {
@@ -696,25 +882,17 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       const manifestRaw = await readFile(manifestPath, 'utf-8')
       const manifest    = JSON.parse(manifestRaw) as ParsedManifest
 
-      if (!manifest.id) throw new Error('manifest.json: required field "id" missing')
-      const extensionId = assertSafeExtensionId(manifest.id)
+      const { id: rawManifestId, isProcess, entryFile, isPythonProcess, hasNodes } = validateInstallManifest(
+        manifest,
+        {
+          hasEntryFile: (candidate) => existsSync(join(extractDir, candidate)),
+          hasGeneratorFile: () => existsSync(join(extractDir, 'generator.py')),
+        },
+        'repository',
+      )
+      if (!hasNodes) throw new Error('manifest.json: required field "nodes" missing or empty')
+      const extensionId = assertSafeExtensionId(rawManifestId)
       manifest.id = extensionId
-      if (!manifest.nodes?.length) throw new Error('manifest.json: required field "nodes" missing or empty')
-
-      const isProcess = manifest.type === 'process'
-      const entryFile = manifest.entry ?? 'processor.js'
-      const isPythonProcess = isProcess && entryFile.endsWith('.py')
-
-      if (isProcess) {
-        // Process extension validation
-        if (!existsSync(join(extractDir, entryFile)))
-          throw new Error(`manifest.json: entry file "${entryFile}" missing from repository`)
-      } else {
-        // Model extension validation
-        const generatorPath = join(extractDir, 'generator.py')
-        if (!existsSync(generatorPath)) throw new Error('generator.py missing from repository')
-        if (!manifest.generator_class)  throw new Error('manifest.json: required field "generator_class" missing')
-      }
 
       // Override source field with the actual GitHub URL so trust is based on origin
       manifest.source = `https://github.com/${owner}/${repo}`
@@ -754,10 +932,18 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         if (existsSync(join(destDir, 'setup.py'))) {
           emit({ step: 'setting_up', message: 'Setting up Python environment…' })
           const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
-          await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
-            logger.info(`[ext-setup] ${line}`)
-            emit({ step: 'setting_up', message: line })
-          })
+          try {
+            await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
+              logger.info(`[ext-setup] ${line}`)
+              emit({ step: 'setting_up', message: line })
+            })
+          } catch (err) {
+            if (isSetupFailureFatal({ isProcess, isPythonProcess })) {
+              throw new Error(`Extension setup failed: ${err}`)
+            }
+            logger.warn(`[ext-setup] setup.py failed: ${err}`)
+            emit({ step: 'setting_up', message: `Warning: setup failed — ${err}` })
+          }
         }
       } else if (isProcess) {
         // 6b. JS process extension: npm install if package.json present

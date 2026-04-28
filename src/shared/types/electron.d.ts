@@ -10,9 +10,11 @@ export interface ExtensionNode {
   inputs?:          ('image' | 'text' | 'mesh')[]   // multi-input nodes; overrides input when set
   output:           'image' | 'text' | 'mesh'
   paramsSchema:     ParamSchema[]
+  paramDefaults?:   Record<string, number | string>
   hfRepo?:          string
   downloadCheck?:   string
   hfSkipPrefixes?:  string[]
+  hfIncludePrefixes?: string[]
 }
 
 export interface ModelExtension {
@@ -109,6 +111,9 @@ declare global {
       shell: {
         openExternal: (url: string) => Promise<void>
       }
+      system: {
+        memory: () => Promise<{ total: number; used: number; available: number }>
+      }
       window: {
         minimize: () => void
         maximize: () => void
@@ -147,12 +152,26 @@ declare global {
       model: {
         export:         (args: { outputUrl: string; format: string }) => Promise<{ success: boolean; error?: string }>
         listDownloaded: () => Promise<{ id: string; name: string; size_gb: number }[]>
-        isDownloaded:   (modelId: string) => Promise<boolean>
-        download:       (repoId: string, modelId: string, skipPrefixes?: string[]) => Promise<{ success: boolean; error?: string }>
+        isDownloaded:   (modelId: string, downloadCheck?: string) => Promise<boolean>
+        download:       (repoId: string, modelId: string, skipPrefixes?: string[], includePrefixes?: string[]) => Promise<{ success: boolean; error?: string }>
+        pauseDownload:  (modelId: string) => Promise<{ success: boolean; error?: string }>
+        cancelDownload: (modelId: string) => Promise<{ success: boolean; error?: string }>
         delete:         (modelId: string) => Promise<{ success: boolean; error?: string }>
         unloadAll:      () => Promise<{ success: boolean; error?: string }>
         showInFolder:   (modelId: string) => Promise<void>
-        onProgress:     (cb: (data: { modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number; status?: string }) => void) => void
+        onProgress:     (cb: (data: {
+          modelId: string
+          percent: number
+          file?: string
+          fileIndex?: number
+          totalFiles?: number
+          status?: string
+          bytesDownloaded?: number
+          totalBytes?: number
+          stalledSeconds?: number
+          paused?: boolean
+          cancelled?: boolean
+        }) => void) => void
         offProgress:    () => void
       }
       app: {
@@ -161,6 +180,8 @@ declare global {
           userData:  string
           modelsDir: string
           apiUrl:    string
+          platform:  string
+          arch:      string
         }>
         onError:  (cb: (message: string) => void) => void
         offError: () => void
@@ -181,7 +202,7 @@ declare global {
         deleteJob: (collection: string, filename: string) => Promise<void>
       }
       setup: {
-        check:        () => Promise<{ needed: boolean; defaultDataDir: string }>
+        check:        () => Promise<{ needed: boolean; defaultDataDir: string; platform: string; arch: string }>
         run:          () => Promise<{ success: boolean; error?: string }>
         saveDataDir:  (baseDir: string) => Promise<void>
         onProgress:   (cb: (data: { step: string; percent: number; currentPackage?: string }) => void) => void

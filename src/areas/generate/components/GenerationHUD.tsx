@@ -7,6 +7,41 @@ function formatElapsed(seconds: number): string {
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
 }
 
+// Convert tqdm bar text to a clean "Verbing (N%)" form. Examples:
+//   "Diffusion Sampling: 60%|████| 3/5 [..."         → "Diffusing (60%)"
+//   "Volume Decoding: 42%|██▏ | 1752/4200 [..."      → "Decoding (42%)"
+//   "Loading pipeline components...: 100%|███| 4/4"  → "Loading (100%)"
+// Anything that isn't a tqdm progress line returns null so the caller
+// leaves the HUD's sub-line untouched instead of filling it with noise.
+const PHASE_VERB: Array<[RegExp, string]> = [
+  [/diffusion|sampling/i,       'Generating'],
+  [/volume|flashvdm|decoding/i, 'Decoding'],
+  [/surface|extract/i,          'Extracting'],
+  [/loading|download/i,         'Loading'],
+]
+
+function parseTqdmLine(line: string): string | null {
+  const m = line.match(/^(.+?):\s*(\d+)%\|/)
+  if (!m) return null
+  const desc = m[1].replace(/\.+$/, '').trim()
+  const pct  = m[2]
+  const verb =
+    PHASE_VERB.find(([re]) => re.test(desc))?.[1] ??
+    desc.replace(/^./, (c) => c.toUpperCase())
+  return `${verb} (${pct}%)`
+}
+
+function parseProgressFromStderr(chunk: string): string | null {
+  // One chunk may contain multiple tqdm ticks separated by \r or \n;
+  // show the most recent tqdm-like line.
+  const lines = chunk.split(/[\r\n]+/).filter(Boolean)
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const parsed = parseTqdmLine(lines[i]!)
+    if (parsed) return parsed
+  }
+  return null
+}
+
 export default function GenerationHUD(): JSX.Element | null {
   const { currentJob, reset } = useGeneration()
   const [elapsed, setElapsed] = useState(0)
@@ -37,11 +72,16 @@ export default function GenerationHUD(): JSX.Element | null {
     }
   }, [isActive, currentJob?.createdAt])
 
-  // tqdm log listener
+  // tqdm log listener — parse to "Verbing (N%)" and skip non-progress noise
   useEffect(() => {
     if (isActive) {
       setTqdmLog(null)
-      window.electron.python.onLog((line) => setTqdmLog(line))
+      window.electron.python.onLog((line) => {
+        const parsed = parseProgressFromStderr(line)
+        if (parsed !== null) {
+          setTqdmLog((prev) => (prev === parsed ? prev : parsed))
+        }
+      })
       return () => { window.electron.python.offLog(); setTqdmLog(null) }
     }
   }, [isActive])
@@ -96,9 +136,9 @@ export default function GenerationHUD(): JSX.Element | null {
               </div>
               <span className="text-sm font-medium text-zinc-200">Generation failed</span>
             </div>
-            <p className="text-xs text-red-400 bg-red-950/40 border border-red-900/40 rounded-lg px-3 py-2 max-h-24 overflow-y-auto whitespace-pre-wrap break-words">
+            <pre className="text-xs text-red-400 bg-red-950/40 border border-red-900/40 rounded-lg px-3 py-2 max-h-48 overflow-y-auto whitespace-pre-wrap break-words select-text font-mono leading-relaxed">
               {error}
-            </p>
+            </pre>
             <div className="flex gap-2">
               <button
                 onClick={reset}

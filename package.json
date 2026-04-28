@@ -10,7 +10,9 @@
     "build": "node scripts/build-builtins.mjs && electron-vite build",
     "preview": "electron-vite preview",
     "prepare-resources": "node scripts/download-python-embed.js",
+    "test": "cd api && python3 -m unittest discover -s tests && cd .. && node --test electron/main/*.test.mjs",
     "package": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && npm run prepare-resources && electron-builder",
+    "package:mac": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && npm run prepare-resources && electron-builder --mac --arm64",
     "lint": "eslint ."
   },
   "dependencies": {
@@ -63,7 +65,10 @@
         "filter": [
           "**/*",
           "!.venv/**/*",
-          "!__pycache__/**/*"
+          "!__pycache__/**/*",
+          "!**/build/**/*",
+          "!**/*.pyd",
+          "!**/*.egg-info/**/*"
         ]
       },
       {
@@ -93,7 +98,15 @@
     },
     "mac": {
       "target": "dmg",
-      "icon": "resources/icons/icon.icns"
+      "icon": "resources/icons/icon.icns",
+      "artifactName": "${productName}-${version}-arm64.${ext}",
+      "category": "public.app-category.graphics-design",
+      "extraResources": [
+        {
+          "from": "resources/python-embed",
+          "to": "python-embed"
+        }
+      ]
     },
     "linux": {
       "target": "AppImage",

@@ -1,8 +1,9 @@
 import { Component, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode, ErrorInfo } from 'react'
-import { Canvas, useThree } from '@react-three/fiber'
+import { Canvas, useLoader, useThree } from '@react-three/fiber'
 import { Environment, GizmoHelper, Lightformer, OrbitControls, useGizmoContext, useGLTF } from '@react-three/drei'
 import * as THREE from 'three'
+import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh'
 
 // Patch THREE pour utiliser BVH sur tous les meshes — réduit le raycast O(N) → O(log N)
@@ -129,14 +130,43 @@ interface MeshModelProps {
 }
 
 function MeshModel({ url, jobId, viewMode, onStats, onSelect }: MeshModelProps): JSX.Element {
-  const { scene } = useGLTF(url)
+  const extension = url.split('?')[0]?.split('.').pop()?.toLowerCase()
+  const common = { url, jobId, viewMode, onStats, onSelect }
+  return extension === 'obj' ? <ObjMeshModel {...common} /> : <GltfMeshModel {...common} />
+}
+
+function GltfMeshModel(props: MeshModelProps): JSX.Element {
+  const { scene } = useGLTF(props.url)
+  return <SceneMeshModel {...props} scene={scene} loaderType="gltf" />
+}
+
+function ObjMeshModel(props: MeshModelProps): JSX.Element {
+  const scene = useLoader(OBJLoader, props.url)
+  return <SceneMeshModel {...props} scene={scene} loaderType="obj" />
+}
+
+function SceneMeshModel({
+  url,
+  viewMode,
+  onStats,
+  onSelect,
+  scene,
+  loaderType,
+}: MeshModelProps & {
+  scene: THREE.Group | THREE.Scene
+  loaderType: 'gltf' | 'obj'
+}): JSX.Element {
   const captured = useRef(false)
   const edgeHelpers = useRef<THREE.LineSegments[]>([])
 
-  // Free GPU resources and GLTF cache when this model is replaced or unmounted
+  // Free GPU resources and loader cache when this model is replaced or unmounted
   useEffect(() => {
     return () => {
-      useGLTF.clear(url)
+      if (loaderType === 'obj') {
+        useLoader.clear(OBJLoader, url)
+      } else {
+        useGLTF.clear(url)
+      }
       scene.traverse((child) => {
         if (child instanceof THREE.Mesh) {
           child.geometry.dispose()
@@ -145,7 +175,7 @@ function MeshModel({ url, jobId, viewMode, onStats, onSelect }: MeshModelProps):
         }
       })
     }
-  }, [url])
+  }, [loaderType, scene, url])
 
   // Compute BVH on all geometries for fast raycasting (O(log N) vs O(N)).
   // Also force DoubleSide on every material so faces with inverted normals

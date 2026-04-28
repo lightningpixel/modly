@@ -59,6 +59,43 @@ export const useExtensionsStore = create<ExtensionsStore>((set, get) => ({
   // ── Install from GitHub ────────────────────────────────────────────────────
 
   async installFromGitHub(url: string) {
+    return installExtension(() => window.electron.extensions.installFromGitHub(url), set)
+  },
+
+  // ── Uninstall ──────────────────────────────────────────────────────────────
+
+  async uninstall(extensionId: string) {
+    const result = await window.electron.extensions.uninstall(extensionId)
+    if (result.success) {
+      set((state) => ({
+        modelExtensions:   state.modelExtensions.filter((e)   => e.id !== extensionId),
+        processExtensions: state.processExtensions.filter((e) => e.id !== extensionId),
+      }))
+    }
+    return result
+  },
+
+  // ── Reload (rescan extensions dir + Python registry) ──────────────────────
+
+  async reload() {
+    const result = await window.electron.extensions.reload()
+    if (result.success) {
+      set({ loadErrors: result.errors ?? {} })
+    }
+    await get().loadExtensions()
+  },
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  clearInstallState() {
+    set({ installProgress: null, installError: null })
+  },
+}))
+
+async function installExtension(
+  invoke: () => Promise<{ success: boolean; error?: string; extension?: AnyExtension; extensionId?: string }>,
+  set: (partial: Partial<ExtensionsStore> | ((state: ExtensionsStore) => Partial<ExtensionsStore>)) => void,
+) {
     set({ installProgress: { step: 'downloading', percent: 0 }, installError: null })
 
     window.electron.extensions.onInstallProgress((data) => {
@@ -70,7 +107,7 @@ export const useExtensionsStore = create<ExtensionsStore>((set, get) => ({
     })
 
     try {
-      const result = await window.electron.extensions.installFromGitHub(url)
+      const result = await invoke()
 
       if (result.success && result.extension) {
         const ext = result.extension as AnyExtension
@@ -103,34 +140,4 @@ export const useExtensionsStore = create<ExtensionsStore>((set, get) => ({
     } finally {
       window.electron.extensions.offInstallProgress()
     }
-  },
-
-  // ── Uninstall ──────────────────────────────────────────────────────────────
-
-  async uninstall(extensionId: string) {
-    const result = await window.electron.extensions.uninstall(extensionId)
-    if (result.success) {
-      set((state) => ({
-        modelExtensions:   state.modelExtensions.filter((e)   => e.id !== extensionId),
-        processExtensions: state.processExtensions.filter((e) => e.id !== extensionId),
-      }))
-    }
-    return result
-  },
-
-  // ── Reload (rescan extensions dir + Python registry) ──────────────────────
-
-  async reload() {
-    const result = await window.electron.extensions.reload()
-    if (result.success) {
-      set({ loadErrors: result.errors ?? {} })
-    }
-    await get().loadExtensions()
-  },
-
-  // ── Helpers ────────────────────────────────────────────────────────────────
-
-  clearInstallState() {
-    set({ installProgress: null, installError: null })
-  },
-}))
+}

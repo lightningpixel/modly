@@ -5,7 +5,7 @@
   "entry": "processor.py",
   "version": "1.0.0",
   "author": "Modly",
-  "description": "Remeshes a mesh to triangle or quad topology using isotropic remeshing.",
+  "description": "Regularizes mesh topology with isotropic remeshing. Quad mode is quad-dominant cleanup, not character retopology.",
   "nodes": [
     {
       "id": "remesh",
@@ -20,10 +20,10 @@
           "default": "triangle",
           "options": [
             { "value": "triangle", "label": "Triangle" },
-            { "value": "quad",     "label": "Quad" },
+            { "value": "quad",     "label": "Quad-Dominant" },
             { "value": "none",     "label": "None" }
           ],
-          "tooltip": "Triangle produces a clean uniform triangulation. Quad attempts a quad-dominant mesh. None passes the mesh through unchanged."
+          "tooltip": "Triangle produces a clean uniform triangulation. Quad-Dominant attempts more regular polygon flow for cleanup, but it is not character-oriented retopology. None passes the mesh through unchanged."
         },
         {
           "id": "target_edge_length",

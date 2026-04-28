@@ -6,7 +6,7 @@ import { FieldLabel, Tooltip, ConfirmModal } from '@shared/components/ui'
 import type { CatalogModel } from '../models'
 
 const REMESH_OPTIONS = [
-  { label: 'Quad',     value: 'quad'     },
+  { label: 'Quad-Dominant', value: 'quad'     },
   { label: 'Triangle', value: 'triangle' },
   { label: 'None',     value: 'none'     },
 ] as const
@@ -381,7 +381,7 @@ export default function GenerationOptions(): JSX.Element {
       <div className="flex flex-col gap-1.5">
         <FieldLabel
           label="Remesh"
-          tooltip="Quad produces clean topology ideal for animation and sculpting. Triangle is faster and more compatible. None skips remeshing entirely."
+          tooltip="Quad-Dominant regularizes the surface for cleaner downstream edits, but it is not character retopology. Triangle is faster and more compatible. None skips remeshing entirely."
         />
         <div className="flex gap-1.5">
           {REMESH_OPTIONS.map((opt) => (

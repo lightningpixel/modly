@@ -106,7 +106,8 @@ def _discover_extensions() -> Dict[str, Tuple[type, dict]]:
                         "hf_repo":          node.get("hf_repo", ""),
                         "download_check":   node.get("download_check", ""),
                         "hf_skip_prefixes": node.get("hf_skip_prefixes", []),
-                        "params_schema":    node.get("params_schema", []),
+                        "hf_include_prefixes": node.get("hf_include_prefixes", []),
+                        "params_schema":    node.get("params_schema", manifest.get("params_schema", [])),
                         "input":            node.get("input", "image"),
                         "output":           node.get("output", "mesh"),
                     }

@@ -81,6 +81,30 @@ def load_generator(manifest: dict):
     return getattr(mod, manifest["generator_class"])
 
 
+def _select_node(manifest: dict, model_dir_override: str) -> dict:
+    nodes = manifest.get("nodes") or []
+    if nodes and model_dir_override:
+        node_id = Path(model_dir_override).name
+        return next((n for n in nodes if n.get("id") == node_id), nodes[0])
+    if nodes:
+        return nodes[0]
+    return {}
+
+
+def _resolve_ready_schema(GenClass, node: dict, manifest: dict) -> list:
+    try:
+        return GenClass.params_schema()
+    except Exception:
+        return node.get("params_schema") or manifest.get("params_schema", [])
+
+
+def _apply_manifest_metadata(gen, manifest: dict, node: dict) -> None:
+    gen.hf_repo = node.get("hf_repo") or manifest.get("hf_repo", "")
+    gen.hf_skip_prefixes = node.get("hf_skip_prefixes") or manifest.get("hf_skip_prefixes", [])
+    gen.download_check = node.get("download_check") or manifest.get("download_check", "")
+    gen._params_schema = node.get("params_schema") or manifest.get("params_schema", [])
+
+
 # ------------------------------------------------------------------ #
 # Main loop
 # ------------------------------------------------------------------ #
@@ -97,38 +121,24 @@ def main() -> None:
               "traceback": traceback.format_exc()})
         return
 
-    # Announce readiness and send params_schema so ExtensionProcess
-    # can serve it without needing to query the subprocess later.
-    # We try to get it from the generator class (may be a classmethod),
-    # falling back to the manifest field.
-    try:
-        schema = GenClass.params_schema()
-    except Exception:
-        node0  = (manifest.get("nodes") or [{}])[0]
-        schema = manifest.get("params_schema", []) or node0.get("params_schema", [])
-    send({"type": "ready", "params_schema": schema})
-
     # Support both flat manifest (legacy) and nodes[] format.
     # Use MODEL_DIR to find the correct node for multi-node extensions:
     # MODEL_DIR is set by ExtensionProcess to MODELS_DIR/ext_id/node_id,
     # so its last component matches the node id.
-    nodes = manifest.get("nodes") or []
-    node = {}
-    if nodes and _MODEL_DIR_OVERRIDE:
-        node_id = Path(_MODEL_DIR_OVERRIDE).name
-        node = next((n for n in nodes if n.get("id") == node_id), nodes[0])
-    elif nodes:
-        node = nodes[0]
+    node = _select_node(manifest, _MODEL_DIR_OVERRIDE)
+
+    # Announce readiness and send params_schema so ExtensionProcess
+    # can serve it without needing to query the subprocess later.
+    # We try to get it from the generator class (may be a classmethod),
+    # falling back to the selected node, then to the top-level manifest.
+    send({"type": "ready", "params_schema": _resolve_ready_schema(GenClass, node, manifest)})
 
     # Use MODEL_DIR env var (set by ExtensionProcess) when available so the
     # generator uses the exact same path that is_downloaded() checks against.
     # Falls back to MODELS_DIR/manifest_id for legacy / standalone use.
     model_dir = Path(_MODEL_DIR_OVERRIDE) if _MODEL_DIR_OVERRIDE else MODELS_DIR / model_id
     gen = GenClass(model_dir, WORKSPACE_DIR)
-    gen.hf_repo          = manifest.get("hf_repo", "")          or node.get("hf_repo", "")
-    gen.hf_skip_prefixes = manifest.get("hf_skip_prefixes", []) or node.get("hf_skip_prefixes", [])
-    gen.download_check   = manifest.get("download_check", "")   or node.get("download_check", "")
-    gen._params_schema   = manifest.get("params_schema", [])    or node.get("params_schema", [])
+    _apply_manifest_metadata(gen, manifest, node)
 
     # Active cancel events keyed by request id
     _cancel: dict[str, threading.Event] = {}

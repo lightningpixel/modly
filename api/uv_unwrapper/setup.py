@@ -12,6 +12,7 @@ from torch.utils.cpp_extension import (
 library_name = "uv_unwrapper"
 
 IS_WINDOWS = platform.system() == "Windows"
+IS_MACOS = platform.system() == "Darwin"
 
 
 def get_extensions():
@@ -19,8 +20,7 @@ def get_extensions():
     if debug_mode:
         print("Compiling in debug mode")
 
-    is_mac = True if torch.backends.mps.is_available() else False
-    use_native_arch = not is_mac and not IS_WINDOWS and os.getenv("USE_NATIVE_ARCH", "1") == "1"
+    use_native_arch = not IS_MACOS and not IS_WINDOWS and os.getenv("USE_NATIVE_ARCH", "1") == "1"
     extension = CppExtension
 
     extra_link_args = []
@@ -31,12 +31,13 @@ def get_extensions():
         if debug_mode:
             cxx_flags += ["/Z7", "/UNDEBUG"]
             extra_link_args += ["-O0"]
-    elif is_mac:
+    elif IS_MACOS:
         cxx_flags = [
             "-O3" if not debug_mode else "-O0",
             "-fdiagnostics-color=always",
-            "-Xclang -fopenmp",
-            "-mmacosx-version-min=10.15",
+            "-mmacosx-version-min=11.0",
+            "-arch",
+            "arm64",
         ]
         if debug_mode:
             cxx_flags += ["-g", "-UNDEBUG"]
@@ -74,9 +75,7 @@ def get_extensions():
             define_macros=define_macros,
             extra_compile_args=extra_compile_args,
             extra_link_args=extra_link_args,
-            libraries=["c10", "torch", "torch_cpu", "torch_python"] + ["omp"]
-            if is_mac
-            else [],
+            libraries=["c10", "torch", "torch_cpu", "torch_python"] if IS_MACOS else [],
         )
     )
 

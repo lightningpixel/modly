@@ -14,6 +14,12 @@ contextBridge.exposeInMainWorld('electron', {
     openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
   },
 
+  // System info
+  system: {
+    memory: (): Promise<{ total: number; used: number; available: number }> =>
+      ipcRenderer.invoke('system:memory'),
+  },
+
   // Python / FastAPI bridge
   python: {
     start:     (): Promise<{ success: boolean; port?: number; error?: string }> =>
@@ -78,13 +84,28 @@ contextBridge.exposeInMainWorld('electron', {
   model: {
     export:         (args: { outputUrl: string; format: string }) => ipcRenderer.invoke('model:export', args),
     listDownloaded: () => ipcRenderer.invoke('model:listDownloaded'),
-    isDownloaded:   (modelId: string) => ipcRenderer.invoke('model:isDownloaded', modelId),
-    download:       (repoId: string, modelId: string, skipPrefixes?: string[]) => ipcRenderer.invoke('model:download', { repoId, modelId, skipPrefixes }),
+    isDownloaded:   (modelId: string, downloadCheck?: string) => ipcRenderer.invoke('model:isDownloaded', modelId, downloadCheck),
+    download:       (repoId: string, modelId: string, skipPrefixes?: string[], includePrefixes?: string[]) =>
+      ipcRenderer.invoke('model:download', { repoId, modelId, skipPrefixes, includePrefixes }),
+    pauseDownload:  (modelId: string) => ipcRenderer.invoke('model:pauseDownload', modelId),
+    cancelDownload: (modelId: string) => ipcRenderer.invoke('model:cancelDownload', modelId),
     delete:         (modelId: string) => ipcRenderer.invoke('model:delete', modelId),
     unloadAll:      () => ipcRenderer.invoke('model:unloadAll'),
     showInFolder:   (modelId: string) => ipcRenderer.invoke('model:showInFolder', modelId),
     activeDownloads: (): Promise<{ modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]> => ipcRenderer.invoke('model:activeDownloads'),
-    onProgress:     (cb: (data: { modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number; status?: string }) => void) => {
+    onProgress:     (cb: (data: {
+      modelId: string
+      percent: number
+      file?: string
+      fileIndex?: number
+      totalFiles?: number
+      status?: string
+      bytesDownloaded?: number
+      totalBytes?: number
+      stalledSeconds?: number
+      paused?: boolean
+      cancelled?: boolean
+    }) => void) => {
       ipcRenderer.on('model:downloadProgress', (_event, data) => cb(data))
     },
     offProgress:    () => ipcRenderer.removeAllListeners('model:downloadProgress')
@@ -92,7 +113,7 @@ contextBridge.exposeInMainWorld('electron', {
 
   // App metadata
   app: {
-    info: (): Promise<{ version: string; userData: string; modelsDir: string; apiUrl: string }> =>
+    info: (): Promise<{ version: string; userData: string; modelsDir: string; apiUrl: string; platform: string; arch: string }> =>
       ipcRenderer.invoke('app:info'),
     onError:  (cb: (message: string) => void) => {
       ipcRenderer.on('app:error', (_event, message) => cb(message))
@@ -191,7 +212,7 @@ contextBridge.exposeInMainWorld('electron', {
 
   // First-run setup
   setup: {
-    check:        (): Promise<{ needed: boolean; defaultDataDir: string }> =>
+    check:        (): Promise<{ needed: boolean; defaultDataDir: string; platform: string; arch: string }> =>
       ipcRenderer.invoke('setup:check'),
     run:          (): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('setup:run'),

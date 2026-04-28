@@ -6,7 +6,7 @@
 
 **Local, open source, AI-powered image-to-3D mesh generation.**
 Turn any photo into a 3D model using open source AI models running entirely on your GPU.
-Modly is a desktop application for Windows and Linux (macOS coming soon)
+Modly is a desktop application for Windows, Linux, and Apple Silicon macOS.
 
 > Created by [Lightning Pixel](https://github.com/lightningpixel)
 
@@ -19,7 +19,7 @@ Modly is a desktop application for Windows and Linux (macOS coming soon)
 
 ## Download
 
-Head to the [Releases](../../releases/latest) page to download the latest installer for Windows or Linux.
+Head to the [Releases](../../releases/latest) page to download the latest installer for Windows, Linux, or Apple Silicon macOS.
 
 Alternatively, you can clone the repository and run the app directly without installing:
 
@@ -27,7 +27,7 @@ Alternatively, you can clone the repository and run the app directly without ins
 # Windows
 launcher.bat
 
-# Linux
+# Linux / macOS
 ./launcher.sh
 ```
 
@@ -59,11 +59,28 @@ pip install -r requirements.txt
 npm run dev
 ```
 
+### 4. Test
+
+```bash
+npm test
+./node_modules/.bin/tsc --noEmit -p tsconfig.node.json
+npm run build
+```
+
+## Platform notes
+
+- macOS support targets Apple Silicon only.
+- macOS uses native window controls. Windows and Linux keep the existing custom controls.
+- The top bar includes a live RAM indicator sourced from the main process.
+- Workflow wiring is validated before run; invalid graphs stay in place and surface inline/toast warnings instead of dropping the current mesh view.
+- Package Apple Silicon macOS with `npm run package:mac`.
+- Imported meshes can be smoothed and decimated in-app; optimized results are written back into the workspace.
+
 ---
 
 ## Extension system
 
-Modly supports external AI model extensions. Each extension is a GitHub repository containing a `manifest.json` and a `generator.py`.
+Modly supports external model and process extensions. Each extension is a GitHub repository containing a `manifest.json` plus the runtime entry files required by its type.
 
 ### Official extensions
 
@@ -85,7 +102,7 @@ Modly supports external AI model extensions. Each extension is a GitHub reposito
 
 ![Enter extension URL](docs/install-extension.png)
 
-**3.** Once the extension is installed, download the model or one of its variants.
+**3.** If the extension exposes model nodes, download the model or one of its variants. Process extensions are ready once installation and setup complete.
 
 ![Install models](docs/install-models.png)
 
