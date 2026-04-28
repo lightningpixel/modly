@@ -70,6 +70,7 @@ class ExtensionProcess:
         env["MODLY_API_DIR"] = str(Path(__file__).parent.parent)
         # Pass the exact model_dir so runner.py doesn't have to re-derive it
         # from manifest["id"] (which is the ext_id, not the composite node id).
+        # runner.py extracts the node id from MODEL_DIR's trailing path component.
         if self.model_dir is not None:
             env["MODEL_DIR"] = str(self.model_dir)
         return env
@@ -83,6 +84,11 @@ class ExtensionProcess:
                 "Run the extension's setup.py first."
             )
 
+        # Use a fresh queue per subprocess lifetime so late messages from an
+        # older reader thread cannot poison startup for the new process.
+        run_queue: queue.Queue = queue.Queue()
+        self._queue = run_queue
+
         self._proc = subprocess.Popen(
             [str(python), str(_RUNNER_PATH)],
             stdin=subprocess.PIPE,
@@ -94,11 +100,11 @@ class ExtensionProcess:
         )
 
         # Background thread: read stdout → queue
-        reader = threading.Thread(target=self._read_loop, daemon=True)
+        reader = threading.Thread(target=self._read_loop, args=(self._proc, run_queue), daemon=True)
         reader.start()
 
         # Background thread: forward stderr to our stderr
-        stderr_fwd = threading.Thread(target=self._stderr_loop, daemon=True)
+        stderr_fwd = threading.Thread(target=self._stderr_loop, args=(self._proc,), daemon=True)
         stderr_fwd.start()
 
         # Wait for ready — runner sends params_schema in this message
@@ -113,23 +119,46 @@ class ExtensionProcess:
 
         print(f"[ExtensionProcess] {self.MODEL_ID} subprocess started (pid {self._proc.pid})")
 
-    def _read_loop(self) -> None:
+    def _read_loop(self, proc: subprocess.Popen, msg_queue: queue.Queue) -> None:
         """Continuously reads stdout and pushes parsed JSON to the queue."""
         try:
-            for line in self._proc.stdout:
+            for line in proc.stdout:
                 line = line.strip()
                 if line:
                     try:
-                        self._queue.put(json.loads(line))
+                        msg_queue.put(json.loads(line))
                     except json.JSONDecodeError:
                         print(f"[{self.MODEL_ID}] bad JSON: {line}", file=sys.stderr)
         finally:
-            self._queue.put(None)  # sentinel: process is done
+            msg_queue.put(None)  # sentinel: process is done
 
-    def _stderr_loop(self) -> None:
-        """Forwards subprocess stderr to the main process stderr."""
-        for line in self._proc.stderr:
-            print(f"[{self.MODEL_ID}] {line}", end="", file=sys.stderr)
+    def _stderr_loop(self, proc: subprocess.Popen) -> None:
+        """Forward subprocess stderr to the main process stderr, emitting
+        one line every time we see EITHER '\\n' or '\\r'. tqdm writes live
+        progress updates with '\\r' only, so a newline-only iterator would
+        buffer every tick until the loop exits with '\\n' — which is why
+        the HUD's log pane went dark during multi-minute volume decode.
+
+        No per-line extension-id prefix: the HUD log pane is a single
+        truncated line, and eating 20 characters with "[modly-hy3d2-mac] "
+        hides the tail of the tqdm bar the user actually wants to read.
+        """
+        stream = proc.stderr
+        if stream is None:
+            return
+        buf = []
+        while True:
+            ch = stream.read(1)
+            if not ch:
+                if buf:
+                    print(''.join(buf), file=sys.stderr, flush=True)
+                return
+            if ch in ("\r", "\n"):
+                if buf:
+                    print(''.join(buf), file=sys.stderr, flush=True)
+                    buf = []
+            else:
+                buf.append(ch)
 
     def _send(self, msg: dict) -> None:
         with self._lock:
@@ -200,14 +229,45 @@ class ExtensionProcess:
             "outputs_dir": str(self.outputs_dir) if self.outputs_dir else None,
         })
 
+        # Grace period after sending a cooperative cancel before hard-killing
+        # the subprocess. Long enough to let generators that check cancel_event
+        # between steps shut down cleanly, short enough that the user isn't
+        # left staring at a stuck UI when the subprocess is blocked inside a
+        # native call (octree decode, marching cubes, etc.) that ignores stdin.
+        CANCEL_GRACE_SECONDS = 3.0
+
+        cancel_sent_at: Optional[float] = None
         while True:
             # Check for cancellation
             if cancel_event and cancel_event.is_set():
-                self._send({"action": "cancel", "id": req_id})
-                # Drain until the subprocess acknowledges
-                while True:
-                    msg = self._recv(timeout=30.0)
-                    if msg.get("type") in ("cancelled", "done", "error"):
+                if cancel_sent_at is None:
+                    # First observation of the cancel — ask the subprocess to stop.
+                    try:
+                        self._send({"action": "cancel", "id": req_id})
+                    except Exception:
+                        pass
+                    import time
+                    cancel_sent_at = time.monotonic()
+                else:
+                    import time
+                    if time.monotonic() - cancel_sent_at >= CANCEL_GRACE_SECONDS:
+                        # Grace period expired — the subprocess is not
+                        # responding (almost certainly stuck in native code).
+                        # Hard-kill it and drop our state so the next
+                        # generation forces a fresh load.
+                        try:
+                            if self._proc and self._proc.poll() is None:
+                                self._proc.kill()
+                                self._proc.wait(timeout=5.0)
+                        except Exception:
+                            pass
+                        self._loaded = False
+                        self._proc   = None
+                        print(
+                            f"[ExtensionProcess] {self.MODEL_ID} subprocess killed "
+                            f"after {CANCEL_GRACE_SECONDS}s grace; model will reload on next run",
+                            file=sys.stderr,
+                        )
                         raise GenerationCancelled()
 
             # Poll queue with short timeout so we can re-check cancel_event
@@ -241,12 +301,28 @@ class ExtensionProcess:
         return self._params_schema
 
     def stop(self) -> None:
-        """Gracefully shut down the subprocess."""
-        if self._proc and self._proc.poll() is None:
-            try:
-                self._send({"action": "shutdown"})
-                self._proc.wait(timeout=15)
-            except Exception:
-                self._proc.kill()
-        self._loaded = False
+        """Hard-stop the subprocess.
+
+        Used by Free Memory / unload_all. Cooperative shutdown was the wrong
+        semantics here: torch.mps.empty_cache() does not reliably release
+        wired Metal pages, so only process exit actually returns the memory
+        to the OS. We SIGKILL, reap the zombie, and drop our refs so the
+        next load() starts a fresh subprocess.
+        """
+        proc = self._proc
         self._proc   = None
+        self._loaded = False
+        if proc and proc.poll() is None:
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+        self._drain_queue()
+
+    def _drain_queue(self) -> None:
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break

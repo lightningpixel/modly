@@ -17,10 +17,12 @@ import {
 import { useWorkflowsStore } from '@shared/stores/workflowsStore'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
 import { useNavStore } from '@shared/stores/navStore'
+import { useAppStore } from '@shared/stores/appStore'
 import type { Workflow, WFNode, WFEdge, WFNodeData } from '@shared/types/electron.d'
 import { buildAllWorkflowExtensions, getWorkflowExtension } from './mockExtensions'
 import type { WorkflowExtension } from './mockExtensions'
 import { useWorkflowRunStore } from './workflowRunStore'
+import { validateWorkflowPreflight } from './preflight'
 import ExtensionNode    from './nodes/ExtensionNode'
 import ImageNode        from './nodes/ImageNode'
 import TextNode         from './nodes/TextNode'
@@ -778,6 +780,8 @@ function WorkflowCanvasInner({
 }) {
   const { screenToFlowPosition, updateNodeData, getNode } = useReactFlow()
   const { runState, run: runWorkflow, cancel } = useWorkflowRunStore()
+  const currentMeshUrl = useAppStore((s) => s.currentJob?.outputUrl)
+  const showToast = useAppStore((s) => s.showToast)
   const isRunning = runState.status === 'running'
 
   const [nodes, setNodes, onNodesChange] = useNodesState(workflow.nodes as Node[])
@@ -792,6 +796,8 @@ function WorkflowCanvasInner({
   const [pendingDropPos, setPendingDropPos] = useState<{ x: number; y: number } | null>(null)
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const preflightToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const didMountRef = useRef(false)
 
   // ─── Undo / Redo ──────────────────────────────────────────────────────────
   type Snapshot = { nodes: Node[]; edges: Edge[]; name: string }
@@ -837,6 +843,32 @@ function WorkflowCanvasInner({
     }, 500)
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current) }
   }, [nodes, edges, name])
+
+  const preflightIssues = useMemo(() => {
+    const draft: Workflow = {
+      ...workflow,
+      name,
+      nodes: nodes as WFNode[],
+      edges: edges as WFEdge[],
+      updatedAt: workflow.updatedAt,
+    }
+    return validateWorkflowPreflight(draft, allExtensions, { currentMeshUrl })
+  }, [workflow, name, nodes, edges, allExtensions, currentMeshUrl])
+
+  useEffect(() => {
+    if (!didMountRef.current) {
+      didMountRef.current = true
+      return
+    }
+    if (preflightToastTimer.current) clearTimeout(preflightToastTimer.current)
+    if (preflightIssues.length === 0) return
+    preflightToastTimer.current = setTimeout(() => {
+      showToast(preflightIssues[0].message)
+    }, 250)
+    return () => {
+      if (preflightToastTimer.current) clearTimeout(preflightToastTimer.current)
+    }
+  }, [preflightIssues, showToast])
 
   const undo = useCallback(() => {
     const idx = histIdxRef.current
@@ -977,10 +1009,14 @@ function WorkflowCanvasInner({
 
   const handleRun = useCallback(() => {
     if (isRunning) { cancel(); return }
+    if (preflightIssues.length > 0) {
+      showToast(preflightIssues[0].message)
+      return
+    }
     const wf: Workflow = { ...workflow, name, nodes: nodes as WFNode[], edges: edges as WFEdge[], updatedAt: new Date().toISOString() }
     onSave(wf)
     runWorkflow(wf, allExtensions)
-  }, [workflow, name, nodes, edges, onSave, allExtensions, isRunning, runWorkflow, cancel])
+  }, [workflow, name, nodes, edges, onSave, allExtensions, isRunning, runWorkflow, cancel, preflightIssues, showToast])
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden">

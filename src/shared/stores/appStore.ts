@@ -36,6 +36,12 @@ export interface GenerationOptions {
   modelParams: Record<string, any>
 }
 
+export interface AppToast {
+  id: number
+  message: string
+  durationMs?: number
+}
+
 const DEFAULT_OPTIONS: GenerationOptions = {
   modelId: '',
   remesh: 'quad',
@@ -73,6 +79,8 @@ interface AppState {
   setupProgress:  SetupProgress | null
   setupError:     string | null
   defaultDataDir: string
+  platform: string
+  arch: string
   checkSetup:     () => Promise<void>
   runSetup:       () => Promise<void>
   saveDataDir:    (baseDir: string) => Promise<void>
@@ -85,6 +93,11 @@ interface AppState {
   errorModal: string | null
   showError: (message: string) => void
   hideError: () => void
+
+  // Toast
+  toast: AppToast | null
+  showToast: (message: string, durationMs?: number) => void
+  hideToast: () => void
 
   // Mesh URL history (undo/redo)
   meshHistory: string[]
@@ -112,11 +125,13 @@ export const useAppStore = create<AppState>()(
       setupProgress: null,
       setupError: null,
       defaultDataDir: '',
+      platform: '',
+      arch: '',
 
       checkSetup: async () => {
         set({ setupStatus: 'checking' })
-        const { needed, defaultDataDir } = await window.electron.setup.check()
-        set({ setupStatus: needed ? 'needed' : 'done', defaultDataDir })
+        const { needed, defaultDataDir, platform, arch } = await window.electron.setup.check()
+        set({ setupStatus: needed ? 'needed' : 'done', defaultDataDir, platform, arch })
       },
 
       saveDataDir: async (baseDir: string) => {
@@ -151,6 +166,10 @@ export const useAppStore = create<AppState>()(
       errorModal: null,
       showError: (message) => set({ errorModal: message }),
       hideError: () => set({ errorModal: null }),
+
+      toast: null,
+      showToast: (message, durationMs) => set({ toast: { id: Date.now(), message, durationMs } }),
+      hideToast: () => set({ toast: null }),
 
       meshHistory: [],
       historyIndex: -1,

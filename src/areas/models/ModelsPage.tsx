@@ -33,7 +33,16 @@ export default function ModelsPage(): JSX.Element {
 
   // Model weight state (needed for node install status + uninstall cleanup)
   const [installedVariantIds, setInstalledVariantIds] = useState<string[]>([])
-  const [downloading, setDownloading] = useState<Record<string, { percent: number; file?: string; fileIndex?: number; totalFiles?: number }>>({})
+  const [downloading, setDownloading] = useState<Record<string, {
+    percent: number
+    file?: string
+    fileIndex?: number
+    totalFiles?: number
+    status?: string
+    bytesDownloaded?: number
+    totalBytes?: number
+    stalledSeconds?: number
+  }>>({})
 
   // Uninstall modal state
   const [uninstallTarget, setUninstallTarget] = useState<string | null>(null)
@@ -56,7 +65,7 @@ export default function ModelsPage(): JSX.Element {
       for (const node of ext.nodes) {
         if (!node.hfRepo) continue
         const fullId = `${ext.id}/${node.id}`
-        const ok = await window.electron.model.isDownloaded(fullId)
+        const ok = await window.electron.model.isDownloaded(fullId, node.downloadCheck)
         if (ok) ids.push(fullId)
       }
     }
@@ -68,8 +77,8 @@ export default function ModelsPage(): JSX.Element {
       const exts = useExtensionsStore.getState().modelExtensions
       refreshInstalledIds(exts)
     })
-    window.electron.model.onProgress(({ modelId: id, percent, file, fileIndex, totalFiles }) => {
-      setDownloading((prev) => ({ ...prev, [id]: { percent, file, fileIndex, totalFiles } }))
+    window.electron.model.onProgress(({ modelId: id, percent, file, fileIndex, totalFiles, status, bytesDownloaded, totalBytes, stalledSeconds }) => {
+      setDownloading((prev) => ({ ...prev, [id]: { percent, file, fileIndex, totalFiles, status, bytesDownloaded, totalBytes, stalledSeconds } }))
       if (percent === 100) {
         const exts = useExtensionsStore.getState().modelExtensions
         refreshInstalledIds(exts).then(() => {
@@ -162,9 +171,12 @@ export default function ModelsPage(): JSX.Element {
         <div className="flex items-center justify-between mb-4">
           <h1 className="text-base font-semibold text-zinc-100">Extensions</h1>
           <div className="flex items-center gap-2">
-
             <button
-              onClick={() => { setShowGHForm((v) => !v); setGhErr(null); clearInstall() }}
+              onClick={() => {
+                setShowGHForm((v) => !v)
+                setGhErr(null)
+                clearInstall()
+              }}
               className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-zinc-800/80 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200 transition-all border border-zinc-700/60"
             >
               <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
@@ -313,7 +325,7 @@ export default function ModelsPage(): JSX.Element {
             <div className="text-center">
               <p className="text-sm font-medium text-zinc-400">No extensions installed</p>
               <p className="text-xs text-zinc-600 mt-1">
-                Install from GitHub or drop into <span className="font-mono text-zinc-500">%appdata%/Modly/extensions</span>
+                Install from GitHub or drop into the Modly extensions directory.
               </p>
             </div>
           </div>
@@ -344,8 +356,9 @@ export default function ModelsPage(): JSX.Element {
                 onInstall={(node: ExtensionNode, fullId: string) => {
                   if (!node.hfRepo) return
                   setDownloading((prev) => ({ ...prev, [fullId]: { percent: 0 } }))
-                  window.electron.model.download(node.hfRepo!, fullId, node.hfSkipPrefixes).then((result: { success: boolean }) => {
+                  window.electron.model.download(node.hfRepo!, fullId, node.hfSkipPrefixes, node.hfIncludePrefixes).then((result: { success: boolean }) => {
                     if (!result.success) {
+                      setGhErr('Download failed')
                       setDownloading((prev) => { const n = { ...prev }; delete n[fullId]; return n })
                     }
                   })

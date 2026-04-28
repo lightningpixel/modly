@@ -33,3 +33,5 @@ Thumbs.db
 .env
 .env.local
 
+# TypeScript incremental build output
+*.tsbuildinfo

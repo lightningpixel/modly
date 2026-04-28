@@ -49,9 +49,13 @@ function CheckingPanel(): JSX.Element {
 
 function ChoosePathPanel({
   defaultPath,
+  platform,
+  arch,
   onConfirm,
 }: {
   defaultPath: string
+  platform: string
+  arch: string
   onConfirm: (path: string) => void
 }): JSX.Element {
   const [selectedPath, setSelectedPath] = useState(defaultPath || '')
@@ -70,8 +74,10 @@ function ChoosePathPanel({
     <div className="w-80 bg-surface-300 rounded-xl p-6">
       <p className="text-sm font-medium text-zinc-100 mb-1">Choose a data folder</p>
       <p className="text-xs text-zinc-500 mb-4">
-        Models can be several GB each. Choose a folder on a drive with plenty of free space —
-        preferably not your system drive (C:).
+        Models can be several GB each. Choose a folder with plenty of free space.
+        {platform === 'darwin' && arch === 'arm64'
+          ? ' Apple Silicon is supported on this build.'
+          : ' A fast local SSD is recommended.'}
       </p>
 
       {/* Path display */}
@@ -210,9 +216,10 @@ function ErrorPanel({ message }: { message: string | null }): JSX.Element {
 // ─── Main component ─────────────────────────────────────────────────────────
 
 export default function FirstRunSetup(): JSX.Element {
-  const { setupStatus, setupProgress, setupError, saveDataDir, defaultDataDir, backendStatus, backendError } =
+  const { setupStatus, setupProgress, setupError, saveDataDir, defaultDataDir, backendStatus, backendError, platform, arch } =
     useAppStore()
   const [applyingVersion, setApplyingVersion] = useState<string | null>(null)
+  const isMac = platform === 'darwin'
 
   useEffect(() => {
     window.electron.updater.onApplying(({ version }) => setApplyingVersion(`v${version}`))
@@ -227,7 +234,7 @@ export default function FirstRunSetup(): JSX.Element {
         return <CheckingPanel />
 
       case 'needed':
-        return <ChoosePathPanel defaultPath={defaultDataDir} onConfirm={saveDataDir} />
+        return <ChoosePathPanel defaultPath={defaultDataDir} platform={platform} arch={arch} onConfirm={saveDataDir} />
 
       case 'installing':
         return <InstallingPanel progress={setupProgress} />
@@ -249,28 +256,47 @@ export default function FirstRunSetup(): JSX.Element {
     <div className="flex flex-col h-full bg-surface-500">
       {/* Title bar */}
       <div className="flex items-center h-9 px-3 shrink-0 drag-region">
-        <div className="flex-1" />
-        <div className="flex items-center gap-1 no-drag">
-          <button
-            onClick={() => window.electron.window.minimize()}
-            className="w-7 h-7 flex items-center justify-center rounded hover:bg-zinc-700 text-zinc-500 hover:text-zinc-100 transition-colors"
-            aria-label="Minimize"
-          >
-            <svg width="10" height="1" viewBox="0 0 10 1" fill="currentColor">
-              <rect width="10" height="1" />
-            </svg>
-          </button>
-          <button
-            onClick={() => window.electron.window.close()}
-            className="w-7 h-7 flex items-center justify-center rounded hover:bg-red-600 text-zinc-500 hover:text-white transition-colors"
-            aria-label="Close"
-          >
-            <svg width="9" height="9" viewBox="0 0 9 9" fill="none" stroke="currentColor" strokeWidth="1.2">
-              <line x1="0" y1="0" x2="9" y2="9" />
-              <line x1="9" y1="0" x2="0" y2="9" />
-            </svg>
-          </button>
+        <div className={`flex items-center gap-2 no-drag ${isMac ? 'pl-[72px]' : ''}`}>
+          <svg width="18" height="18" viewBox="0 0 609 609" xmlns="http://www.w3.org/2000/svg" className="shrink-0">
+            <defs>
+              <linearGradient id="tlg-setup" x1="700" y1="5700" x2="5900" y2="750" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stopColor="#c084fc"/>
+                <stop offset="45%" stopColor="#9333ea"/>
+                <stop offset="100%" stopColor="#4c1d95"/>
+              </linearGradient>
+            </defs>
+            <g transform="translate(0,609) scale(0.1,-0.1)" fill="url(#tlg-setup)" stroke="none">
+              <path d="M2964 5671 c-20 -9 -918 -521 -1604 -914 -173 -100 -362 -207 -420 -239 -58 -32 -118 -73 -133 -91 -58 -67 -57 -45 -57 -1067 0 -831 2 -938 16 -958 l15 -22 758 0 c417 0 761 3 764 6 12 13 -26 67 -283 399 -64 83 -120 156 -124 163 -5 7 4 32 22 60 16 26 238 396 493 822 254 426 569 951 699 1165 308 506 305 502 290 520 -7 8 -72 48 -144 87 -124 69 -135 73 -201 75 -38 2 -79 -1 -91 -6z"/>
+              <path d="M3683 5328 c-18 -23 -833 -1306 -833 -1312 0 -12 83 -15 485 -21 230 -3 420 -7 421 -8 4 -5 451 -755 657 -1102 438 -739 668 -1120 691 -1143 l23 -24 71 36 c91 46 139 88 152 134 14 50 14 2403 0 2453 -20 72 -48 98 -215 193 -766 440 -1414 806 -1427 806 -9 0 -20 -6 -25 -12z"/>
+              <path d="M4037 2838 c-25 -33 -443 -702 -467 -747 l-12 -24 -1384 4 c-1247 4 -1385 2 -1399 -12 -44 -44 -21 -170 42 -231 21 -20 203 -132 408 -249 385 -220 1034 -594 1310 -754 88 -51 183 -105 210 -121 28 -15 88 -49 134 -76 158 -90 177 -86 475 84 127 72 416 236 641 363 226 128 507 287 625 354 212 121 250 145 250 163 0 5 -40 73 -88 151 -49 78 -177 286 -284 462 -393 643 -407 664 -430 665 -4 0 -18 -15 -31 -32z"/>
+            </g>
+          </svg>
+          <span className="text-xs font-semibold text-zinc-300">Modly</span>
         </div>
+        <div className="flex-1" />
+        {!isMac && (
+          <div className="flex items-center gap-1 no-drag">
+            <button
+              onClick={() => window.electron.window.minimize()}
+              className="w-7 h-7 flex items-center justify-center rounded hover:bg-zinc-700 text-zinc-500 hover:text-zinc-100 transition-colors"
+              aria-label="Minimize"
+            >
+              <svg width="10" height="1" viewBox="0 0 10 1" fill="currentColor">
+                <rect width="10" height="1" />
+              </svg>
+            </button>
+            <button
+              onClick={() => window.electron.window.close()}
+              className="w-7 h-7 flex items-center justify-center rounded hover:bg-red-600 text-zinc-500 hover:text-white transition-colors"
+              aria-label="Close"
+            >
+              <svg width="9" height="9" viewBox="0 0 9 9" fill="none" stroke="currentColor" strokeWidth="1.2">
+                <line x1="0" y1="0" x2="9" y2="9" />
+                <line x1="9" y1="0" x2="0" y2="9" />
+              </svg>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Content */}

@@ -10,7 +10,9 @@
     "build": "node scripts/build-builtins.mjs && electron-vite build",
     "preview": "electron-vite preview",
     "prepare-resources": "node scripts/download-python-embed.js",
+    "test": "cd api && python3 -m unittest discover -s tests && cd .. && node --test electron/main/*.test.mjs",
     "package": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && npm run prepare-resources && electron-builder",
+    "package:mac": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && npm run prepare-resources && electron-builder --mac --arm64",
     "lint": "eslint ."
   },
   "dependencies": {
@@ -38,14 +40,14 @@
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
     "cross-env": "^10.1.0",
-    "electron": "^33.3.0",
-    "electron-builder": "^24.13.3",
-    "electron-vite": "^2.3.0",
+    "electron": "^41.2.1",
+    "electron-builder": "^26.8.1",
+    "electron-vite": "^5.0.0",
     "eslint": "^9.17.0",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.2",
-    "vite": "^5.4.0"
+    "vite": "^7.1.0"
   },
   "build": {
     "appId": "com.modly.app",
@@ -63,7 +65,10 @@
         "filter": [
           "**/*",
           "!.venv/**/*",
-          "!__pycache__/**/*"
+          "!__pycache__/**/*",
+          "!**/build/**/*",
+          "!**/*.pyd",
+          "!**/*.egg-info/**/*"
         ]
       },
       {
@@ -93,7 +98,15 @@
     },
     "mac": {
       "target": "dmg",
-      "icon": "resources/icons/icon.icns"
+      "icon": "resources/icons/icon.icns",
+      "artifactName": "${productName}-${version}-arm64.${ext}",
+      "category": "public.app-category.graphics-design",
+      "extraResources": [
+        {
+          "from": "resources/python-embed",
+          "to": "python-embed"
+        }
+      ]
     },
     "linux": {
       "target": "AppImage",

@@ -127,8 +127,16 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
   const [handle2Top, setHandle2Top] = useState('50%')
 
   const { modelExtensions, processExtensions } = useExtensionsStore()
-  const ext = buildAllWorkflowExtensions(modelExtensions, processExtensions)
-    .find((e) => e.id === data.extensionId)
+  const allExtensions = buildAllWorkflowExtensions(modelExtensions, processExtensions)
+  const ext = allExtensions.find((e) => e.id === data.extensionId)
+  const siblingVariants = ext
+    ? allExtensions.filter((e) =>
+        e.extensionId === ext.extensionId &&
+        e.type === ext.type &&
+        e.input === ext.input &&
+        e.output === ext.output,
+      )
+    : []
 
   const inputs      = ext?.inputs  // defined → multi-input mode
   const isMulti     = inputs && inputs.length > 1
@@ -242,6 +250,22 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
     >
       {hasParams && (
         <div className="px-3 pb-3 pt-2.5 flex flex-col gap-2">
+          {siblingVariants.length > 1 && (
+            <div className="flex items-center gap-2">
+              <label className="text-[10px] text-zinc-500 w-20 shrink-0 truncate">Variant</label>
+              <div className="flex-1">
+                <select
+                  value={ext?.id ?? data.extensionId ?? ''}
+                  onChange={(e) => updateNodeData(id, { extensionId: e.target.value })}
+                  className={inputCls}
+                >
+                  {siblingVariants.map((variant) => (
+                    <option key={variant.id} value={variant.id}>{variant.name}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
           {ext!.params.map((param) => {
             const val = (data.params[param.id] ?? param.default) as number | string
             return (

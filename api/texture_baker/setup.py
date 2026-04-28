@@ -14,6 +14,7 @@ from torch.utils.cpp_extension import (
 library_name = "texture_baker"
 
 IS_WINDOWS = platform.system() == "Windows"
+IS_MACOS = platform.system() == "Darwin"
 
 
 def get_extensions():
@@ -39,6 +40,18 @@ def get_extensions():
         if debug_mode:
             cxx_flags += ["/Z7"]
             extra_link_args += ["/DEBUG"]
+    elif IS_MACOS:
+        # Prefer a conservative Apple Silicon toolchain over OpenMP-specific flags.
+        cxx_flags = [
+            "-O3" if not debug_mode else "-O0",
+            "-fdiagnostics-color=always",
+            "-mmacosx-version-min=11.0",
+        ]
+        if use_native_arch:
+            cxx_flags.append("-mcpu=apple-m1")
+        if debug_mode:
+            cxx_flags += ["-g", "-UNDEBUG"]
+            extra_link_args += ["-O0", "-g"]
     else:
         # GCC/Clang flags
         cxx_flags = [
@@ -91,8 +104,17 @@ def get_extensions():
         sources += glob.glob(
             os.path.join(this_dir, library_name, "csrc", "**", "*.mm"), recursive=True
         )
-        extra_compile_args.update({"cxx": ["-O3", "-arch", "arm64", "-mmacosx-version-min=10.15"]})
-        extra_link_args += ["-arch", "arm64"]
+        if IS_MACOS:
+            if "-arch" not in extra_link_args:
+                extra_link_args += [
+                    "-arch",
+                    "arm64",
+                    "-framework",
+                    "Metal",
+                    "-framework",
+                    "Foundation",
+                ]
+            cxx_flags.extend(["-arch", "arm64"])
 
     extensions.append(
         extension(

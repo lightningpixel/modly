@@ -11,6 +11,7 @@ import { useExtensionsStore }  from '@shared/stores/extensionsStore'
 import { useNavStore }         from '@shared/stores/navStore'
 import { useWorkflowRunStore } from '@areas/workflows/workflowRunStore'
 import { buildAllWorkflowExtensions, getWorkflowExtension } from '@areas/workflows/mockExtensions'
+import { validateWorkflowPreflight } from '@areas/workflows/preflight'
 import type { WorkflowExtension } from '@areas/workflows/mockExtensions'
 import type { Workflow, WFNode, WFEdge, ParamSchema } from '@shared/types/electron.d'
 
@@ -409,7 +410,8 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
     ))
   }, [setNodes])
 
-  const { setCurrentJob } = useAppStore()
+  const currentMeshUrl = useAppStore((s) => s.currentJob?.outputUrl)
+  const showToast = useAppStore((s) => s.showToast)
   const { runState, run, cancel } = useWorkflowRunStore()
   const isRunning = runState.status === 'running'
 
@@ -420,33 +422,12 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
     if (out) updateNodeData(out.id, { params: { outputUrl: runState.outputUrl } })
   }, [runState.status, runState.outputUrl])
 
-  // Type mismatch detection — edge-based to support multi-input nodes
-  const typeMismatch = useMemo(() => {
-    // Build a map of what type each node produces
-    const nodeOutput = new Map<string, string>()
-    for (const node of workflow.nodes) {
-      if (node.type === 'imageNode')  { nodeOutput.set(node.id, 'image'); continue }
-      if (node.type === 'meshNode')   { nodeOutput.set(node.id, 'mesh');  continue }
-      if (node.type === 'textNode')   { nodeOutput.set(node.id, 'text');  continue }
-      if (node.type === 'extensionNode') {
-        const ext = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
-        if (ext) nodeOutput.set(node.id, ext.output)
-      }
-    }
-    // For each extension node, check that every incoming edge carries an accepted type
-    const extNodes = workflow.nodes.filter((n) => n.type === 'extensionNode')
-    for (const node of extNodes) {
-      const ext = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
-      if (!ext) continue
-      const accepted = ext.inputs ?? [ext.input]
-      for (const edge of workflow.edges) {
-        if (edge.target !== node.id) continue
-        const srcType = nodeOutput.get(edge.source)
-        if (srcType && !accepted.includes(srcType as any)) return true
-      }
-    }
-    return false
-  }, [workflow, allExtensions])
+  const preflightIssues = useMemo(() => {
+    const wf: Workflow = { ...workflow, nodes: nodes as WFNode[], edges: edges as WFEdge[] }
+    return validateWorkflowPreflight(wf, allExtensions, { currentMeshUrl })
+  }, [workflow, nodes, edges, allExtensions, currentMeshUrl])
+
+  const firstPreflightIssue = preflightIssues[0]?.message ?? null
 
   // Ordered nodes for params list — only those marked showInGenerate
   const sortedNodes = useMemo(
@@ -460,9 +441,13 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
   )
 
   const handleGenerate = useCallback(() => {
+    if (firstPreflightIssue) {
+      showToast(firstPreflightIssue)
+      return
+    }
     const wf: Workflow = { ...workflow, nodes: nodes as WFNode[], edges: edges as WFEdge[] }
     run(wf, allExtensions)
-  }, [nodes, edges, workflow, allExtensions, run])
+  }, [firstPreflightIssue, nodes, edges, workflow, allExtensions, run, showToast])
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
@@ -508,13 +493,13 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
 
       {/* Footer */}
       <div className="shrink-0 px-4 pt-3 pb-4 border-t border-zinc-800 flex flex-col gap-2">
-        {typeMismatch && !isRunning && (
-          <div className="flex items-center gap-2 px-2.5 py-2 rounded-lg bg-red-950/40 border border-red-800/50">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-red-400 shrink-0">
+        {firstPreflightIssue && !isRunning && (
+          <div className="flex items-center gap-2 px-2.5 py-2 rounded-lg bg-amber-950/40 border border-amber-800/50">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-amber-300 shrink-0">
               <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
               <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
             </svg>
-            <span className="text-[10px] text-red-400 font-medium">Type mismatch — fix the workflow</span>
+            <span className="text-[10px] text-amber-300 font-medium">{firstPreflightIssue}</span>
           </div>
         )}
         {isRunning ? (
@@ -523,7 +508,7 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
             Stop
           </button>
         ) : (
-          <button onClick={handleGenerate} disabled={typeMismatch}
+          <button onClick={handleGenerate} disabled={Boolean(firstPreflightIssue)}
             className="w-full py-2.5 rounded-lg text-sm font-semibold bg-accent hover:bg-accent-dark disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors">
             Generate 3D Model
           </button>

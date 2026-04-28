@@ -285,6 +285,7 @@ export default function GeneratePage(): JSX.Element {
   )
   const currentJob = useAppStore((s) => s.currentJob)
   const apiUrl = useAppStore((s) => s.apiUrl)
+  const showError = useAppStore((s) => s.showError)
   const updateCurrentJob = useAppStore((s) => s.updateCurrentJob)
   const setCurrentJob = useAppStore((s) => s.setCurrentJob)
   const meshStats = useAppStore((s) => s.meshStats)
@@ -327,6 +328,16 @@ export default function GeneratePage(): JSX.Element {
     link.click()
   }
 
+  function getOptimizePath(url: string): string {
+    if (url.startsWith('/workspace/')) {
+      return url.slice('/workspace/'.length)
+    }
+    if (url.startsWith('/optimize/serve-file?path=')) {
+      return decodeURIComponent(url.split('path=')[1] ?? '')
+    }
+    return url
+  }
+
   async function handleImportMesh() {
     const filePath = await window.electron.fs.selectMeshFile()
     if (!filePath) return
@@ -354,11 +365,13 @@ export default function GeneratePage(): JSX.Element {
     if (!currentJob?.outputUrl) return
     setSmoothing(true)
     try {
-      const path = currentJob.outputUrl.replace('/workspace/', '')
+      const path = getOptimizePath(currentJob.outputUrl)
       const { url } = await smoothMesh(path, iterations)
       updateCurrentJob({ outputUrl: url })
       pushMeshUrl(url)
       setOpenPanel(null)
+    } catch (err) {
+      showError(err instanceof Error ? err.message : String(err))
     } finally {
       setSmoothing(false)
     }
@@ -368,11 +381,13 @@ export default function GeneratePage(): JSX.Element {
     if (!currentJob?.outputUrl) return
     setDecimating(true)
     try {
-      const path = currentJob.outputUrl.replace('/workspace/', '')
+      const path = getOptimizePath(currentJob.outputUrl)
       const { url } = await optimizeMesh(path, targetFaces)
       updateCurrentJob({ outputUrl: url })
       pushMeshUrl(url)
       setOpenPanel(null)
+    } catch (err) {
+      showError(err instanceof Error ? err.message : String(err))
     } finally {
       setDecimating(false)
     }

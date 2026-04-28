@@ -15,8 +15,9 @@ export function PerformanceSection(): JSX.Element {
           <Row label="GPU device" description="Device used for model inference.">
             <Select value={gpu} onChange={setGpu} options={[
               { value: 'auto',  label: 'Auto-detect' },
-              { value: 'cuda0', label: 'CUDA GPU 0' },
-              { value: 'cuda1', label: 'CUDA GPU 1' },
+              { value: 'mps',   label: 'Apple GPU (MPS)' },
+              { value: 'cuda0', label: 'NVIDIA GPU 0' },
+              { value: 'cuda1', label: 'NVIDIA GPU 1' },
               { value: 'cpu',   label: 'CPU (slow)' },
             ]} />
           </Row>

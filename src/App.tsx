@@ -4,6 +4,7 @@ import FirstRunSetup from '@areas/setup/FirstRunSetup'
 import MainLayout from '@shared/components/layout/MainLayout'
 import { UpdateModal } from '@shared/components/ui/UpdateModal'
 import { ErrorModal } from '@shared/components/ui/ErrorModal'
+import { Toast } from '@shared/components/ui/Toast'
 
 export default function App(): JSX.Element {
   const { checkSetup, setupStatus, initApp, backendStatus, showError } = useAppStore()
@@ -41,12 +42,14 @@ export default function App(): JSX.Element {
           onDismiss={() => setUpdateVersion(null)}
         />
       )}
+      <Toast />
       <ErrorModal />
     </>
   )
   return (
     <>
       <FirstRunSetup />
+      <Toast />
       <ErrorModal />
     </>
   )
