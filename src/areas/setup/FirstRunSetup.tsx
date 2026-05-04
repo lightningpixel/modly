@@ -193,10 +193,29 @@ function ApplyingUpdatePanel({ version }: { version: string }): JSX.Element {
 }
 
 function ErrorPanel({ message }: { message: string | null }): JSX.Element {
+  const lines = (message ?? 'Check the console for details').split('\n')
+  const isAntivirusHint = message?.includes('antivirus') ?? false
+
   return (
     <div className="w-80 bg-surface-300 rounded-xl p-6">
       <p className="text-sm font-medium text-zinc-100">Something went wrong</p>
-      <p className="text-xs text-zinc-500 mt-1">{message ?? 'Check the console for details'}</p>
+      <div className="mt-2 space-y-1 max-h-48 overflow-y-auto">
+        {lines.map((line, i) =>
+          line === '' ? (
+            <div key={i} className="h-1" />
+          ) : (
+            <p key={i} className="text-xs text-zinc-500 font-mono break-all">{line}</p>
+          )
+        )}
+      </div>
+      {isAntivirusHint && (
+        <div className="mt-3 p-3 bg-amber-950/40 border border-amber-700/40 rounded-lg">
+          <p className="text-xs text-amber-400 font-medium">Antivirus detected</p>
+          <p className="text-xs text-amber-500/80 mt-0.5">
+            Add the app folder to your antivirus exclusions, then click Retry.
+          </p>
+        </div>
+      )}
       <button
         onClick={() => window.location.reload()}
         className="mt-4 w-full py-2 bg-accent hover:bg-accent-dark rounded-lg text-sm font-medium text-white transition-colors"
