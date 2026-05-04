@@ -98,6 +98,7 @@ function runExtensionSetup(
 }
 
 export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGetter): void {
+  const activeDownloads = new Map<string, { percent: number; file?: string; fileIndex?: number; totalFiles?: number }>()
   // Logging from renderer
   ipcMain.on('log:error', (_event, message: string) => logger.error(`[Renderer] ${message}`))
   ipcMain.handle('log:getPath', () => join(app.getPath('userData'), 'logs', 'modly.log'))
@@ -295,14 +296,22 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     return isModelDownloaded(modelsDir, modelId)
   })
 
+  ipcMain.handle('model:activeDownloads', () =>
+    [...activeDownloads.entries()].map(([modelId, progress]) => ({ modelId, ...progress }))
+  )
+
   ipcMain.handle('model:download', async (event, { repoId, modelId, skipPrefixes }: { repoId: string; modelId: string; skipPrefixes?: string[] }) => {
+    activeDownloads.set(modelId, { percent: 0 })
     try {
       await downloadModelFromHF(repoId, modelId, (progress) => {
+        activeDownloads.set(modelId, progress)
         event.sender.send('model:downloadProgress', { modelId, ...progress })
       }, skipPrefixes)
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
+    } finally {
+      activeDownloads.delete(modelId)
     }
   })
 
