@@ -13,7 +13,7 @@ import {
   downloadModelFromHF,
 } from './model-downloader'
 import { getSettings, setSettings } from './settings-store'
-import { checkSetupNeeded, markSetupDone, runFullSetup, getVenvPythonExe } from './python-setup'
+import { checkSetupNeeded, markSetupDone, runFullSetup, getVenvPythonExe, ensureSslPatch } from './python-setup'
 import { logger } from './logger'
 import { getProcessRunner, getPythonProcessRunner, getExtPythonExe, terminateProcessRunner, terminateAllProcessRunners } from './process-runner'
 import { getBuiltinExtensionsDir } from './builtin-sync'
@@ -71,6 +71,7 @@ function runExtensionSetup(
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const userData  = app.getPath('userData')
+    ensureSslPatch(userData)
     const pythonExe = getVenvPythonExe(userData)
     const setupPy   = join(extDir, 'setup.py')
 
