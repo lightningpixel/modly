@@ -95,6 +95,30 @@ export function checkSetupNeeded(userData: string): boolean {
  * Python imports sitecustomize automatically on every startup.
  * No-op on non-Windows or if the patch already exists.
  */
+/**
+ * Returns the path to certifi's cacert.pem inside the venv, or undefined if not found.
+ * Used to set SSL_CERT_FILE / REQUESTS_CA_BUNDLE for python-embed subprocesses,
+ * which ship without a CA bundle on Windows.
+ */
+export function getCertifiBundle(userData: string): string | undefined {
+  const venvDir = getVenvDir(userData)
+  // Windows venv layout: Lib/site-packages/certifi/cacert.pem
+  const winPath = join(venvDir, 'Lib', 'site-packages', 'certifi', 'cacert.pem')
+  if (existsSync(winPath)) return winPath
+  // Linux/macOS venv layout: lib/pythonX.Y/site-packages/certifi/cacert.pem
+  const libDir = join(venvDir, 'lib')
+  if (existsSync(libDir)) {
+    try {
+      const { readdirSync } = require('fs') as typeof import('fs')
+      for (const entry of readdirSync(libDir)) {
+        const candidate = join(libDir, entry, 'site-packages', 'certifi', 'cacert.pem')
+        if (existsSync(candidate)) return candidate
+      }
+    } catch { /* ignore */ }
+  }
+  return undefined
+}
+
 export function ensureSslPatch(userData: string): void {
   if (process.platform !== 'win32') return
   const venvDir  = getVenvDir(userData)

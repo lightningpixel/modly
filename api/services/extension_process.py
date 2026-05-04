@@ -72,6 +72,14 @@ class ExtensionProcess:
         # from manifest["id"] (which is the ext_id, not the composite node id).
         if self.model_dir is not None:
             env["MODEL_DIR"] = str(self.model_dir)
+        # Extension venvs are based on python-embed which ships without a CA bundle.
+        # Only set SSL_CERT_FILE if not already provided (preserves corporate/custom certs).
+        if "SSL_CERT_FILE" not in env:
+            try:
+                import certifi
+                env["SSL_CERT_FILE"] = certifi.where()
+            except ImportError:
+                pass
         return env
 
     def _start(self) -> None:
