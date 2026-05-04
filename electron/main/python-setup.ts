@@ -107,14 +107,26 @@ function createVenv(pythonExe: string, venvDir: string, win: BrowserWindow): Pro
       stdio: ['ignore', 'pipe', 'pipe'],
       env: cleanPythonEnv(),
     })
+    let stderrOut = ''
     proc.stdout?.on('data', (d: Buffer) => console.log('[venv]', d.toString().trim()))
-    proc.stderr?.on('data', (d: Buffer) => console.error('[venv]', d.toString().trim()))
+    proc.stderr?.on('data', (d: Buffer) => {
+      const text = d.toString().trim()
+      if (text) { console.error('[venv]', text); stderrOut += text + '\n' }
+    })
     proc.on('close', (code) => {
       if (code === 0) {
         win.webContents.send('setup:progress', { step: 'venv', percent: 20 })
         resolve()
       } else {
-        reject(new Error(`python -m venv exited with code ${code}`))
+        let msg = `python -m venv exited with code ${code}`
+        if (stderrOut) msg += `\n\n${stderrOut.trim()}`
+        if (process.platform === 'win32') {
+          msg +=
+            '\n\nYour antivirus may be blocking the Python runtime.' +
+            `\nTry adding an exclusion for:\n  ${pythonExe}` +
+            '\nOr temporarily pause real-time protection, then click Retry.'
+        }
+        reject(new Error(msg))
       }
     })
   })
