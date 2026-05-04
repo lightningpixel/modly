@@ -89,6 +89,35 @@ export function checkSetupNeeded(userData: string): boolean {
   return false
 }
 
+/**
+ * Write a sitecustomize.py into the venv that silently skips malformed certs
+ * in the Windows certificate store (ssl.SSLError: [ASN1] nested asn1 error).
+ * Python imports sitecustomize automatically on every startup.
+ * No-op on non-Windows or if the patch already exists.
+ */
+export function ensureSslPatch(userData: string): void {
+  if (process.platform !== 'win32') return
+  const venvDir  = getVenvDir(userData)
+  const sitePkg  = join(venvDir, 'Lib', 'site-packages')
+  const target   = join(sitePkg, 'sitecustomize.py')
+  if (!existsSync(sitePkg)) return
+  if (existsSync(target))   return
+  writeFileSync(target, [
+    'try:',
+    '    import ssl as _ssl',
+    '    _orig = _ssl.SSLContext._load_windows_store_certs',
+    '    def _safe(self, storename, purpose):',
+    '        try:',
+    '            _orig(self, storename, purpose)',
+    '        except _ssl.SSLError:',
+    '            pass',
+    '    _ssl.SSLContext._load_windows_store_certs = _safe',
+    'except Exception:',
+    '    pass',
+    '',
+  ].join('\n'), 'utf-8')
+}
+
 export function markSetupDone(userData: string): void {
   writeFileSync(
     join(userData, 'python_setup.json'),
