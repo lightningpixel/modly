@@ -172,6 +172,23 @@ export function ExtensionCard({ ext, installedIds, downloading, loadError, disab
                       </svg>
                       <span className="text-[10px] font-semibold text-emerald-400">Ready</span>
                     </div>
+                  ) : isDownloading ? (
+                    <div className="flex flex-col gap-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-zinc-500 truncate max-w-[100px]" title={dlFile}>
+                          {dlFile ?? 'Downloading…'}
+                        </span>
+                        <span className="text-[10px] font-mono text-zinc-400 shrink-0 ml-1">
+                          {dlFileIndex && dlTotalFiles ? `${dlFileIndex}/${dlTotalFiles} · ${dlPercent}%` : `${dlPercent}%`}
+                        </span>
+                      </div>
+                      <div className="h-1 rounded-full bg-zinc-800 overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-accent transition-all duration-300"
+                          style={{ width: `${dlPercent}%` }}
+                        />
+                      </div>
+                    </div>
                   ) : installed ? (
                     <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-emerald-950/40 border border-emerald-800/30">
                       <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="text-emerald-400 shrink-0">
@@ -191,23 +208,6 @@ export function ExtensionCard({ ext, installedIds, downloading, loadError, disab
                           </svg>
                         </button>
                       )}
-                    </div>
-                  ) : isDownloading ? (
-                    <div className="flex flex-col gap-1">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[10px] text-zinc-500 truncate max-w-[100px]" title={dlFile}>
-                          {dlFile ?? 'Downloading…'}
-                        </span>
-                        <span className="text-[10px] font-mono text-zinc-400 shrink-0 ml-1">
-                          {dlFileIndex && dlTotalFiles ? `${dlFileIndex}/${dlTotalFiles} · ${dlPercent}%` : `${dlPercent}%`}
-                        </span>
-                      </div>
-                      <div className="h-1 rounded-full bg-zinc-800 overflow-hidden">
-                        <div
-                          className="h-full rounded-full bg-accent transition-all duration-300"
-                          style={{ width: `${dlPercent}%` }}
-                        />
-                      </div>
                     </div>
                   ) : (
                     <button

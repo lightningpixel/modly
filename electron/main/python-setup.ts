@@ -89,6 +89,59 @@ export function checkSetupNeeded(userData: string): boolean {
   return false
 }
 
+/**
+ * Write a sitecustomize.py into the venv that silently skips malformed certs
+ * in the Windows certificate store (ssl.SSLError: [ASN1] nested asn1 error).
+ * Python imports sitecustomize automatically on every startup.
+ * No-op on non-Windows or if the patch already exists.
+ */
+/**
+ * Returns the path to certifi's cacert.pem inside the venv, or undefined if not found.
+ * Used to set SSL_CERT_FILE / REQUESTS_CA_BUNDLE for python-embed subprocesses,
+ * which ship without a CA bundle on Windows.
+ */
+export function getCertifiBundle(userData: string): string | undefined {
+  const venvDir = getVenvDir(userData)
+  // Windows venv layout: Lib/site-packages/certifi/cacert.pem
+  const winPath = join(venvDir, 'Lib', 'site-packages', 'certifi', 'cacert.pem')
+  if (existsSync(winPath)) return winPath
+  // Linux/macOS venv layout: lib/pythonX.Y/site-packages/certifi/cacert.pem
+  const libDir = join(venvDir, 'lib')
+  if (existsSync(libDir)) {
+    try {
+      const { readdirSync } = require('fs') as typeof import('fs')
+      for (const entry of readdirSync(libDir)) {
+        const candidate = join(libDir, entry, 'site-packages', 'certifi', 'cacert.pem')
+        if (existsSync(candidate)) return candidate
+      }
+    } catch { /* ignore */ }
+  }
+  return undefined
+}
+
+export function ensureSslPatch(userData: string): void {
+  if (process.platform !== 'win32') return
+  const venvDir  = getVenvDir(userData)
+  const sitePkg  = join(venvDir, 'Lib', 'site-packages')
+  const target   = join(sitePkg, 'sitecustomize.py')
+  if (!existsSync(sitePkg)) return
+  if (existsSync(target))   return
+  writeFileSync(target, [
+    'try:',
+    '    import ssl as _ssl',
+    '    _orig = _ssl.SSLContext._load_windows_store_certs',
+    '    def _safe(self, storename, purpose):',
+    '        try:',
+    '            _orig(self, storename, purpose)',
+    '        except _ssl.SSLError:',
+    '            pass',
+    '    _ssl.SSLContext._load_windows_store_certs = _safe',
+    'except Exception:',
+    '    pass',
+    '',
+  ].join('\n'), 'utf-8')
+}
+
 export function markSetupDone(userData: string): void {
   writeFileSync(
     join(userData, 'python_setup.json'),
@@ -107,14 +160,26 @@ function createVenv(pythonExe: string, venvDir: string, win: BrowserWindow): Pro
       stdio: ['ignore', 'pipe', 'pipe'],
       env: cleanPythonEnv(),
     })
+    let stderrOut = ''
     proc.stdout?.on('data', (d: Buffer) => console.log('[venv]', d.toString().trim()))
-    proc.stderr?.on('data', (d: Buffer) => console.error('[venv]', d.toString().trim()))
+    proc.stderr?.on('data', (d: Buffer) => {
+      const text = d.toString().trim()
+      if (text) { console.error('[venv]', text); stderrOut += text + '\n' }
+    })
     proc.on('close', (code) => {
       if (code === 0) {
         win.webContents.send('setup:progress', { step: 'venv', percent: 20 })
         resolve()
       } else {
-        reject(new Error(`python -m venv exited with code ${code}`))
+        let msg = `python -m venv exited with code ${code}`
+        if (stderrOut) msg += `\n\n${stderrOut.trim()}`
+        if (process.platform === 'win32') {
+          msg +=
+            '\n\nYour antivirus may be blocking the Python runtime.' +
+            `\nTry adding an exclusion for:\n  ${pythonExe}` +
+            '\nOr temporarily pause real-time protection, then click Retry.'
+        }
+        reject(new Error(msg))
       }
     })
   })

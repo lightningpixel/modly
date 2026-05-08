@@ -12,3 +12,4 @@ huggingface_hub>=0.27.0
 hf_xet>=0.1.0
 
 cryptography>=42.0.0
+certifi>=2024.0.0

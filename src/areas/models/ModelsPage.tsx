@@ -64,8 +64,16 @@ export default function ModelsPage(): JSX.Element {
   }
 
   useEffect(() => {
-    loadExtensions().then(() => {
+    loadExtensions().then(async () => {
       const exts = useExtensionsStore.getState().modelExtensions
+      const active = await window.electron.model.activeDownloads()
+      if (active.length > 0) {
+        setDownloading((prev) => {
+          const next = { ...prev }
+          for (const { modelId, ...progress } of active) if (!next[modelId]) next[modelId] = progress
+          return next
+        })
+      }
       refreshInstalledIds(exts)
     })
     window.electron.model.onProgress(({ modelId: id, percent, file, fileIndex, totalFiles }) => {

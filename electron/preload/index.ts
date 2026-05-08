@@ -83,6 +83,7 @@ contextBridge.exposeInMainWorld('electron', {
     delete:         (modelId: string) => ipcRenderer.invoke('model:delete', modelId),
     unloadAll:      () => ipcRenderer.invoke('model:unloadAll'),
     showInFolder:   (modelId: string) => ipcRenderer.invoke('model:showInFolder', modelId),
+    activeDownloads: (): Promise<{ modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]> => ipcRenderer.invoke('model:activeDownloads'),
     onProgress:     (cb: (data: { modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number; status?: string }) => void) => {
       ipcRenderer.on('model:downloadProgress', (_event, data) => cb(data))
     },
