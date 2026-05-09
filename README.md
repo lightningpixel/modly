@@ -25,7 +25,7 @@ Alternatively, you can clone the repository and run the app directly without ins
 
 ```bash
 # Windows
-launcher.bat
+launch.bat
 
 # Linux
 ./launcher.sh
