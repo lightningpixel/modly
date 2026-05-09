@@ -91,6 +91,19 @@ Modly supports external AI model extensions. Each extension is a GitHub reposito
 
 ---
 
+## Modly CLI
+
+Agents and scripts can call a running Modly desktop app without using the UI via the stdlib-only CLI:
+
+```bash
+python tools/modly-cli/agent.py health
+python tools/modly-cli/agent.py generate --image ./input.png --output ./export.glb
+```
+
+The CLI talks to the local app API at `http://127.0.0.1:8765`, waits for image-to-3D generation, exports the mesh, and prints a single JSON object containing the new `export_path`. See `tools/modly-cli/SKILL.md` for the agent workflow and output contract.
+
+---
+
 ### Community 
 
 Join the [Discord server](https://discord.gg/BvjDCvS3yr) to stay up to date with the latest news, report bugs, and share feedback.
