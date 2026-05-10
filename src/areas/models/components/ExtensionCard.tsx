@@ -102,30 +102,30 @@ export function ExtensionCard({ ext, installedIds, downloading, loadError, disab
 
       {/* Load error */}
       {(loadError || repairError) && (
-        <div className="flex flex-col gap-1.5 px-2.5 py-2 rounded-lg bg-red-950/30 border border-red-800/30">
-          <div className="flex items-start gap-1.5">
-            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-red-400 shrink-0 mt-px">
-              <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-            </svg>
-            <p className="text-[10px] text-red-400 break-all">{repairError ?? loadError}</p>
-          </div>
-          {!repairError && ext.type === 'model' && (
-            <button
-              onClick={handleRepair}
-              disabled={repairing || disabled}
-              className="flex items-center justify-center gap-1 w-full py-1 rounded-md bg-red-900/40 border border-red-700/40 text-[10px] font-semibold text-red-300 hover:bg-red-900/60 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {repairing ? (
-                <div className="w-2.5 h-2.5 rounded-full border border-red-400/40 border-t-red-300 animate-spin" />
-              ) : (
-                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                  <path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/>
-                </svg>
-              )}
-              {repairing ? 'Repairing…' : 'Repair (re-run setup)'}
-            </button>
-          )}
+        <div className="flex items-start gap-1.5 px-2.5 py-2 rounded-lg bg-red-950/30 border border-red-800/30">
+          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-red-400 shrink-0 mt-px">
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+          <p className="text-[10px] text-red-400 break-all">{repairError ?? loadError}</p>
         </div>
+      )}
+
+      {/* Repair — always visible for model extensions */}
+      {ext.type === 'model' && (
+        <button
+          onClick={handleRepair}
+          disabled={repairing || disabled}
+          className="flex items-center justify-center gap-1 w-full py-1 rounded-md bg-zinc-800/60 border border-zinc-700/40 text-[10px] font-semibold text-zinc-400 hover:bg-zinc-700/50 hover:text-zinc-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {repairing ? (
+            <div className="w-2.5 h-2.5 rounded-full border border-zinc-500/40 border-t-zinc-300 animate-spin" />
+          ) : (
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/>
+            </svg>
+          )}
+          {repairing ? 'Repairing…' : 'Repair'}
+        </button>
       )}
 
       {/* Description */}
