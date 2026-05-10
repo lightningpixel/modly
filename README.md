@@ -98,9 +98,11 @@ Agents and scripts can call a running Modly desktop app without using the UI via
 ```bash
 python tools/modly-cli/agent.py health
 python tools/modly-cli/agent.py generate --image ./input.png --output ./export.glb
+python tools/modly-cli/agent.py generate-from-workflow --workflow Trellis2Workflow --prompt "clean isolated robot toy" --output ./export.glb
+python tools/modly-cli/agent.py generate --image ./input.png --output ./fast-geometry.glb --no-texture
 ```
 
-The CLI talks to the local app API at `http://127.0.0.1:8765`, waits for image-to-3D generation, exports the mesh, and prints a single JSON object containing the new `export_path`. See `tools/modly-cli/SKILL.md` for the agent workflow and output contract.
+Useful extras include `status`, `models`, `params`, `job`, `cancel`, `export`, directory/manifest `batch`, preconfigured ComfyUI source-image runs via `comfy-image` / `generate-from-workflow` (default workflow name: `Trellis2Workflow`), and optional headless backend startup with `serve` / `ensure-server --start`. The CLI talks to the local app API at `http://127.0.0.1:8765`, runs the texture/refine node by default when one is available, waits for image-to-3D generation, exports the mesh, and prints a single JSON object containing the new `export_path`. Agent texture defaults are intentionally higher quality than the extension UI defaults (`texture_steps=30`, `texture_guidance=3.0`); override them with flags if needed. Use `--no-texture` only for faster geometry-only smoke tests. See `tools/modly-cli/SKILL.md` for the agent workflow and output contract.
 
 ---
 
