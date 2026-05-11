@@ -1,6 +1,8 @@
+import { useTranslation } from 'react-i18next'
 import { useAppStore } from '@shared/stores/appStore'
 
 export default function TopBar(): JSX.Element {
+  const { t } = useTranslation()
   const { patchUpdateReady } = useAppStore()
 
   const handleMinimize = () => window.electron.window.minimize()
@@ -35,12 +37,12 @@ export default function TopBar(): JSX.Element {
       {/* Patch update badge */}
       {patchUpdateReady && (
         <div className="flex items-center gap-2 mr-3 px-3 py-1 rounded-full bg-accent/15 border border-accent/30 text-xs text-accent-light no-drag">
-          <span>Update ready</span>
+          <span>{t('topbar.updateReady')}</span>
           <button
             onClick={() => window.electron.updater.quitAndInstall()}
             className="ml-1 px-2 py-0.5 rounded-full bg-accent hover:bg-accent-dark text-white text-[11px] font-medium transition-colors"
           >
-            Restart
+            {t('topbar.restart')}
           </button>
         </div>
       )}
@@ -50,7 +52,7 @@ export default function TopBar(): JSX.Element {
         <button
           onClick={handleMinimize}
           className="w-8 h-8 flex items-center justify-center rounded hover:bg-zinc-700 text-zinc-400 hover:text-zinc-100 transition-colors"
-          aria-label="Minimize"
+          aria-label={t('topbar.minimize')}
         >
           <svg width="10" height="1" viewBox="0 0 10 1" fill="currentColor">
             <rect width="10" height="1" />
@@ -59,7 +61,7 @@ export default function TopBar(): JSX.Element {
         <button
           onClick={handleMaximize}
           className="w-8 h-8 flex items-center justify-center rounded hover:bg-zinc-700 text-zinc-400 hover:text-zinc-100 transition-colors"
-          aria-label="Maximize"
+          aria-label={t('topbar.maximize')}
         >
           <svg width="9" height="9" viewBox="0 0 9 9" fill="none" stroke="currentColor">
             <rect x="0.5" y="0.5" width="8" height="8" />
@@ -68,7 +70,7 @@ export default function TopBar(): JSX.Element {
         <button
           onClick={handleClose}
           className="w-8 h-8 flex items-center justify-center rounded hover:bg-red-600 text-zinc-400 hover:text-white transition-colors"
-          aria-label="Close"
+          aria-label={t('topbar.close')}
         >
           <svg width="9" height="9" viewBox="0 0 9 9" fill="none" stroke="currentColor" strokeWidth="1.2">
             <line x1="0" y1="0" x2="9" y2="9" />

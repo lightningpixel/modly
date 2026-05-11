@@ -8,6 +8,7 @@ export interface AppSettings {
   extensionsDir:    string
   dependenciesDir:  string
   hfToken?:         string
+  language:         'en' | 'es'
 }
 
 function settingsPath(userData: string): string {
@@ -21,6 +22,7 @@ export function getSettings(userData: string): AppSettings {
     workflowsDir:     join(userData, 'workflows'),
     extensionsDir:    join(userData, 'extensions'),
     dependenciesDir:  join(userData, 'dependencies'),
+    language:         'en',
   }
 
   const file = settingsPath(userData)

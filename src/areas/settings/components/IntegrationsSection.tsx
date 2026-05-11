@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Section, Card, Row } from '@shared/ui'
 
 export function IntegrationsSection(): JSX.Element {
+  const { t } = useTranslation()
   const [token,    setToken]    = useState('')
   const [visible,  setVisible]  = useState(false)
   const [status,   setStatus]   = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
@@ -38,13 +40,13 @@ export function IntegrationsSection(): JSX.Element {
   }
 
   return (
-    <Section title="Integrations" subtitle="API keys and tokens for external services.">
+    <Section title={t('integrations.title')} subtitle={t('integrations.subtitle')}>
       <div className="grid grid-cols-2 gap-4">
         <Card
-          title="HuggingFace Hub"
-          description="Required to download gated models such as Stable Fast 3D. Generate a token at huggingface.co/settings/tokens."
+          title={t('integrations.huggingFace')}
+          description={t('integrations.huggingFaceDescription')}
         >
-          <Row label="Access Token" description="Must have at least 'Read' permission.">
+          <Row label={t('integrations.accessToken')} description={t('integrations.tokenPermissions')}>
             <div className="flex items-center gap-2 w-full">
               <div className="relative flex-1">
                 <input
@@ -59,7 +61,7 @@ export function IntegrationsSection(): JSX.Element {
                 <button
                   type="button"
                   onClick={() => setVisible((v) => !v)}
-                  title={visible ? 'Hide token' : 'Show token'}
+                  title={visible ? t('integrations.hideToken') : t('integrations.showToken')}
                   className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-600 hover:text-zinc-400 transition-colors"
                 >
                   {visible ? (
@@ -80,7 +82,7 @@ export function IntegrationsSection(): JSX.Element {
               {token && (
                 <button
                   onClick={handleClear}
-                  title="Remove token"
+                  title={t('integrations.removeToken')}
                   className="text-zinc-600 hover:text-red-400 transition-colors shrink-0"
                 >
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
@@ -98,10 +100,10 @@ export function IntegrationsSection(): JSX.Element {
                   'bg-accent/15 hover:bg-accent/25 text-accent-light'
                 }`}
               >
-                {status === 'saving' ? 'Saving…' :
-                 status === 'saved'  ? 'Saved'   :
+                {status === 'saving' ? t('integrations.saving') :
+                 status === 'saved'  ? t('integrations.saved')   :
                  status === 'error'  ? 'Failed'  :
-                 'Save'}
+                 t('integrations.save')}
               </button>
             </div>
           </Row>

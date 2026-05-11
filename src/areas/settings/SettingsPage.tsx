@@ -1,15 +1,19 @@
+import { useTranslation } from 'react-i18next'
 import { useState } from 'react'
 import { StorageSection }      from './components/StorageSection'
 import { AboutSection }        from './components/AboutSection'
 import { LogsSection }         from './components/LogsSection'
 import { IntegrationsSection } from './components/IntegrationsSection'
+import { LanguageSection }     from './components/LanguageSection'
 
-type Section = 'storage' | 'integrations' | 'logs' | 'about'
+type Section = 'storage' | 'integrations' | 'logs' | 'about' | 'language'
 
-const SECTIONS: { id: Section; label: string; icon: JSX.Element }[] = [
+function useSettingsSections() {
+  const { t } = useTranslation()
+  return [
   {
-    id: 'storage',
-    label: 'Storage',
+    id: 'storage' as const,
+    label: t('settings.storage'),
     icon: (
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
         <ellipse cx="12" cy="5" rx="9" ry="3" />
@@ -19,8 +23,8 @@ const SECTIONS: { id: Section; label: string; icon: JSX.Element }[] = [
     )
   },
   {
-    id: 'integrations',
-    label: 'Integrations',
+    id: 'integrations' as const,
+    label: t('settings.integrations'),
     icon: (
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
         <rect x="2" y="7" width="20" height="14" rx="2" ry="2"/>
@@ -29,8 +33,8 @@ const SECTIONS: { id: Section; label: string; icon: JSX.Element }[] = [
     )
   },
   {
-    id: 'logs',
-    label: 'Logs',
+    id: 'logs' as const,
+    label: t('settings.logs'),
     icon: (
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
@@ -42,8 +46,8 @@ const SECTIONS: { id: Section; label: string; icon: JSX.Element }[] = [
     )
   },
   {
-    id: 'about',
-    label: 'About',
+    id: 'about' as const,
+    label: t('settings.about'),
     icon: (
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
         <circle cx="12" cy="12" r="10" />
@@ -51,12 +55,24 @@ const SECTIONS: { id: Section; label: string; icon: JSX.Element }[] = [
         <line x1="12" y1="16" x2="12.01" y2="16" />
       </svg>
     )
+  },
+  {
+    id: 'language' as const,
+    label: t('settings.language'),
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+        <path d="M5 8l-2 9m16-9l2 9M9.135 4h5.73a2 2 0 011.976 2.184l-.6 3.616m0 0a2 2 0 01-1.973 1.6H6.667a2 2 0 01-1.973-1.6m12 0H6.667m1.5 5a1 1 0 100 2m6 0a1 1 0 100 2" />
+      </svg>
+    )
   }
-]
+  ] as const
+}
 
 // ─── Page shell ───────────────────────────────────────────────────────────────
 
 export default function SettingsPage(): JSX.Element {
+  const { t } = useTranslation()
+  const SECTIONS = useSettingsSections()
   const [section, setSection] = useState<Section>('storage')
 
   return (
@@ -64,7 +80,7 @@ export default function SettingsPage(): JSX.Element {
 
       {/* Left nav */}
       <nav className="w-52 shrink-0 border-r border-zinc-800 bg-surface-400 py-5 px-3 flex flex-col gap-0.5">
-        <p className="text-[10px] font-semibold text-zinc-600 uppercase tracking-wider px-3 mb-3">Settings</p>
+        <p className="text-[10px] font-semibold text-zinc-600 uppercase tracking-wider px-3 mb-3">{t('settings.title')}</p>
         {SECTIONS.map((s) => (
           <button
             key={s.id}
@@ -89,6 +105,7 @@ export default function SettingsPage(): JSX.Element {
           {section === 'integrations' && <IntegrationsSection />}
           {section === 'logs'         && <LogsSection />}
           {section === 'about'        && <AboutSection />}
+          {section === 'language'     && <LanguageSection />}
         </div>
       </div>
 

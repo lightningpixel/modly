@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Section, Card, Row, LinkButton } from '@shared/ui'
 
 export function AboutSection(): JSX.Element {
+  const { t } = useTranslation()
   const [version, setVersion] = useState<string>('')
 
   useEffect(() => {
@@ -9,27 +11,27 @@ export function AboutSection(): JSX.Element {
   }, [])
 
   return (
-    <Section title="About" subtitle="Application information and useful resources.">
+    <Section title={t('about.title')} subtitle={t('about.subtitle')}>
       <div className="grid grid-cols-2 gap-4">
 
         <Card>
-          <Row label="Modly" description="Local 3D mesh generation app.">
+          <Row label={t('about.modly')} description={t('about.modlyDescription')}>
             <span className="text-xs font-mono text-zinc-400">{version ? `v${version}` : '—'}</span>
           </Row>
-          <Row label="Documentation" description="Guides and API reference.">
-            <LinkButton label="Open" href="https://modly3d.app" />
+          <Row label={t('about.documentation')} description={t('about.documentationDescription')}>
+            <LinkButton label={t('about.docLink')} href="https://modly3d.app" />
           </Row>
-          <Row label="GitHub" description="Source code and issues.">
-            <LinkButton label="Open" href="https://github.com/lightningpixel/modly" />
+          <Row label={t('about.github')} description={t('about.githubDescription')}>
+            <LinkButton label={t('about.githubLink')} href="https://github.com/lightningpixel/modly" />
           </Row>
         </Card>
 
         <Card>
-          <Row label="Discord" description="Community support.">
-            <LinkButton label="Join" href="https://discord.gg/FjzjRgweVk" />
+          <Row label={t('about.discord')} description={t('about.discordDescription')}>
+            <LinkButton label={t('about.discordLink')} href="https://discord.gg/FjzjRgweVk" />
           </Row>
-          <Row label="Open-source licenses" description="Third-party licenses used in this app.">
-            <LinkButton label="View" href="https://github.com/lightningpixel/modly/blob/main/LICENSE" />
+          <Row label={t('about.licenses')} description={t('about.licensesDescription')}>
+            <LinkButton label={t('about.licensesLink')} href="https://github.com/lightningpixel/modly/blob/main/LICENSE" />
           </Row>
         </Card>
 
