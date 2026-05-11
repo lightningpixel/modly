@@ -18,6 +18,7 @@ import { logger } from './logger'
 import { getProcessRunner, getPythonProcessRunner, getExtPythonExe, terminateProcessRunner, terminateAllProcessRunners } from './process-runner'
 import { getBuiltinExtensionsDir } from './builtin-sync'
 import { spawn } from 'child_process'
+import { assertSafeExtensionId, buildExtensionBackupPath, resolveExtensionPathWithinRoot } from './extension-path-guard'
 
 type WindowGetter = () => BrowserWindow | null
 
@@ -674,6 +675,8 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       const manifest    = JSON.parse(manifestRaw) as ParsedManifest
 
       if (!manifest.id) throw new Error('manifest.json: required field "id" missing')
+      const extensionId = assertSafeExtensionId(manifest.id)
+      manifest.id = extensionId
       if (!manifest.nodes?.length) throw new Error('manifest.json: required field "nodes" missing or empty')
 
       const isProcess = manifest.type === 'process'
@@ -698,10 +701,13 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       // 5. Copy to extensions directory (overwrite if already present)
       const extensionsDir = getSettings(app.getPath('userData')).extensionsDir
       await mkdir(extensionsDir, { recursive: true })
-      const destDir = join(extensionsDir, manifest.id)
+      const destDir = resolveExtensionPathWithinRoot(extensionsDir, extensionId)
+      const backupDir = existsSync(destDir) ? buildExtensionBackupPath(extensionsDir, extensionId, String(Date.now())) : null
 
-      if (existsSync(destDir)) {
-        await rmAsync(destDir, { recursive: true, force: true })
+      try {
+      if (backupDir) {
+        terminateProcessRunner(extensionId)
+        await rename(destDir, backupDir)
       }
       await cp(extractDir, destDir, { recursive: true })
 
@@ -726,15 +732,10 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         if (existsSync(join(destDir, 'setup.py'))) {
           emit({ step: 'setting_up', message: 'Setting up Python environment…' })
           const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
-          try {
-            await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
-              logger.info(`[ext-setup] ${line}`)
-              emit({ step: 'setting_up', message: line })
-            })
-          } catch (err) {
-            logger.warn(`[ext-setup] setup.py failed: ${err}`)
-            emit({ step: 'setting_up', message: `Warning: setup failed — ${err}` })
-          }
+          await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
+            logger.info(`[ext-setup] ${line}`)
+            emit({ step: 'setting_up', message: line })
+          })
         }
       } else if (isProcess) {
         // 6b. JS process extension: npm install if package.json present
@@ -767,14 +768,10 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         if (existsSync(join(destDir, 'setup.py'))) {
           emit({ step: 'setting_up', message: 'Setting up Python environment…' })
           const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
-          try {
-            await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
-              logger.info(`[ext-setup] ${line}`)
-              emit({ step: 'setting_up', message: line })
-            })
-          } catch (setupErr: any) {
-            throw new Error(`Extension setup failed: ${setupErr?.message ?? setupErr}`)
-          }
+          await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
+            logger.info(`[ext-setup] ${line}`)
+            emit({ step: 'setting_up', message: line })
+          })
         }
 
         try {
@@ -782,11 +779,22 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         } catch { /* Python might not be running yet */ }
       }
 
-      emit({ step: 'done', extensionId: manifest.id })
+      if (backupDir) {
+        await rmAsync(backupDir, { recursive: true, force: true })
+      }
+      } catch (installErr) {
+        await rmAsync(destDir, { recursive: true, force: true }).catch(() => {})
+        if (backupDir && existsSync(backupDir)) {
+          await rename(backupDir, destDir)
+        }
+        throw installErr
+      }
+
+      emit({ step: 'done', extensionId })
 
       const trustedRepos = await fetchTrustedRepos()
-      const ext = parseExtensionManifest(manifest, manifest.id, trustedRepos)
-      return { success: true, extensionId: manifest.id, extension: ext }
+      const ext = parseExtensionManifest(manifest, extensionId, trustedRepos)
+      return { success: true, extensionId, extension: ext }
 
     } catch (err) {
       emit({ step: 'error', message: String(err) })
@@ -801,16 +809,17 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   // Uninstall an extension — built-ins cannot be uninstalled
   ipcMain.handle('extensions:uninstall', async (_, extensionId: string) => {
     const userData      = app.getPath('userData')
-    const builtinPath   = join(getBuiltinExtensionsDir(), extensionId)
+    const safeExtensionId = assertSafeExtensionId(extensionId)
+    const builtinPath   = resolveExtensionPathWithinRoot(getBuiltinExtensionsDir(), safeExtensionId)
     if (existsSync(builtinPath)) {
-      return { success: false, error: `"${extensionId}" is a built-in extension and cannot be uninstalled.` }
+      return { success: false, error: `"${safeExtensionId}" is a built-in extension and cannot be uninstalled.` }
     }
 
     const extensionsDir = getSettings(userData).extensionsDir
-    const extPath       = join(extensionsDir, extensionId)
+    const extPath       = resolveExtensionPathWithinRoot(extensionsDir, safeExtensionId)
     try {
       // Terminate process runner if it's a process extension
-      terminateProcessRunner(extensionId)
+      terminateProcessRunner(safeExtensionId)
 
       await rmAsync(extPath, { recursive: true, force: true })
       // Hot-reload Python so it stops using the deleted model extension
@@ -826,7 +835,8 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   // Re-run setup.py for a model extension (creates the venv if missing)
   ipcMain.handle('extensions:repair', async (_, extensionId: string) => {
     try {
-      const extDir = join(getSettings(app.getPath('userData')).extensionsDir, extensionId)
+      const safeExtensionId = assertSafeExtensionId(extensionId)
+      const extDir = resolveExtensionPathWithinRoot(getSettings(app.getPath('userData')).extensionsDir, safeExtensionId)
       if (!existsSync(join(extDir, 'setup.py'))) {
         return { success: false, error: 'No setup.py found for this extension' }
       }
@@ -843,6 +853,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   // Trigger Python extension reload (without touching the filesystem)
   ipcMain.handle('extensions:reload', async () => {
+    terminateAllProcessRunners()
     try {
       const res = await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
       return { success: true, errors: (res.data as { errors?: Record<string, string> }).errors ?? {} }

@@ -38,6 +38,7 @@ export interface ParamSchema {
   max?:     number
   step?:    number
   tooltip?: string
+  show_if?: Record<string, string | number | (string | number)[]>
 }
 
 export interface ProcessExtension {

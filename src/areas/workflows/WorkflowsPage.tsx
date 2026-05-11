@@ -27,13 +27,14 @@ import TextNode         from './nodes/TextNode'
 import AddToSceneNode   from './nodes/AddToSceneNode'
 import Load3DMeshNode   from './nodes/Load3DMeshNode'
 import PreviewImageNode from './nodes/PreviewImageNode'
+import WaitNode         from './nodes/WaitNode'
 import WorkflowEdge     from './nodes/WorkflowEdge'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const DRAG_KEY      = 'modly/extension-id'
 const DRAG_NODE_KEY = 'modly/node-type'
-const NODE_TYPES = { extensionNode: ExtensionNode, imageNode: ImageNode, textNode: TextNode, outputNode: AddToSceneNode, meshNode: Load3DMeshNode, previewNode: PreviewImageNode }
+const NODE_TYPES = { extensionNode: ExtensionNode, imageNode: ImageNode, textNode: TextNode, outputNode: AddToSceneNode, meshNode: Load3DMeshNode, previewNode: PreviewImageNode, waitNode: WaitNode }
 const EDGE_TYPES = { workflowEdge: WorkflowEdge }
 
 const DEFAULT_EDGE_OPTS = { type: 'workflowEdge' }
@@ -155,6 +156,7 @@ const PANEL_BUILTIN_NODES = [
   { type: 'meshNode',    label: 'Load 3D Mesh',   color: '#a78bfa', icon: <><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></> },
   { type: 'outputNode',  label: 'Add to Scene',   color: '#a78bfa', icon: <><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></> },
   { type: 'previewNode', label: 'Preview Views',  color: '#38bdf8', icon: <><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></> },
+  { type: 'waitNode',    label: 'Wait',           color: '#71717a', icon: <><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></> },
 ]
 
 function ExtGroupHeader({ title, author, expanded, onToggle, count }: { title: string; author?: string; expanded: boolean; onToggle: () => void; count: number }) {
@@ -398,6 +400,7 @@ const BUILTIN_NODES = [
   { type: 'meshNode',    label: 'Load 3D Mesh',   color: '#a78bfa', description: 'Load a 3D mesh file or use current model' },
   { type: 'outputNode',  label: 'Add to Scene',   color: '#a78bfa', description: 'Output node — adds the mesh to the 3D scene' },
   { type: 'previewNode', label: 'Preview Views',  color: '#38bdf8', description: 'Displays multi-view image outputs in a 2×3 grid' },
+  { type: 'waitNode',    label: 'Wait',           color: '#71717a', description: 'Pauses the workflow until you click Continue' },
 ]
 
 type PaletteItem =
@@ -778,7 +781,7 @@ function WorkflowCanvasInner({
 }) {
   const { screenToFlowPosition, updateNodeData, getNode } = useReactFlow()
   const { runState, run: runWorkflow, cancel } = useWorkflowRunStore()
-  const isRunning = runState.status === 'running'
+  const isRunning = runState.status === 'running' || runState.status === 'paused'
 
   const [nodes, setNodes, onNodesChange] = useNodesState(workflow.nodes as Node[])
   const [edges, setEdges, onEdgesChange] = useEdgesState(workflow.edges as Edge[])

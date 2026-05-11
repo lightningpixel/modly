@@ -8,7 +8,7 @@ import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface WorkflowRunState {
-  status:        'idle' | 'running' | 'done' | 'error'
+  status:        'idle' | 'running' | 'paused' | 'done' | 'error'
   blockIndex:    number
   blockTotal:    number
   blockProgress: number
@@ -25,6 +25,14 @@ const IDLE: WorkflowRunState = {
 // Module-level refs — survive component unmounts / navigation
 const _cancel      = { current: false }
 const _activeJobId = { current: null as string | null }
+const _resume      = { current: null as (() => void) | null }
+
+function flushResume(): void {
+  const fn = _resume.current
+  if (!fn) return
+  _resume.current = null
+  fn()
+}
 
 // ─── Topological sort ─────────────────────────────────────────────────────────
 
@@ -60,9 +68,10 @@ interface WorkflowRunStore {
   /** nodeId → workspace URL for image outputs (populated after each run) */
   nodeImageOutputs: Record<string, string>
 
-  run:    (workflow: Workflow, allExtensions: WorkflowExtension[]) => Promise<void>
-  cancel: () => void
-  reset:  () => void
+  run:         (workflow: Workflow, allExtensions: WorkflowExtension[], overrideImageData?: string) => Promise<void>
+  cancel:      () => void
+  reset:       () => void
+  continueRun: () => void
 }
 
 export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
@@ -77,7 +86,9 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
     const appState     = useAppStore.getState()
     const apiUrl       = appState.apiUrl
     const ordered      = topoSort(workflow.nodes, workflow.edges)
-    const execNodes    = ordered.filter((n) => n.type === 'extensionNode' && n.data.enabled)
+    const execNodes    = ordered.filter((n) =>
+      (n.type === 'extensionNode' || n.type === 'waitNode') && n.data.enabled,
+    )
 
     const selectedImagePath = appState.selectedImagePath ?? ''
     const selectedImageData = appState.selectedImageData ?? undefined
@@ -108,6 +119,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
 
       // nodeId → { filePath, text, outputType }
       const nodeOutputs = new Map<string, { filePath?: string; text?: string; outputType?: string }>()
+      const outputNodeIds = new Set(ordered.filter((n) => n.type === 'outputNode').map((n) => n.id))
 
       // Pre-populate source nodes
       for (const node of ordered) {
@@ -181,6 +193,21 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
           activeNodeId: node.id,
           runState: { ...s.runState, blockIndex: i, blockProgress: 0, blockStep: 'Starting…' },
         }))
+
+        // ── Wait node → pause until continueRun(), then passthrough ───────
+        if (node.type === 'waitNode') {
+          set((s) => ({ runState: { ...s.runState, status: 'paused', blockStep: 'Paused — click Continue' } }))
+          await new Promise<void>((resolve) => { _resume.current = resolve })
+          if (_cancel.current) { set({ runState: IDLE, activeNodeId: null }); return }
+
+          nodeOutputs.set(node.id, {
+            filePath:   nodeInputPath,
+            text:       nodeInputText,
+            outputType: incomingEdges[0] ? nodeOutputs.get(incomingEdges[0].source)?.outputType : undefined,
+          })
+          set((s) => ({ runState: { ...s.runState, status: 'running' } }))
+          continue
+        }
 
         // ── Model extensions → HTTP API ───────────────────────────────────
         // Process extensions → IPC runProcess
@@ -272,6 +299,20 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
         // Store output with type for downstream routing
         const outputType = ext?.output ?? (nodeInputPath ? 'mesh' : undefined)
         nodeOutputs.set(node.id, { filePath: nodeInputPath, text: nodeInputText, outputType })
+
+        // If this node feeds an Add-to-Scene, push the mesh to currentJob
+        // immediately so the 3D viewer loads it without waiting for the rest of the run.
+        const norm = nodeInputPath?.replace(/\\/g, '/')
+        if (
+          norm?.startsWith(workspaceDir) &&
+          workflow.edges.some((e) => e.source === node.id && outputNodeIds.has(e.target))
+        ) {
+          useAppStore.getState().updateCurrentJob({
+            status:    'done',
+            progress:  100,
+            outputUrl: `/workspace/${norm.slice(workspaceDir.length).replace(/^\//, '')}`,
+          })
+        }
       }
 
       // ── Collect image outputs for preview nodes ───────────────────────
@@ -289,7 +330,8 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
       let outputUrl:  string | undefined
       let outputPath: string | undefined
 
-      const outputNodeDef = ordered.find((n) => n.type === 'outputNode')
+      // Use the last AddToScene in topo order — its predecessor is the final scene mesh.
+      const outputNodeDef = [...ordered].reverse().find((n) => n.type === 'outputNode')
       if (outputNodeDef) {
         for (const edge of workflow.edges.filter((e) => e.target === outputNodeDef.id)) {
           const src = nodeOutputs.get(edge.source)
@@ -340,6 +382,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
 
   cancel() {
     _cancel.current = true
+    flushResume()
     if (_activeJobId.current) {
       const apiUrl = useAppStore.getState().apiUrl
       axios.create({ baseURL: apiUrl }).post(`/generate/cancel/${_activeJobId.current}`).catch(() => {})
@@ -350,5 +393,9 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
 
   reset() {
     set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null, nodeImageOutputs: {} })
+  },
+
+  continueRun() {
+    flushResume()
   },
 }))

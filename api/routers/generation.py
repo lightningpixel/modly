@@ -1,6 +1,7 @@
 import asyncio
 import json
 import threading
+import time
 import traceback
 import uuid
 from typing import Dict
@@ -16,6 +17,19 @@ router = APIRouter(tags=["generation"])
 _jobs: Dict[str, JobStatus] = {}
 _cancelled: set = set()
 _cancel_events: Dict[str, threading.Event] = {}
+_completed_at: Dict[str, float] = {}
+
+_JOB_TTL = 1800  # purge terminal jobs after 30 minutes
+
+
+def _purge_old_jobs() -> None:
+    cutoff = time.monotonic() - _JOB_TTL
+    stale = [jid for jid, t in _completed_at.items() if t < cutoff]
+    for jid in stale:
+        _jobs.pop(jid, None)
+        _cancelled.discard(jid)
+        _cancel_events.pop(jid, None)
+        _completed_at.pop(jid, None)
 
 
 @router.post("/from-image")
@@ -63,6 +77,8 @@ async def generate_from_image(
         **model_params,
     }
 
+    _purge_old_jobs()
+
     job = JobStatus(job_id=job_id, status="pending", progress=0)
     _jobs[job_id] = job
     _cancel_events[job_id] = threading.Event()
@@ -91,6 +107,7 @@ async def cancel_job(job_id: str):
         _cancel_events[job_id].set()
     if job.status in ("pending", "running"):
         job.status = "cancelled"
+        _completed_at[job_id] = time.monotonic()
     # Kill the active generator subprocess immediately so inference stops now.
     # _run_generation will catch the resulting exception, see job_id in _cancelled,
     # and return cleanly without setting an error status.
@@ -162,6 +179,7 @@ async def _run_generation(job_id: str, image_bytes: bytes, params: dict, collect
 
         job.status   = "done"
         job.progress = 100
+        _completed_at[job_id] = time.monotonic()
         try:
             rel = output_path.relative_to(WORKSPACE_DIR)
             job.output_url = f"/workspace/{rel.as_posix()}"
@@ -170,6 +188,7 @@ async def _run_generation(job_id: str, image_bytes: bytes, params: dict, collect
 
     except GenerationCancelled:
         job.status = "cancelled"
+        _completed_at[job_id] = time.monotonic()
     except Exception as exc:
         if job_id in _cancelled:
             return
@@ -177,3 +196,4 @@ async def _run_generation(job_id: str, image_bytes: bytes, params: dict, collect
         print(f"[Generation ERROR] {exc}\n{tb}")
         job.status = "error"
         job.error  = tb.strip()
+        _completed_at[job_id] = time.monotonic()

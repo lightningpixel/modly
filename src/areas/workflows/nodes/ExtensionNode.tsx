@@ -152,6 +152,16 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
     updateNodeData(id, { params: { ...data.params, [key]: val } })
   }, [id, data.params, updateNodeData])
 
+  const paramById = new Map(ext?.params.map((p) => [p.id, p]))
+
+  const isVisible = (param: ParamSchema): boolean => {
+    if (!param.show_if) return true
+    return Object.entries(param.show_if).every(([key, expected]) => {
+      const current = data.params[key] ?? paramById.get(key)?.default
+      return Array.isArray(expected) ? expected.includes(current as string | number) : current === expected
+    })
+  }
+
   // ── IO subheader ─────────────────────────────────────────────────────────
   const ioSubheader = isMulti ? (
     // Multi-input layout: one row per input, output on first row
@@ -242,7 +252,7 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
     >
       {hasParams && (
         <div className="px-3 pb-3 pt-2.5 flex flex-col gap-2">
-          {ext!.params.map((param) => {
+          {ext!.params.filter(isVisible).map((param) => {
             const val = (data.params[param.id] ?? param.default) as number | string
             return (
               <div key={param.id} className="flex items-center gap-2">

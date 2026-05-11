@@ -330,6 +330,39 @@ function TextParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: FlowN
   )
 }
 
+function WaitParamRow({ nodeId }: { nodeId: string }) {
+  const status       = useWorkflowRunStore((s) => s.runState.status)
+  const activeNodeId = useWorkflowRunStore((s) => s.activeNodeId)
+  const continueRun  = useWorkflowRunStore((s) => s.continueRun)
+  const isPaused     = status === 'paused' && activeNodeId === nodeId
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center gap-1.5">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#71717a" strokeWidth="2">
+          <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+        </svg>
+        <span className="text-[11px] font-medium text-zinc-300">Wait</span>
+      </div>
+      {isPaused ? (
+        <button
+          onClick={continueRun}
+          className="w-full flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-md bg-amber-500/15 border border-amber-500/30 text-amber-400 hover:bg-amber-500/25 transition-colors text-[11px] font-medium animate-pulse"
+        >
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          Continue
+        </button>
+      ) : (
+        <p className="text-[10px] text-zinc-600 italic px-0.5">
+          Pauses the workflow until you click Continue.
+        </p>
+      )}
+    </div>
+  )
+}
+
 function ExtensionParamRow({ nodeId, ext, nodes, onPatch }: { nodeId: string; ext: WorkflowExtension; nodes: FlowNode[]; onPatch: PatchFn }) {
   const [expanded, setExpanded] = useState(true)
   const node    = nodes.find((n) => n.id === nodeId)
@@ -411,7 +444,7 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
 
   const { setCurrentJob } = useAppStore()
   const { runState, run, cancel } = useWorkflowRunStore()
-  const isRunning = runState.status === 'running'
+  const isRunning = runState.status === 'running' || runState.status === 'paused'
 
   // Update AddToScene node when run completes
   useEffect(() => {
@@ -455,7 +488,7 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
   )
 
   const paramNodes = sortedNodes.filter((n) =>
-    (n.type === 'imageNode' || n.type === 'textNode' || n.type === 'meshNode' || n.type === 'extensionNode')
+    (n.type === 'imageNode' || n.type === 'textNode' || n.type === 'meshNode' || n.type === 'extensionNode' || n.type === 'waitNode')
     && (n.data as { showInGenerate?: boolean }).showInGenerate === true,
   )
 
@@ -476,6 +509,7 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
               {node.type === 'imageNode' && <ImageParamRow nodeId={node.id} nodes={nodes} onPatch={patchNode} />}
               {node.type === 'textNode'  && <TextParamRow  nodeId={node.id} nodes={nodes} onPatch={patchNode} />}
               {node.type === 'meshNode'  && <MeshParamRow  nodeId={node.id} nodes={nodes} onPatch={patchNode} />}
+              {node.type === 'waitNode'  && <WaitParamRow  nodeId={node.id} />}
               {node.type === 'extensionNode' && (() => {
                 const ext = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
                 return ext ? <ExtensionParamRow nodeId={node.id} ext={ext} nodes={nodes} onPatch={patchNode} /> : null
