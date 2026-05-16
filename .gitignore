@@ -13,6 +13,7 @@ api/*.pyc
 api/**/*.pyc
 api/.venv/
 api/venv/
+tools/modly-cli/__pycache__/
 
 # Models (heavy, downloaded at runtime)
 /models/
