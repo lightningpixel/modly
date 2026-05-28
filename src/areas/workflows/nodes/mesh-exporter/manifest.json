@@ -5,7 +5,7 @@
   "entry": "processor.js",
   "version": "1.0.0",
   "author": "Modly",
-  "description": "Exports the mesh to a chosen format (GLB, STL, OBJ, PLY) at a specified output path.",
+  "description": "Exports the mesh to a chosen format (GLB, FBX, STL, OBJ, PLY) at a specified output path.",
   "nodes": [
     {
       "id": "export",
@@ -20,6 +20,7 @@
           "default": "glb",
           "options": [
             { "value": "glb", "label": "GLB (Binary glTF)" },
+            { "value": "fbx", "label": "FBX (Unreal Engine 5)" },
             { "value": "stl", "label": "STL (3D printing)" },
             { "value": "obj", "label": "OBJ (Wavefront)" },
             { "value": "ply", "label": "PLY (Polygon)" }
