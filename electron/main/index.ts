@@ -1,6 +1,13 @@
 import { app, BrowserWindow, shell, session } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+
+// Must be set before any module calls app.getPath('userData')
+app.setName('Modly')
+if (is.dev) {
+  app.setPath('userData', join(app.getPath('appData'), 'Modly-dev'))
+}
+
 import { setupIpcHandlers } from './ipc-handlers'
 import { PythonBridge } from './python-bridge'
 import { logger, archiveCurrentSession } from './logger'
@@ -60,8 +67,6 @@ function createWindow(): void {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 }
-
-app.setName('Modly')
 
 process.on('uncaughtException', (err) => {
   logger.error(`Uncaught exception: ${err.stack ?? err.message}`)

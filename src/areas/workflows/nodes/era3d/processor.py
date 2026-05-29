@@ -2,10 +2,7 @@
 Era3D Multi-View Generator — Modly built-in process extension.
 
 Takes a single image and generates 6 consistent multi-view images
-(front, back, left, right, top-front, top-back) as a vertical strip PNG.
-
-The output strip can be fed directly into Trellis2's Generate Mesh node
-for significantly improved geometry on hands, back surfaces, and thin features.
+(front, front-right, right, back, left, front-left) as a vertical strip PNG.
 
 Model: pengHTYX/MacLab-Era3D-512-6view (HuggingFace)
 Paper: Era3D — NeurIPS 2024 (https://arxiv.org/abs/2405.11616)
@@ -18,7 +15,6 @@ Protocol: reads one JSON line from stdin, writes JSON lines to stdout.
 import json
 import os
 import sys
-import base64
 from pathlib import Path
 from time import time
 
@@ -41,191 +37,205 @@ def error(msg: str) -> None:
     emit({"type": "error", "message": msg})
 
 
-# ── Dependency check & lazy install ──────────────────────────────────────────
+# ── Locate Era3D repo ─────────────────────────────────────────────────────────
+
+def find_era3d_repo() -> "Path | None":
+    script_dir = Path(__file__).parent
+    for candidate in [script_dir / "era3d-repo", script_dir / "Era3D"]:
+        if (candidate / "mvdiffusion").is_dir():
+            return candidate
+    return None
+
+
+def inject_era3d_path() -> "Path | None":
+    repo = find_era3d_repo()
+    if repo is None:
+        error(
+            "Era3D repo not found. Run setup.bat from the era3d extension directory first.\n"
+            "Expected: era3d-repo/ folder with mvdiffusion/ inside it."
+        )
+        return None
+    repo_str = str(repo)
+    if repo_str not in sys.path:
+        sys.path.insert(0, repo_str)
+    log(f"Era3D repo: {repo_str}")
+    return repo
+
+
+# ── Dependency check ──────────────────────────────────────────────────────────
 
 def ensure_dependencies() -> bool:
-    """Check that diffusers, transformers, accelerate, and PIL are available."""
     missing = []
-    for pkg in ("diffusers", "transformers", "accelerate", "PIL", "torch", "einops"):
+    for pkg in ("diffusers", "transformers", "accelerate", "PIL", "torch", "einops", "omegaconf", "rembg"):
         try:
             __import__(pkg)
         except ImportError:
             missing.append(pkg)
     if missing:
-        error(
-            f"Era3D requires the following packages to be installed in the extension venv: "
-            f"{', '.join(missing)}. "
-            f"Please run: pip install diffusers transformers accelerate Pillow torch torchvision einops"
-        )
+        error(f"Era3D requires: {', '.join(missing)}. Run setup.bat to install all dependencies.")
         return False
     return True
 
 
-# ── Image helpers ─────────────────────────────────────────────────────────────
+# ── Pipeline loader ───────────────────────────────────────────────────────────
 
-def load_image(path_or_b64: str, is_base64: bool = False):
-    """Load a PIL Image from a file path or base64 string."""
-    from PIL import Image
-    import io
-    if is_base64:
-        img_bytes = base64.b64decode(path_or_b64)
-        return Image.open(io.BytesIO(img_bytes)).convert("RGBA")
-    return Image.open(path_or_b64).convert("RGBA")
-
-
-def remove_background(image):
+def load_pipeline(models_dir: Path, hf_token: str | None):
     """
-    Simple background removal: assumes roughly uniform background.
-    For best results the input should already have a clean background.
-    Returns an RGBA image with background made transparent.
-    """
-    from PIL import Image
-    import numpy as np
+    Load Era3D pipeline manually to work around diffusers' inability to
+    auto-resolve the custom mvdiffusion UNet from model_index.json.
 
-    img_array = np.array(image)
-    if img_array.shape[2] == 4:
-        return image  # Already has alpha
-
-    # Convert to RGBA
-    rgba = Image.new("RGBA", image.size)
-    rgba.paste(image)
-    return rgba
-
-
-def preprocess_image(image, crop_size: int = 420):
-    """
-    Preprocess input image for Era3D:
-    - Remove background (alpha composite on white)
-    - Center crop to square
-    - Resize to crop_size
-    Returns PIL Image (RGB).
-    """
-    from PIL import Image
-    import numpy as np
-
-    # Ensure RGBA
-    if image.mode != "RGBA":
-        image = image.convert("RGBA")
-
-    # Composite onto white background
-    background = Image.new("RGBA", image.size, (255, 255, 255, 255))
-    background.paste(image, mask=image.split()[3])
-    image = background.convert("RGB")
-
-    # Center crop to square
-    w, h = image.size
-    min_dim = min(w, h)
-    left   = (w - min_dim) // 2
-    top    = (h - min_dim) // 2
-    image  = image.crop((left, top, left + min_dim, top + min_dim))
-
-    # Resize to crop_size
-    image = image.resize((crop_size, crop_size), Image.LANCZOS)
-    return image
-
-
-def build_strip(views: list, view_size: int) -> object:
-    """
-    Stack 6 view images into a vertical strip PNG.
-    Era3D outputs views in order:
-      0: front-right (azimuth +30°, elevation -30°)
-      1: back-right  (azimuth +90°, elevation +20°)
-      2: back        (azimuth +150°, elevation -30°)
-      3: back-left   (azimuth +210°, elevation +20°)
-      4: front-left  (azimuth +270°, elevation -30°)
-      5: top         (azimuth +330°, elevation +20°)
-    """
-    from PIL import Image
-    strip = Image.new("RGB", (view_size, view_size * 6))
-    for i, view in enumerate(views):
-        v = view.resize((view_size, view_size), Image.LANCZOS)
-        strip.paste(v, (0, i * view_size))
-    return strip
-
-
-# ── Era3D pipeline loader ─────────────────────────────────────────────────────
-
-def load_era3d_pipeline(models_dir: Path, output_size: int = 512):
-    """
-    Load the Era3D diffusion pipeline from local cache or HuggingFace.
-    Model: pengHTYX/MacLab-Era3D-512-6view
+    Strategy:
+      1. Download all model files via snapshot_download (handles caching/auth)
+      2. Temporarily patch diffusers' MODEL_MAPPING to register the custom UNet
+      3. Call StableUnCLIPImg2ImgPipeline.from_pretrained on the local snapshot
     """
     import torch
-    from diffusers import EulerAncestralDiscreteScheduler
+    from huggingface_hub import snapshot_download
+    from mvdiffusion.pipelines.pipeline_mvdiffusion_unclip import StableUnCLIPImg2ImgPipeline
+    from mvdiffusion.models.unet_mv2d_condition import UNetMV2DConditionModel
 
-    model_id   = "pengHTYX/MacLab-Era3D-512-6view"
-    cache_dir  = models_dir / "era3d"
+    model_id  = "pengHTYX/MacLab-Era3D-512-6view"
+    cache_dir = models_dir / "era3d"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    log(f"Loading Era3D model from {cache_dir} (downloads from HuggingFace on first run)…")
+    # ── Step 1: download snapshot ────────────────────────────────────────────
+    log(f"Downloading Era3D model snapshot (first run ~8 GB)…")
+    local_dir = snapshot_download(
+        repo_id=model_id,
+        cache_dir=str(cache_dir),
+        token=hf_token or None,
+    )
+    log(f"Model snapshot at: {local_dir}")
 
-    # Era3D uses a custom pipeline — try to import it
-    # It ships with the diffusers extras or can be loaded via pipeline_class
+    # ── Step 2: register custom UNet with diffusers ──────────────────────────
+    # diffusers resolves class names in model_index.json via its own registry.
+    # We inject the custom UNet so from_pretrained can find it.
+    import diffusers
+    import diffusers.models as diffusers_models
+
+    if not hasattr(diffusers_models, "UNetMV2DConditionModel"):
+        diffusers_models.UNetMV2DConditionModel = UNetMV2DConditionModel
+        log("Registered UNetMV2DConditionModel with diffusers")
+
+    # Also patch the diffusers top-level namespace used by pipeline loader
+    if not hasattr(diffusers, "UNetMV2DConditionModel"):
+        diffusers.UNetMV2DConditionModel = UNetMV2DConditionModel
+
+    # ── Step 3: load UNet manually, then load pipeline without unet ─────────
+    # from_pretrained rejects custom UNet types — load it separately and inject.
+    import os
+    from diffusers import DDPMScheduler, AutoencoderKL
+    from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection, CLIPTokenizer, CLIPTextModel
     try:
-        from diffusers import DiffusionPipeline
-        pipe = DiffusionPipeline.from_pretrained(
-            model_id,
-            cache_dir=str(cache_dir),
-            torch_dtype=torch.float16,
-            trust_remote_code=True,
-        )
-    except Exception as e:
-        raise RuntimeError(
-            f"Failed to load Era3D pipeline: {e}\n"
-            f"Make sure diffusers>=0.27.0 is installed and you have internet access for the first download."
-        )
+        from transformers import CLIPFeatureExtractor
+    except ImportError:
+        CLIPFeatureExtractor = CLIPImageProcessor
 
-    # Use Euler Ancestral scheduler for best quality
-    pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(
-        pipe.scheduler.config, timestep_spacing="trailing"
+    log("Loading UNetMV2DConditionModel from snapshot…")
+    unet = UNetMV2DConditionModel.from_pretrained(
+        os.path.join(local_dir, "unet"),
+        torch_dtype=torch.float16,
     )
 
-    device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
-    log(f"Using device: {device}")
+    log("Loading pipeline from local snapshot…")
+    pipe = StableUnCLIPImg2ImgPipeline.from_pretrained(
+        local_dir,
+        unet=unet,
+        torch_dtype=torch.float16,
+        local_files_only=True,
+    )
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    log(f"Device: {device}")
     pipe = pipe.to(device)
 
-    # Enable memory optimisations for 24GB VRAM (3090)
-    if device == "cuda":
-        try:
-            pipe.enable_xformers_memory_efficient_attention()
-        except Exception:
-            pass  # xformers not installed — fine, sdpa will be used
+    # Do NOT call enable_xformers_memory_efficient_attention() — Era3D's custom
+    # attention processors (JointAttnProcessor, MVAttnProcessor) handle attention
+    # internally. Enabling xformers replaces them with XFormersAttnProcessor which
+    # returns None on newer diffusers and breaks the forward pass.
+    log("Using sdpa attention (xformers skipped for Era3D compatibility)")
 
     return pipe, device
 
 
-# ── Main generation ───────────────────────────────────────────────────────────
+# ── Inference ─────────────────────────────────────────────────────────────────
 
-def generate_views(image, pipe, device: str, num_steps: int, guidance_scale: float, output_size: int):
-    """
-    Run Era3D inference to generate 6 multi-view images.
-    Returns list of 6 PIL Images.
-    """
+def run_era3d(pipe, repo: Path, input_image, crop_size: int,
+              num_steps: int, guidance_scale: float, seed: int, device: str):
     import torch
+    from einops import rearrange
+    from mvdiffusion.data.single_image_dataset import SingleImageDataset
 
-    progress(40, "Running Era3D multi-view diffusion…")
+    prompt_embeds_path = str(repo / "mvdiffusion" / "data" / "fixed_prompt_embeds_6view")
+    log(f"Using prompt embeddings from: {prompt_embeds_path}")
 
+    dataset = SingleImageDataset(
+        root_dir='',
+        num_views=6,
+        img_wh=[512, 512],
+        bg_color='white',
+        crop_size=crop_size,
+        single_image=input_image,
+        prompt_embeds_path=prompt_embeds_path,
+    )
+    batch = dataset[0]
+
+    imgs_in = torch.stack([batch['imgs_in']] * 2, dim=0)          # (2, Nv, C, H, W)
+    imgs_in = rearrange(imgs_in, "B Nv C H W -> (B Nv) C H W")    # (2*Nv, C, H, W)
+
+    normal_embeds = batch['normal_prompt_embeddings']
+    color_embeds  = batch['color_prompt_embeddings']
+    prompt_embeds = torch.stack([normal_embeds, color_embeds], dim=0)
+    prompt_embeds = rearrange(prompt_embeds, "B Nv N C -> (B Nv) N C")
+
+    imgs_in      = imgs_in.to(device=device, dtype=torch.float16)
+    prompt_embeds = prompt_embeds.to(device=device, dtype=torch.float16)
+
+    generator = torch.Generator(device=pipe.unet.device).manual_seed(seed)
+    pipe.set_progress_bar_config(disable=True)
+
+    progress(50, "Running Era3D diffusion…")
     with torch.no_grad():
-        result = pipe(
-            image,
-            num_inference_steps=num_steps,
+        out = pipe(
+            imgs_in,
+            None,
+            prompt_embeds=prompt_embeds,
+            generator=generator,
             guidance_scale=guidance_scale,
-            output_type="pil",
-        )
+            output_type='pt',
+            num_images_per_prompt=1,
+            num_inference_steps=num_steps,
+            eta=1.0,
+        ).images
 
-    # Era3D returns images in result.images — 6 views per input
-    views = result.images
-    if not views:
-        raise RuntimeError("Era3D returned no images")
+    bsz = out.shape[0] // 2
+    images_pred = out[bsz:]   # color views (first half = normals, skip for now)
+    log(f"Era3D returned {images_pred.shape[0]} color views")
+    return images_pred
 
-    # Resize to output_size if needed
-    views = [v.resize((output_size, output_size), __import__("PIL").Image.LANCZOS) for v in views[:6]]
-    return views
+
+# ── Build output strip ────────────────────────────────────────────────────────
+
+def tensor_views_to_strip(views_tensor, view_size: int):
+    """Convert (Nv, C, H, W) float tensor [0,1] to vertical strip PIL Image."""
+    from PIL import Image
+    import numpy as np
+
+    strip = Image.new("RGB", (view_size, view_size * views_tensor.shape[0]))
+    for i in range(views_tensor.shape[0]):
+        arr = views_tensor[i].mul(255).add_(0.5).clamp_(0, 255)
+        arr = arr.permute(1, 2, 0).to("cpu", dtype=torch.uint8 if False else None).numpy()
+        arr = (arr * 255).clip(0, 255).astype("uint8") if arr.max() <= 1.0 else arr.clip(0, 255).astype("uint8")
+        view_img = Image.fromarray(arr).resize((view_size, view_size), Image.LANCZOS)
+        strip.paste(view_img, (0, i * view_size))
+    return strip
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
+    import torch  # needed for tensor ops in strip builder
+
     raw  = sys.stdin.readline()
     data = json.loads(raw)
 
@@ -233,14 +243,14 @@ def main() -> None:
     params        = data.get("params", {})
     workspace_dir = data.get("workspaceDir", "")
     models_dir    = Path(os.environ.get("MODELS_DIR", Path.home() / ".modly" / "models"))
+    hf_token      = os.environ.get("HF_TOKEN")
 
-    # ── Params ────────────────────────────────────────────────────────────────
     num_steps      = int(params.get("num_steps", 40))
     guidance_scale = float(params.get("guidance_scale", 3.0))
     crop_size      = int(params.get("crop_size", 420))
     output_size    = int(params.get("output_size", 512))
+    seed           = int(params.get("seed", 42))
 
-    # ── Input ─────────────────────────────────────────────────────────────────
     input_path = input_data.get("filePath")
     if not input_path or not Path(input_path).is_file():
         error(f"era3d: input image not found: {input_path}")
@@ -250,35 +260,42 @@ def main() -> None:
     if not ensure_dependencies():
         return
 
-    progress(10, "Loading input image…")
+    progress(8, "Locating Era3D repo…")
+    repo = inject_era3d_path()
+    if repo is None:
+        return
+
+    progress(12, "Loading input image…")
     try:
-        image = load_image(input_path)
+        from PIL import Image
+        image = Image.open(input_path).convert("RGBA")
+        log(f"Input image: {image.size[0]}x{image.size[1]}")
     except Exception as e:
         error(f"era3d: failed to load image: {e}")
         return
 
-    progress(15, "Preprocessing image…")
-    image = preprocess_image(image, crop_size=crop_size)
-    log(f"Input preprocessed to {image.size[0]}×{image.size[1]} RGB")
-
-    progress(20, "Loading Era3D model (first run downloads ~8GB)…")
+    progress(20, "Loading Era3D model (first run downloads ~8 GB)…")
     try:
-        pipe, device = load_era3d_pipeline(models_dir, output_size=output_size)
+        pipe, device = load_pipeline(models_dir, hf_token)
     except Exception as e:
         error(f"era3d: model load failed: {e}")
         return
 
-    progress(40, "Generating 6 views…")
+    progress(45, "Preparing input data…")
     try:
-        views = generate_views(image, pipe, device, num_steps, guidance_scale, output_size)
+        views_tensor = run_era3d(pipe, repo, image, crop_size, num_steps, guidance_scale, seed, device)
     except Exception as e:
-        error(f"era3d: generation failed: {e}")
+        import traceback
+        error(f"era3d: generation failed: {e}\n{traceback.format_exc()}")
         return
 
-    progress(85, "Building view strip…")
-    strip = build_strip(views, output_size)
+    progress(88, "Building view strip…")
+    try:
+        strip = tensor_views_to_strip(views_tensor, output_size)
+    except Exception as e:
+        error(f"era3d: strip build failed: {e}")
+        return
 
-    # ── Save output ───────────────────────────────────────────────────────────
     out_dir = Path(workspace_dir) / "Workflows"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = str(out_dir / f"era3d-views-{int(time() * 1000)}.png")
@@ -290,7 +307,7 @@ def main() -> None:
         return
 
     progress(100, "Done — 6 views generated")
-    log(f"Output: {out_path} ({output_size}×{output_size * 6}px vertical strip, 6 views)")
+    log(f"Output: {out_path} ({output_size}x{output_size * views_tensor.shape[0]}px vertical strip)")
     done(out_path)
 
 
