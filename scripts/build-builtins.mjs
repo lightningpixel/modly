@@ -50,9 +50,9 @@ for (const id of readdirSync(srcDir)) {
     console.log(`[build-builtins] ${id}: npm install done`)
   }
 
-  // Copy any Python processor files
+  // Copy Python processors and setup scripts (.py, .bat, .sh)
   for (const file of readdirSync(extSrcDir)) {
-    if (file.endsWith('.py')) {
+    if (file.endsWith('.py') || file.endsWith('.bat') || file.endsWith('.sh')) {
       cpSync(join(extSrcDir, file), join(extOutDir, file))
       console.log(`[build-builtins] ${id}: ${file} copied`)
     }

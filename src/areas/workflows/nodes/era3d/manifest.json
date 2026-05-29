@@ -1,0 +1,60 @@
+{
+  "id": "era3d",
+  "name": "Era3D Multi-View",
+  "type": "process",
+  "entry": "processor.py",
+  "version": "1.0.0",
+  "author": "Modly",
+  "description": "Generates 6 consistent multi-view images from a single input image using Era3D (NeurIPS 2024). Connect between Image and Generate Mesh for dramatically improved geometry on hands, back, and thin features.",
+  "nodes": [
+    {
+      "id": "generate-views",
+      "name": "Generate Views",
+      "input": "image",
+      "output": "image",
+      "params_schema": [
+        {
+          "id": "num_steps",
+          "label": "Diffusion Steps",
+          "type": "int",
+          "default": 40,
+          "min": 20,
+          "max": 75,
+          "step": 1,
+          "tooltip": "Number of diffusion steps. 40 is a good balance. Use 75 for highest quality on complex subjects."
+        },
+        {
+          "id": "guidance_scale",
+          "label": "Guidance Scale",
+          "type": "float",
+          "default": 3.0,
+          "min": 1.0,
+          "max": 5.0,
+          "step": 0.5,
+          "tooltip": "How closely the output follows the input image. 3.0 recommended for character assets."
+        },
+        {
+          "id": "crop_size",
+          "label": "Crop Size",
+          "type": "int",
+          "default": 420,
+          "min": 256,
+          "max": 512,
+          "step": 1,
+          "tooltip": "Input image crop size before feeding to Era3D. 420 works well for most character images."
+        },
+        {
+          "id": "output_size",
+          "label": "Output View Size",
+          "type": "select",
+          "default": "512",
+          "options": [
+            { "value": "256", "label": "256px (faster)" },
+            { "value": "512", "label": "512px (recommended)" }
+          ],
+          "tooltip": "Resolution of each generated view. 512px gives the best geometry when fed into Trellis2."
+        }
+      ]
+    }
+  ]
+}

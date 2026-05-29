@@ -100,6 +100,8 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set) => ({
       runState: { status: 'running', blockIndex: 0, blockTotal: execNodes.length, blockProgress: 0, blockStep: 'Starting…' },
     })
 
+    // Clear the previous mesh from the scene before starting a new run
+    appState.setCurrentJob(null)
     appState.setCurrentJob({
       id: crypto.randomUUID(),
       imageFile: selectedImagePath,

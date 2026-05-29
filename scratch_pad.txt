@@ -1,0 +1,1 @@
+echo '{"input":{"filePath":"C:/Users/cmoss/Documents/GitHub/modly/test_images/miri_three_quarter_view_2048x2048.jpg"},"params":{},"workspaceDir":"C:/Users/cmoss/Documents/Modly/workspace"}' | venv\Scripts\python.exe processor.py
