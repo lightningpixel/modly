@@ -29,6 +29,7 @@ import TextNode         from './nodes/TextNode'
 import AddToSceneNode   from './nodes/AddToSceneNode'
 import Load3DMeshNode   from './nodes/Load3DMeshNode'
 import PreviewImageNode from './nodes/PreviewImageNode'
+import ImagePreviewNode from './nodes/ImagePreviewNode'
 import WaitNode         from './nodes/WaitNode'
 import WorkflowEdge     from './nodes/WorkflowEdge'
 
@@ -36,7 +37,7 @@ import WorkflowEdge     from './nodes/WorkflowEdge'
 
 const DRAG_KEY      = 'modly/extension-id'
 const DRAG_NODE_KEY = 'modly/node-type'
-const NODE_TYPES = { extensionNode: ExtensionNode, imageNode: ImageNode, textNode: TextNode, outputNode: AddToSceneNode, meshNode: Load3DMeshNode, previewNode: PreviewImageNode, waitNode: WaitNode }
+const NODE_TYPES = { extensionNode: ExtensionNode, imageNode: ImageNode, textNode: TextNode, outputNode: AddToSceneNode, meshNode: Load3DMeshNode, previewNode: PreviewImageNode, imagePreviewNode: ImagePreviewNode, waitNode: WaitNode }
 const EDGE_TYPES = { workflowEdge: WorkflowEdge }
 
 const DEFAULT_EDGE_OPTS = { type: 'workflowEdge' }
@@ -158,6 +159,7 @@ const PANEL_BUILTIN_NODES = [
   { type: 'meshNode',    label: 'Load 3D Mesh',   color: '#a78bfa', icon: <><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></> },
   { type: 'outputNode',  label: 'Add to Scene',   color: '#a78bfa', icon: <><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></> },
   { type: 'previewNode', label: 'Preview Views',  color: '#38bdf8', icon: <><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></> },
+  { type: 'imagePreviewNode', label: 'Preview Image',  color: '#38bdf8', icon: <><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></> },
   { type: 'waitNode',    label: 'Wait',           color: '#71717a', icon: <><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></> },
 ]
 
@@ -402,6 +404,7 @@ const BUILTIN_NODES = [
   { type: 'meshNode',    label: 'Load 3D Mesh',   color: '#a78bfa', description: 'Load a 3D mesh file or use current model' },
   { type: 'outputNode',  label: 'Add to Scene',   color: '#a78bfa', description: 'Output node — adds the mesh to the 3D scene' },
   { type: 'previewNode', label: 'Preview Views',  color: '#38bdf8', description: 'Displays multi-view image outputs in a 2×3 grid' },
+  { type: 'imagePreviewNode', label: 'Preview Image',  color: '#38bdf8', description: 'Displays a single image output in the workflow' },
   { type: 'waitNode',    label: 'Wait',           color: '#71717a', description: 'Pauses the workflow until you click Continue' },
 ]
 
@@ -747,6 +750,7 @@ function getNodeOutputType(node: Node | undefined, allExts: WorkflowExtension[])
   if (node.type === 'imageNode') return 'image'
   if (node.type === 'meshNode')  return 'mesh'
   if (node.type === 'textNode')  return 'text'
+  if (node.type === 'imagePreviewNode') return 'image'
   return allExts.find((e) => e.id === (node.data as WFNodeData)?.extensionId)?.output
 }
 
@@ -758,6 +762,7 @@ function getNodeInputType(
   if (!node) return undefined
   if (node.type === 'outputNode')  return 'mesh'
   if (node.type === 'previewNode') return 'image'
+  if (node.type === 'imagePreviewNode') return 'image'
   const ext = allExts.find((e) => e.id === (node.data as WFNodeData)?.extensionId)
   if (ext?.inputs && ext.inputs.length > 1 && targetHandle) {
     const idx = parseInt(targetHandle.replace('input-', ''), 10)
