@@ -194,6 +194,10 @@ async function executeExtensionNode(
         ? norm.slice(workspaceDir.length).replace(/^\//, '')
         : norm
     }
+    if (nodeInputText !== undefined && nodeInputText.trim().length > 0) {
+      extraParams.prompt = nodeInputText
+      extraParams.text   = nodeInputText
+    }
 
     const schemaDefaults = Object.fromEntries(
       (ext.params ?? []).map((p) => [p.id, p.default]),
