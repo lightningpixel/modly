@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Handle, Position, useReactFlow } from '@xyflow/react'
+import { Handle, Position, useEdges, useNodes } from '@xyflow/react'
 import { useWorkflowRunStore } from '../workflowRunStore'
 import BaseNode from './BaseNode'
 
@@ -14,7 +14,8 @@ function mimeFromPath(p: string): string {
 
 export default function ImagePreviewNode({ id, selected }: { id: string; selected?: boolean }) {
   const nodeImageOutputs = useWorkflowRunStore((s) => s.nodeImageOutputs)
-  const { getEdges }     = useReactFlow()
+  const edges            = useEdges()
+  const nodes            = useNodes()
   const ioRowRef         = useRef<HTMLDivElement>(null)
   const [handleTop, setHandleTop] = useState('50%')
   const [dataUrl, setDataUrl]     = useState<string | undefined>(undefined)
@@ -26,29 +27,38 @@ export default function ImagePreviewNode({ id, selected }: { id: string; selecte
     }
   }, [])
 
-  const incomingEdge = getEdges().find((e) => e.target === id)
-  const workspaceUrl = incomingEdge ? nodeImageOutputs[incomingEdge.source] : undefined
+  const incomingEdge  = edges.find((e) => e.target === id)
+  const sourceNode    = incomingEdge ? nodes.find((n) => n.id === incomingEdge.source) : undefined
+  const workspaceUrl  = incomingEdge ? nodeImageOutputs[incomingEdge.source] : undefined
+  const imageFilePath = sourceNode?.type === 'imageNode'
+    ? (sourceNode.data as { params?: { filePath?: string } })?.params?.filePath
+    : undefined
 
   useEffect(() => {
     let cancelled = false
-    if (!workspaceUrl) {
+    if (!workspaceUrl && !imageFilePath) {
       setDataUrl(undefined)
       return
     }
     ;(async () => {
       try {
-        const settings = await window.electron.settings.get()
-        const wsDir    = settings.workspaceDir.replace(/\\/g, '/').replace(/\/+$/, '')
-        const rel      = workspaceUrl.replace(/^\/workspace\//, '')
-        const absPath  = `${wsDir}/${rel}`
-        const base64   = await window.electron.fs.readFileBase64(absPath)
+        let absPath: string
+        if (workspaceUrl) {
+          const settings = await window.electron.settings.get()
+          const wsDir    = settings.workspaceDir.replace(/\\/g, '/').replace(/\/+$/, '')
+          const rel      = workspaceUrl.replace(/^\/workspace\//, '')
+          absPath        = `${wsDir}/${rel}`
+        } else {
+          absPath = imageFilePath!
+        }
+        const base64 = await window.electron.fs.readFileBase64(absPath)
         if (!cancelled) setDataUrl(`data:${mimeFromPath(absPath)};base64,${base64}`)
       } catch {
         if (!cancelled) setDataUrl(undefined)
       }
     })()
     return () => { cancelled = true }
-  }, [workspaceUrl])
+  }, [workspaceUrl, imageFilePath])
 
   return (
     <BaseNode
