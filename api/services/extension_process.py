@@ -73,6 +73,10 @@ class ExtensionProcess:
         env["MODELS_DIR"]    = str(MODELS_DIR)
         env["WORKSPACE_DIR"] = str(WORKSPACE_DIR)
         env["MODLY_API_DIR"] = str(Path(__file__).parent.parent)
+        # Force UTF-8 for the worker's stdio regardless of the system locale.
+        # On non-UTF-8 Windows locales (cp932/cp936/cp949) the default encoding
+        # would otherwise mismatch our UTF-8 pipe readers and deadlock the worker.
+        env["PYTHONUTF8"] = "1"
         if sys.platform == "darwin":
             env.setdefault("NUMBA_DISABLE_JIT", "1")
         # Pass the exact model_dir so runner.py doesn't have to re-derive it
@@ -109,7 +113,8 @@ class ExtensionProcess:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 env=self._build_env(),
             )
@@ -172,7 +177,8 @@ class ExtensionProcess:
                 check=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
             )
         except subprocess.CalledProcessError as exc:
             details = (exc.stderr or exc.stdout or "").strip()
