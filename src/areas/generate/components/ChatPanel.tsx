@@ -318,6 +318,7 @@ export default function ChatPanel(): JSX.Element {
     // Send automatic follow-up to agent
     const completionCtx = `Workflow '${wf.name}' just completed.${runState.outputUrl ? ` Output mesh: ${runState.outputUrl}` : ''} Ask the user what they'd like to do next.`
     callAgent(messagesRef.current, { workflowCompletion: completionCtx })
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fire on run-status transition; error/outputUrl read atomically
   }, [runState.status, pendingWorkflow])
 
   useEffect(() => {

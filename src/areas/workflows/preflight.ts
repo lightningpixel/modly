@@ -2,7 +2,7 @@ import type { Workflow, WFNode } from '@shared/types/electron.d'
 import { getWorkflowExtension, type WorkflowExtension } from './mockExtensions'
 import { isPassthrough, isBranchConsumer, resolveDataSource, nearestUpstreamWaits } from './nodeBehaviors'
 
-type DataType = 'image' | 'text' | 'mesh'
+type DataType = 'image' | 'text' | 'mesh' | 'audio'
 
 export interface WorkflowPreflightIssue {
   key: string
@@ -16,6 +16,10 @@ function nodeLabel(node: WFNode, allExtensions: WorkflowExtension[]): string {
   if (node.type === 'meshNode') return 'Load 3D Mesh'
   if (node.type === 'outputNode') return 'Add to Scene'
   if (node.type === 'previewNode') return 'Preview Views'
+  if (node.type === 'forEachNode') {
+    const mode = (node.data.params?.mode as string) ?? 'image'
+    return mode === 'text' ? 'For Each Text' : mode === 'mesh' ? 'For Each Mesh' : 'For Each Image'
+  }
   if (node.type === 'extensionNode') {
     return getWorkflowExtension(node.data.extensionId ?? '', allExtensions)?.name ?? 'Extension'
   }
@@ -25,6 +29,7 @@ function nodeLabel(node: WFNode, allExtensions: WorkflowExtension[]): string {
 function formatType(type: DataType): string {
   if (type === 'mesh') return 'mesh'
   if (type === 'image') return 'image'
+  if (type === 'audio') return 'audio'
   return 'text'
 }
 
@@ -39,6 +44,10 @@ function getNodeOutputType(node: WFNode, allExtensions: WorkflowExtension[]): Da
   if (node.type === 'textNode') return 'text'
   if (node.type === 'meshNode' || node.type === 'outputNode') return 'mesh'
   if (node.type === 'previewNode') return 'image'
+  if (node.type === 'forEachNode') {
+    const mode = (node.data.params?.mode as DataType | undefined) ?? 'image'
+    return mode === 'text' || mode === 'mesh' ? mode : 'image'
+  }
   if (node.type === 'extensionNode') {
     return getWorkflowExtension(node.data.extensionId ?? '', allExtensions)?.output
   }
@@ -74,6 +83,14 @@ export function validateWorkflowPreflight(
         key: `${node.id}:current-mesh`,
         nodeId: node.id,
         message: `${nodeLabel(node, allExtensions)} is set to Current Scene, but no mesh is loaded.`,
+      })
+    }
+
+    if (node.type === 'forEachNode' && !((node.data.params?.dir as string | undefined)?.trim())) {
+      pushIssue(issues, {
+        key: `${node.id}:foreach-no-folder`,
+        nodeId: node.id,
+        message: `${nodeLabel(node, allExtensions)} needs a folder selected.`,
       })
     }
 

@@ -34,7 +34,7 @@ export function useApi() {
   }
 
   async function pollJobStatus(jobId: string): Promise<{
-    status: 'pending' | 'running' | 'done' | 'error'
+    status: 'pending' | 'running' | 'done' | 'error' | 'cancelled'
     progress: number
     step?: string
     outputUrl?: string
@@ -129,5 +129,5 @@ export function useApi() {
     return { url: data.url }
   }
 
-  return { generateFromImage, pollJobStatus, cancelJob, getModelStatus, downloadModel, optimizeMesh, smoothMesh, importMesh, transformMesh }
+  return { generateFromImage, pollJobStatus, cancelJob, getModelStatus, getAllModelsStatus, downloadModel, optimizeMesh, smoothMesh, importMesh, transformMesh }
 }

@@ -24,8 +24,6 @@ export interface AssetLibraryOpenSelection {
   job: GenerationJob
 }
 
-const WORKSPACE_URL_PREFIX = '/workspace/'
-
 const ASSET_LIBRARY_CAPABILITY_SECTIONS = [
   { capability: 'mesh', label: 'Mesh' },
   { capability: 'rigged-mesh', label: 'Rigged mesh' },

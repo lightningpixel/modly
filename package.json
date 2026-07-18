@@ -1,6 +1,6 @@
 {
   "name": "modly",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Local AI-powered 3D mesh generation from images",
   "main": "./out/main/index.js",
   "author": "Modly",
@@ -9,8 +9,11 @@
     "dev": "node scripts/build-builtins.mjs && electron-vite dev",
     "build": "node scripts/build-builtins.mjs && electron-vite build",
     "preview": "electron-vite preview",
+    "prepare": "node scripts/setup-hooks.mjs",
     "prepare-resources": "node scripts/download-python-embed.js",
-    "test": "cd api && python3 -m unittest discover -s tests && cd .. && node --test --experimental-strip-types --experimental-loader ./scripts/node-ts-extensionless-loader.mjs src/shared/types/assetLibrary.test.ts src/areas/generate/assetLibraryProjection.test.ts src/areas/generate/assetLibraryService.test.ts src/areas/generate/assetLibraryUi.test.ts electron/main/artifact-registry-service.test.ts electron/main/extension-path-guard.test.ts electron/preload/artifact-registry-preload.test.ts && node --test electron/main/*.test.mjs",
+    "test": "npm run test:py && npm run test:node",
+    "test:py": "node scripts/run-pytests.mjs",
+    "test:node": "node --test --experimental-strip-types --experimental-loader ./scripts/node-ts-extensionless-loader.mjs src/shared/types/assetLibrary.test.ts src/areas/generate/assetLibraryProjection.test.ts src/areas/generate/assetLibraryService.test.ts src/areas/generate/assetLibraryUi.test.ts electron/main/artifact-registry-service.test.ts electron/main/extension-path-guard.test.ts electron/preload/artifact-registry-preload.test.ts && node --test electron/main/*.test.mjs src/**/*.test.mjs",
     "package": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && npm run prepare-resources && electron-builder",
     "package:mac": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && npm run prepare-resources && electron-builder --mac --arm64",
     "lint": "eslint ."
@@ -33,6 +36,7 @@
     "zustand": "^5.0.3"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.4",
     "@types/node": "^22.10.1",
     "@types/react": "^18.3.17",
     "@types/react-dom": "^18.3.5",
@@ -45,9 +49,12 @@
     "electron-builder": "^24.13.3",
     "electron-vite": "^2.3.0",
     "eslint": "^9.17.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.6.0",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.2",
+    "typescript-eslint": "^8.61.1",
     "vite": "^5.4.0"
   },
   "build": {
@@ -56,6 +63,7 @@
     "directories": {
       "output": "dist"
     },
+    "afterPack": "scripts/after-pack.js",
     "files": [
       "out/**/*"
     ],
@@ -101,6 +109,7 @@
       "target": "dmg",
       "icon": "resources/icons/icon.icns",
       "artifactName": "${productName}-${version}-arm64.${ext}",
+      "identity": null,
       "category": "public.app-category.graphics-design",
       "extraResources": [
         {

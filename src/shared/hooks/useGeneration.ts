@@ -54,6 +54,7 @@ export function useGeneration() {
         })
       }
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- useApi re-creates its fns each render, so this re-memoizes anyway (values stay fresh)
     [generateFromImage, pollJobStatus, cancelJob, setCurrentJob, updateCurrentJob]
   )
 

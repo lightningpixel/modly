@@ -64,6 +64,48 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # ─── macOS build (arm64) ─────────────────────────────────────────────────────
+  # Build non signé / non notarisé (pas de licence Apple Developer). Le hook
+  # scripts/after-pack.js applique une signature ad-hoc, requise pour que l'app
+  # se lance sur Apple Silicon. Au premier lancement l'utilisateur doit faire
+  # clic droit > Ouvrir (Gatekeeper : "développeur non vérifié").
+  #
+  # macos-latest est un runner arm64 — pas de build pour les Mac Intel.
+  # latest-mac.yml n'est volontairement pas publié : l'auto-update est désactivé
+  # sur darwin (electron-updater exige une signature Developer ID).
+  build-macos:
+    needs: create-release
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Download Python embed
+        run: node scripts/download-python-embed.js
+
+      - name: Build & Package (macOS arm64)
+        run: npm run build && npx electron-builder --mac --arm64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Upload assets to release
+        run: |
+          gh release upload ${{ github.ref_name }} \
+            dist/*.dmg \
+            --repo ${{ github.repository }} \
+            --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   # ─── Linux build ─────────────────────────────────────────────────────────────
   build-linux:
     needs: create-release

@@ -14,9 +14,10 @@ import type {
 export interface ExtensionNode {
   id:               string
   name:             string
-  input:            'image' | 'text' | 'mesh'
-  inputs?:          ('image' | 'text' | 'mesh')[]   // multi-input nodes; overrides input when set
-  output:           'image' | 'text' | 'mesh'
+  input:            'image' | 'text' | 'mesh' | 'audio'
+  inputs?:          ('image' | 'text' | 'mesh' | 'audio')[]   // multi-input nodes; overrides input when set
+  inputLabels?:     string[]   // display labels per input slot (e.g. positive/negative)
+  output:           'image' | 'text' | 'mesh' | 'audio'
   paramsSchema:     ParamSchema[]
   paramDefaults?:   Record<string, number | string>
   hfRepo?:          string
@@ -37,12 +38,16 @@ export interface ModelExtension {
   source?:      string
   localPath?:   string
   nodes:        ExtensionNode[]
+  /** Folder exists but is not a loadable extension — see manifestError */
+  corrupted?:   boolean
+  /** Why the folder is corrupted: manifest gone, manifest unparseable, or install never completed */
+  manifestError?: 'missing' | 'invalid' | 'incomplete'
 }
 
 export interface ParamSchema {
   id:       string
   label:    string
-  type:     'select' | 'int' | 'float' | 'string'
+  type:     'select' | 'int' | 'float' | 'string' | 'file-select'
   default:  number | string
   options?: { value: number | string; label: string }[]
   min?:     number
@@ -50,6 +55,9 @@ export interface ParamSchema {
   step?:    number
   tooltip?: string
   show_if?: Record<string, string | number | (string | number)[]>
+  // file-select: dropdown of the files inside the folder held by another param
+  dir_from?:   string     // id of the (string) param holding the folder path
+  extensions?: string[]   // file extensions to list (e.g. ["json"])
 }
 
 export interface ProcessExtension {
@@ -65,6 +73,10 @@ export interface ProcessExtension {
   localPath?:   string
   entry:        string
   nodes:        ExtensionNode[]
+  /** Folder exists but is not a loadable extension — see manifestError */
+  corrupted?:   boolean
+  /** Why the folder is corrupted: manifest gone, manifest unparseable, or install never completed */
+  manifestError?: 'missing' | 'invalid' | 'incomplete'
 }
 
 export type AnyExtension = ModelExtension | ProcessExtension
@@ -74,6 +86,8 @@ export type AnyExtension = ModelExtension | ProcessExtension
 export interface ProcessInput {
   filePath?: string
   text?:     string
+  /** Per-slot texts for multi-text-input nodes (index = target handle slot). */
+  texts?:    (string | undefined)[]
   nodeId?:   string
 }
 
@@ -87,14 +101,23 @@ export interface WFNodeData {
   inputType?:      'image' | 'text'
   enabled:         boolean
   showInGenerate?: boolean
+  iterations?:     number   // While container: auto-loop N times (omit/0 = manual only)
   params:          Record<string, unknown>
+  // React Flow requires node data to satisfy Record<string, unknown>.
+  [key: string]:   unknown
 }
 
 export interface WFNode {
-  id:       string
-  type:     string
-  position: { x: number; y: number }
-  data:     WFNodeData
+  id:        string
+  type:      string
+  position:  { x: number; y: number }
+  data:      WFNodeData
+  // Sub-flow / group support (While container)
+  parentId?: string
+  extent?:   'parent'
+  width?:    number
+  height?:   number
+  style?:    Record<string, unknown>
 }
 
 export interface WFEdge {
@@ -109,6 +132,10 @@ export interface Workflow {
   id:          string
   name:        string
   description: string
+  /** Display folder in the workflow browser (no folder = root) */
+  folder?:     string
+  /** Pinned in the workflow browser's Bookmarks section */
+  bookmarked?: boolean
   nodes:       WFNode[]
   edges:       WFEdge[]
   createdAt:   string
@@ -125,9 +152,12 @@ declare global {
         memory: () => Promise<{ total: number; used: number; available: number }>
       }
       window: {
-        minimize: () => void
-        maximize: () => void
-        close:    () => void
+        minimize:          () => void
+        maximize:          () => void
+        close:             () => void
+        isMaximized:       () => Promise<boolean>
+        onMaximizeChange:  (cb: (isMaximized: boolean) => void) => void
+        offMaximizeChange: () => void
       }
       ui: {
         setZoomFactor: (factor: number) => void
@@ -148,6 +178,8 @@ declare global {
         selectDirectory: (defaultPath?: string) => Promise<string | null>
         savePath:        (args: { filters: { name: string; extensions: string[] }[]; defaultPath?: string }) => Promise<string | null>
         listDir:         (dirPath: string) => Promise<string[]>
+        listFiles:       (dirPath: string, extensions?: string[]) => Promise<string[]>
+        selectTextFile:  () => Promise<string | null>
         moveDirectory:   (args: { src: string; dest: string }) => Promise<{ success: boolean; error?: string }>
         deleteDirectory: (dirPath: string) => Promise<{ success: boolean; error?: string }>
         readScreenshotDataUrl: (filename: string) => Promise<string>
@@ -165,6 +197,7 @@ declare global {
       model: {
         export:         (args: { outputUrl: string; format: string }) => Promise<{ success: boolean; error?: string }>
         listDownloaded: () => Promise<{ id: string; name: string; size_gb: number }[]>
+        activeDownloads: () => Promise<{ modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]>
         isDownloaded:   (modelId: string, downloadCheck?: string) => Promise<boolean>
         download:       (repoId: string, modelId: string, skipPrefixes?: string[], includePrefixes?: string[]) => Promise<{ success: boolean; error?: string }>
         pauseDownload:  (modelId: string) => Promise<{ success: boolean; error?: string }>

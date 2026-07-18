@@ -1,9 +1,18 @@
+import { useEffect, useState } from 'react'
 import { useAppStore } from '@shared/stores/appStore'
 import MemoryIndicator from './MemoryIndicator'
 
 export default function TopBar(): JSX.Element {
   const { patchUpdateReady, platform, showRamIndicator } = useAppStore()
   const isMac = platform === 'darwin'
+
+  const [isMaximized, setIsMaximized] = useState(false)
+
+  useEffect(() => {
+    window.electron.window.isMaximized().then(setIsMaximized)
+    window.electron.window.onMaximizeChange(setIsMaximized)
+    return () => window.electron.window.offMaximizeChange()
+  }, [])
 
   const handleMinimize = () => window.electron.window.minimize()
   const handleMaximize = () => window.electron.window.maximize()
@@ -64,11 +73,18 @@ export default function TopBar(): JSX.Element {
           <button
             onClick={handleMaximize}
             className="w-8 h-8 flex items-center justify-center rounded hover:bg-zinc-700 text-zinc-400 hover:text-zinc-100 transition-colors"
-            aria-label="Maximize"
+            aria-label={isMaximized ? 'Restore' : 'Maximize'}
           >
-            <svg width="9" height="9" viewBox="0 0 9 9" fill="none" stroke="currentColor">
-              <rect x="0.5" y="0.5" width="8" height="8" />
-            </svg>
+            {isMaximized ? (
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor">
+                <rect x="2.5" y="0.5" width="7" height="7" />
+                <path d="M0.5 2.5v7h7" />
+              </svg>
+            ) : (
+              <svg width="9" height="9" viewBox="0 0 9 9" fill="none" stroke="currentColor">
+                <rect x="0.5" y="0.5" width="8" height="8" />
+              </svg>
+            )}
           </button>
           <button
             onClick={handleClose}

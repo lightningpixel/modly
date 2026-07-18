@@ -28,7 +28,7 @@ Alternatively, you can clone the repository and run the app directly without ins
 launch.bat
 
 # Linux / macOS
-./launcher.sh
+./launch.sh
 ```
 
 ---
@@ -108,6 +108,10 @@ Modly supports external model and process extensions. Each extension is a GitHub
 
 ---
 
+## Workflows
+Start with a basic workflow first. For example, on the "Workflows" tab, try: Image -> Generate Mesh -> Add to Scene. Make sure there is a connection between each of the steps. Go to the "Generate" tab, make sure the workflow is selected, then click on "Generate 3D Model". Click on "Settings/Logs/Errors" to see any issues.
+
+
 ## Modly CLI
 
 Agents and scripts can call a running Modly desktop app without using the UI via the stdlib-only CLI. The CLI is a thin helper over Modly's canonical automation concepts and keeps final machine-readable JSON on stdout:
@@ -177,8 +181,8 @@ This is a requirement of the MIT license attribution clause. Please keep this cr
 
 <a href="https://www.star-history.com/?repos=lightningpixel%2Fmodly&type=timeline&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=lightningpixel/modly&type=timeline&theme=dark&legend=bottom-right" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=lightningpixel/modly&type=timeline&legend=bottom-right" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=lightningpixel/modly&type=timeline&legend=bottom-right" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=lightningpixel/modly&type=timeline&theme=dark&legend=top-left&sealed_token=cOwK4zScWlXqsENFqBZjZxBegY236guAwYU7dQexei1zHYbRrqK7J5DgNqJ-826rONAWJq_iMt9w75AUW2VajCmscQbVaDifjUsqcJjc-wWVQg5SKLP6iHPv_d7Pyz2765Mjny2B3UjdFmWo-O4RKSaNvDy7m3A2BRQsFaXkEA3iyYYrO0cx6Uqv482L" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=lightningpixel/modly&type=timeline&legend=top-left&sealed_token=cOwK4zScWlXqsENFqBZjZxBegY236guAwYU7dQexei1zHYbRrqK7J5DgNqJ-826rONAWJq_iMt9w75AUW2VajCmscQbVaDifjUsqcJjc-wWVQg5SKLP6iHPv_d7Pyz2765Mjny2B3UjdFmWo-O4RKSaNvDy7m3A2BRQsFaXkEA3iyYYrO0cx6Uqv482L" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=lightningpixel/modly&type=timeline&legend=top-left&sealed_token=cOwK4zScWlXqsENFqBZjZxBegY236guAwYU7dQexei1zHYbRrqK7J5DgNqJ-826rONAWJq_iMt9w75AUW2VajCmscQbVaDifjUsqcJjc-wWVQg5SKLP6iHPv_d7Pyz2765Mjny2B3UjdFmWo-O4RKSaNvDy7m3A2BRQsFaXkEA3iyYYrO0cx6Uqv482L" />
  </picture>
 </a>

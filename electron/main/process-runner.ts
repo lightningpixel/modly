@@ -49,6 +49,8 @@ parentPort.on('message', async (msg) => {
 export interface ProcessInput {
   filePath?: string
   text?:     string
+  /** Per-slot texts for multi-text-input nodes (index = target handle slot). */
+  texts?:    (string | undefined)[]
   nodeId?:   string
 }
 

@@ -58,6 +58,14 @@ def _discover_extensions() -> Dict[str, Tuple[type, dict]]:
     for ext_dir in sorted(EXTENSIONS_DIR.iterdir()):
         if not ext_dir.is_dir():
             continue
+        # Dot-dirs are install machinery (staging/backup), never extensions
+        if ext_dir.name.startswith("."):
+            continue
+        # Marker left by the installer while setup runs (or after a crash):
+        # the folder is not ready to be loaded
+        if (ext_dir / ".modly-incomplete").exists():
+            print(f"[Registry] Skipping '{ext_dir.name}': install has not completed")
+            continue
 
         manifest_path  = ext_dir / "manifest.json"
         generator_path = ext_dir / "generator.py"
@@ -70,7 +78,15 @@ def _discover_extensions() -> Dict[str, Tuple[type, dict]]:
             continue
 
         try:
-            manifest   = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            # Process extensions run via Electron's process runner, not this
+            # registry — skip them even when their entry file is generator.py.
+            if manifest.get("type", "model") != "model":
+                print(f"[Registry] Skipping '{ext_dir.name}': type "
+                      f"'{manifest.get('type')}' is not handled by this registry")
+                continue
+
             ext_id     = manifest["id"]
             class_name = manifest["generator_class"]
 

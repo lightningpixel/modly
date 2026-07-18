@@ -42,7 +42,10 @@ export default function ModelsPage(): JSX.Element {
   const reloadExtensions  = useExtensionsStore((s) => s.reload)
   const clearInstall      = useExtensionsStore((s) => s.clearInstallState)
 
-  const allExtensions: AnyExtension[] = [...modelExtensions, ...processExtensions]
+  const allExtensions: AnyExtension[] = useMemo(
+    () => [...modelExtensions, ...processExtensions],
+    [modelExtensions, processExtensions],
+  )
 
   // Model weight state (needed for node install status + uninstall cleanup)
   const [installedVariantIds, setInstalledVariantIds] = useState<string[]>([])
@@ -60,6 +63,7 @@ export default function ModelsPage(): JSX.Element {
 
   // Uninstall modal state
   const [uninstallTarget, setUninstallTarget] = useState<string | null>(null)
+  const [uninstallError,  setUninstallError]  = useState<string | null>(null)
   const [modelsToDelete,  setModelsToDelete]  = useState<Set<string>>(new Set())
 
   // Search / filter / sort / detail drawer
@@ -134,6 +138,7 @@ export default function ModelsPage(): JSX.Element {
       }
     })
     return () => window.electron.model.offProgress()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- register the progress listener once on mount
   }, [])
 
   useEffect(() => {
@@ -235,7 +240,13 @@ export default function ModelsPage(): JSX.Element {
     for (const modelId of modelsToDelete) {
       await window.electron.model.delete(modelId)
     }
-    await uninstallExt(extId)
+    const result = await uninstallExt(extId)
+    if (!result.success) {
+      // Keep the dialog open so the failure is visible (locked folder, etc.)
+      setUninstallError(result.error ?? 'Could not delete the extension folder.')
+      return
+    }
+    setUninstallError(null)
     setUninstallTarget(null)
     setModelsToDelete(new Set())
     setSelectedId((id) => (id === extId ? null : id))
@@ -631,7 +642,7 @@ export default function ModelsPage(): JSX.Element {
         return createPortal(
           <div
             className="fixed inset-0 z-[9999] flex items-center justify-center"
-            onMouseDown={(e) => { if (e.target === e.currentTarget) { setUninstallTarget(null); setModelsToDelete(new Set()) } }}
+            onMouseDown={(e) => { if (e.target === e.currentTarget) { setUninstallTarget(null); setModelsToDelete(new Set()); setUninstallError(null) } }}
           >
             <div className="absolute inset-0 bg-zinc-950/70 backdrop-blur-sm animate-fade-in" />
             <div className="relative w-96 rounded-2xl bg-zinc-900 border border-accent/20 shadow-2xl shadow-accent/5 overflow-hidden animate-slide-up-center">
@@ -688,9 +699,18 @@ export default function ModelsPage(): JSX.Element {
                   </div>
                 )}
 
+                {uninstallError && (
+                  <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg bg-red-950/30 border border-red-800/30">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-red-400 shrink-0 mt-0.5">
+                      <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+                    </svg>
+                    <p className="text-[11px] text-red-400 break-words">{uninstallError}</p>
+                  </div>
+                )}
+
                 <div className="flex gap-2.5">
                   <button
-                    onClick={() => { setUninstallTarget(null); setModelsToDelete(new Set()) }}
+                    onClick={() => { setUninstallTarget(null); setModelsToDelete(new Set()); setUninstallError(null) }}
                     className="flex-1 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700/80 text-zinc-400 hover:text-zinc-200 text-sm font-medium transition-colors border border-zinc-700/50"
                   >
                     Cancel

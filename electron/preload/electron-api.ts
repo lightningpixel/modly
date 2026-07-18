@@ -21,9 +21,14 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
   return {
     // Window controls
     window: {
-      minimize: () => ipcRenderer.send('window:minimize'),
-      maximize: () => ipcRenderer.send('window:maximize'),
-      close:    () => ipcRenderer.send('window:close'),
+      minimize:     () => ipcRenderer.send('window:minimize'),
+      maximize:     () => ipcRenderer.send('window:maximize'),
+      close:        () => ipcRenderer.send('window:close'),
+      isMaximized:  () => ipcRenderer.invoke('window:isMaximized') as Promise<boolean>,
+      onMaximizeChange: (cb: (isMaximized: boolean) => void) => {
+        ipcRenderer.on('window:maximizeChanged', (_event, isMaximized) => cb(isMaximized as boolean))
+      },
+      offMaximizeChange: () => ipcRenderer.removeAllListeners('window:maximizeChanged'),
     },
 
     // Renderer UI (zoom whole page — scales every px/rem consistently)
@@ -70,6 +75,10 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         ipcRenderer.invoke('fs:savePath', args) as Promise<string | null>,
       listDir:           (dirPath: string): Promise<string[]> =>
         ipcRenderer.invoke('fs:listDir', dirPath) as Promise<string[]>,
+      listFiles:         (dirPath: string, extensions?: string[]): Promise<string[]> =>
+        ipcRenderer.invoke('fs:listFiles', dirPath, extensions) as Promise<string[]>,
+      selectTextFile:    (): Promise<string | null> =>
+        ipcRenderer.invoke('fs:selectTextFile') as Promise<string | null>,
       moveDirectory:     (args: { src: string; dest: string }): Promise<{ success: boolean; error?: string }> =>
         ipcRenderer.invoke('fs:moveDirectory', args) as Promise<{ success: boolean; error?: string }>,
       deleteDirectory:   (dirPath: string): Promise<{ success: boolean; error?: string }> =>
@@ -221,7 +230,7 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
 
       runProcess: (
         extensionId: string,
-        input:       { filePath?: string; text?: string; nodeId?: string },
+        input:       { filePath?: string; text?: string; texts?: (string | undefined)[]; nodeId?: string },
         params:      Record<string, unknown>,
       ): Promise<{ success: boolean; result?: { filePath?: string; text?: string }; error?: string }> =>
         ipcRenderer.invoke('extensions:runProcess', extensionId, input, params) as Promise<{ success: boolean; result?: { filePath?: string; text?: string }; error?: string }>,

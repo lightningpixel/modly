@@ -27,9 +27,10 @@ export function AccessibilitySection(): JSX.Element {
               value={uiScale}
               onChange={setUiScale}
               options={[
-                { value: 'small',  label: 'Small'  },
-                { value: 'medium', label: 'Medium' },
-                { value: 'large',  label: 'Large'  },
+                { value: 'small',      label: 'Small'      },
+                { value: 'medium',     label: 'Medium'     },
+                { value: 'large',      label: 'Large'      },
+                { value: 'very-large', label: 'Very Large' },
               ]}
             />
           </Row>

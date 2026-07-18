@@ -9,11 +9,10 @@
     "strict": true,
     "skipLibCheck": true,
     "paths": {
-      "@/*":            ["./src/*"],
-      "@components/*": ["./src/components/*"],
-      "@hooks/*":      ["./src/hooks/*"],
-      "@stores/*":     ["./src/stores/*"],
-      "@styles/*":     ["./src/styles/*"]
+      "@/*":       ["./src/*"],
+      "@areas/*":  ["./src/areas/*"],
+      "@shared/*": ["./src/shared/*"],
+      "@styles/*": ["./src/styles/*"]
     }
   },
   "include": ["src/**/*"],

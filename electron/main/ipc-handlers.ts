@@ -3,7 +3,7 @@ import { buildSync } from 'esbuild'
 import { autoUpdater } from 'electron-updater'
 import { join } from 'path'
 import { rm as rmAsync, readFile, writeFile, mkdir, readdir, rename, cp, symlink, lstat } from 'fs/promises'
-import { existsSync, readdirSync, statSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, statSync } from 'fs'
 import axios from 'axios'
 import * as tar from 'tar'
 import * as os from 'os'
@@ -20,9 +20,21 @@ import { logger } from './logger'
 import { getProcessRunner, getPythonProcessRunner, getExtPythonExe, terminateProcessRunner, terminateAllProcessRunners } from './process-runner'
 import { getBuiltinExtensionsDir } from './builtin-sync'
 import { spawn, execFile } from 'child_process'
-import { assertSafeExtensionId, buildExtensionBackupPath, resolveExtensionPathWithinRoot } from './extension-path-guard'
-import { isSetupFailureFatal, validateInstallManifest } from './extension-install-utils'
+import {
+  EXT_BACKUP_PREFIX,
+  EXT_INCOMPLETE_MARKER,
+  EXT_STAGING_PREFIX,
+  assertSafeExtensionId,
+  buildExtensionBackupPath,
+  buildExtensionStagingPath,
+  isInternalExtensionDirName,
+  parseExtensionBackupName,
+  resolveExtensionPathWithinRoot,
+  resolvePathWithinRoot,
+} from './extension-path-guard'
+import { validateInstallManifest } from './extension-install-utils'
 import { registerWorkspaceAssetLibraryIpcHandlers } from './artifact-registry-service'
+import { updatesSupported } from './updater'
 
 type WindowGetter = () => BrowserWindow | null
 const pExecFile = promisify(execFile)
@@ -89,6 +101,12 @@ function runExtensionSetup(
     const pythonExe = getVenvPythonExe(userData)
     const setupPy   = join(extDir, 'setup.py')
 
+    // Shared pip wheel cache: a failed setup retried later reuses the multi-GB
+    // torch wheels instead of re-downloading them (see issue #223). Extension
+    // setup.py scripts that pass --no-cache-dir get it stripped by the launcher.
+    const pipCacheDir = join(getSettings(userData).dependenciesDir, 'pip-cache')
+    try { mkdirSync(pipCacheDir, { recursive: true }) } catch { /* pip creates it too */ }
+
     const accelerator = process.platform === 'darwin' && process.arch === 'arm64' ? 'mps' : gpuSm > 0 ? 'cuda' : 'cpu'
     const args = JSON.stringify({
       python_exe: pythonExe,
@@ -149,22 +167,41 @@ def _rewrite_command(command):
         return rewritten
     return command
 
+def _is_pip_command(command):
+    if not isinstance(command, (list, tuple)):
+        return False
+    return any("pip" in str(part).lower() for part in command[:3])
+
+def _strip_no_cache(command):
+    # Extension setup scripts often hardcode --no-cache-dir, which forces pip to
+    # re-download multi-GB wheels on every retry. Modly provides a shared cache
+    # via PIP_CACHE_DIR, so drop the flag and let pip use it.
+    if not _is_pip_command(command):
+        return command
+    if not any(str(part) == "--no-cache-dir" for part in command):
+        return command
+    print("[Modly setup compat] Removed --no-cache-dir so pip reuses the shared wheel cache.", file=sys.stderr)
+    return [part for part in command if str(part) != "--no-cache-dir"]
+
+def _transform_command(command):
+    return _strip_no_cache(_rewrite_command(command))
+
 def _patched_run(*args, **kwargs):
     args = list(args)
     if args:
-        args[0] = _rewrite_command(args[0])
+        args[0] = _transform_command(args[0])
     return _original_run(*args, **kwargs)
 
 def _patched_check_call(*args, **kwargs):
     args = list(args)
     if args:
-        args[0] = _rewrite_command(args[0])
+        args[0] = _transform_command(args[0])
     return _original_check_call(*args, **kwargs)
 
 def _patched_check_output(*args, **kwargs):
     args = list(args)
     if args:
-        args[0] = _rewrite_command(args[0])
+        args[0] = _transform_command(args[0])
     return _original_check_output(*args, **kwargs)
 
 subprocess.run = _patched_run
@@ -176,6 +213,7 @@ runpy.run_path(setup_py, run_name="__main__")
 `
     const proc = spawn(pythonExe, ['-c', launcher, setupPy, args], {
       stdio: ['ignore', 'pipe', 'pipe'],
+      env:   { ...process.env, PIP_CACHE_DIR: pipCacheDir },
     })
 
     const handleLine = (line: string) => { if (line) onLog?.(line) }
@@ -196,7 +234,91 @@ runpy.run_path(setup_py, run_name="__main__")
   })
 }
 
+// ─── Robust directory removal / rename ────────────────────────────────────────
+// On Windows the first attempt routinely fails with EBUSY/EPERM while the
+// antivirus or a dying python process still holds files open — which used to
+// leave half-deleted extension folders behind. Locked errors are retried with
+// a progressive backoff; any other error fails immediately.
+
+const FS_RETRY_DELAYS_MS = [200, 500, 1500, 2500]
+
+function isLockedFsError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException).code
+  return code === 'EBUSY' || code === 'EPERM' || code === 'EACCES'
+}
+
+type FsRetryResult = { ok: true } | { ok: false; locked: boolean; error: unknown }
+
+async function fsWithRetry(op: () => Promise<void>, label: string, target: string): Promise<FsRetryResult> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await op()
+      return { ok: true }
+    } catch (err) {
+      if (!isLockedFsError(err) || attempt === FS_RETRY_DELAYS_MS.length) {
+        logger.warn(`[${label}] ${target}: ${err}`)
+        return { ok: false, locked: isLockedFsError(err), error: err }
+      }
+      await new Promise((r) => setTimeout(r, FS_RETRY_DELAYS_MS[attempt]))
+    }
+  }
+}
+
+const rmWithRetry = (path: string, label: string): Promise<FsRetryResult> =>
+  fsWithRetry(() => rmAsync(path, { recursive: true, force: true }), label, path)
+
+const renameWithRetry = (from: string, to: string, label: string): Promise<FsRetryResult> =>
+  fsWithRetry(() => rename(from, to), label, `${from} -> ${to}`)
+
+// Extension ids with an install currently in flight. Their folder carries the
+// incomplete marker during setup — extensions:list must not report it as
+// corrupted while the install is legitimately running.
+const activeExtensionInstalls = new Set<string>()
+
 export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGetter): void {
+  // Reconcile leftovers of interrupted installs. No install can be in flight
+  // this early in the app's life, so anything matching is stale:
+  //  - staging dirs → discard (never the only copy of anything)
+  //  - extension dir still carrying the incomplete marker + a backup exists
+  //    → the install crashed mid-setup: put the previous version back
+  //  - backup dirs → restore if the extension folder is gone, else discard
+  void (async () => {
+    try {
+      const extensionsDir = getSettings(app.getPath('userData')).extensionsDir
+      const entries = await readdir(extensionsDir, { withFileTypes: true })
+      const names   = entries.map((e) => e.name)
+
+      await Promise.allSettled(
+        names
+          .filter((n) => n.startsWith(EXT_STAGING_PREFIX))
+          .map((n) => rmWithRetry(join(extensionsDir, n), 'ext-cleanup')),
+      )
+
+      // Newest backup first, so the most recent good version wins a restore
+      const backups = names.filter((n) => n.startsWith(EXT_BACKUP_PREFIX)).sort().reverse()
+      for (const name of backups) {
+        const backupPath = join(extensionsDir, name)
+        const parsed = parseExtensionBackupName(name)
+        if (!parsed) { await rmWithRetry(backupPath, 'ext-cleanup'); continue }
+
+        const destDir        = join(extensionsDir, parsed.extensionId)
+        const destIncomplete = existsSync(join(destDir, EXT_INCOMPLETE_MARKER))
+        if (existsSync(destDir) && !destIncomplete) {
+          // Install completed; only the backup's own cleanup had failed
+          await rmWithRetry(backupPath, 'ext-cleanup')
+          continue
+        }
+        // Crash mid-swap or mid-setup: this backup is the last good copy
+        if (destIncomplete) {
+          const removed = await rmWithRetry(destDir, 'ext-restore')
+          if (!removed.ok) continue   // keep the backup; retried next launch
+        }
+        const restored = await renameWithRetry(backupPath, destDir, 'ext-restore')
+        if (restored.ok) logger.info(`[ext-restore] restored "${parsed.extensionId}" from ${name}`)
+      }
+    } catch { /* best-effort; extensionsDir may not exist yet */ }
+  })()
+
   const activeDownloads = new Map<string, { percent: number; file?: string; fileIndex?: number; totalFiles?: number }>()
   // Logging from renderer
   ipcMain.on('log:error', (_event, message: string) => logger.error(`[Renderer] ${message}`))
@@ -237,6 +359,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     win.isMaximized() ? win.restore() : win.maximize()
   })
   ipcMain.on('window:close', () => getWindow()?.close())
+  ipcMain.handle('window:isMaximized', () => getWindow()?.isMaximized() ?? false)
 
   // Setup handlers — skipped in dev (uses .venv instead of python-embed)
   ipcMain.handle('setup:check', async () => {
@@ -366,28 +489,14 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     }
 
     // Retry removal — Windows may return EBUSY/EPERM if handles linger
-    const maxRetries = 3
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        await rmAsync(modelDir, { recursive: true, force: true })
-        return { success: true }
-      } catch (err: unknown) {
-        const code = (err as NodeJS.ErrnoException).code
-        const isLocked = code === 'EBUSY' || code === 'EPERM'
-        if (isLocked && attempt < maxRetries) {
-          await new Promise(resolve => setTimeout(resolve, 1_000 * attempt))
-          continue
-        }
-        return {
-          success: false,
-          error: isLocked
-            ? `Model files are still locked after ${maxRetries} attempts. Close any programs using the model and try again.`
-            : String(err),
-        }
-      }
+    const removed = await rmWithRetry(modelDir, 'model-delete')
+    if (removed.ok) return { success: true }
+    return {
+      success: false,
+      error: removed.locked
+        ? 'Model files are still locked after several attempts. Close any programs using the model and try again.'
+        : String(removed.error),
     }
-
-    return { success: false, error: 'Unexpected error during deletion' }
   })
 
   ipcMain.handle('model:showInFolder', (_, modelId: string) => {
@@ -676,6 +785,38 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     }
   })
 
+  // List files (not directories) in a folder, optionally filtered by extension.
+  // `extensions` are lowercase without the dot (e.g. ['txt', 'png']).
+  ipcMain.handle('fs:listFiles', async (_, dirPath: string, extensions?: string[]) => {
+    try {
+      const wanted = extensions?.map(e => e.toLowerCase().replace(/^\./, ''))
+      const entries = await readdir(dirPath, { withFileTypes: true })
+      return entries
+        .filter(e => e.isFile())
+        .map(e => e.name)
+        .filter(name => {
+          if (!wanted || wanted.length === 0) return true
+          const ext = name.split('.').pop()?.toLowerCase() ?? ''
+          return wanted.includes(ext)
+        })
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+    } catch {
+      return []
+    }
+  })
+
+  // Text-file picker for the standalone Load Prompt node.
+  ipcMain.handle('fs:selectTextFile', async () => {
+    const win = getWindow()
+    if (!win) return null
+    const result = await dialog.showOpenDialog(win, {
+      title: 'Select a prompt text file',
+      filters: [{ name: 'Text', extensions: ['txt', 'md', 'prompt'] }],
+      properties: ['openFile'],
+    })
+    return result.canceled ? null : result.filePaths[0]
+  })
+
   ipcMain.handle('fs:moveDirectory', async (_, { src, dest }: { src: string; dest: string }) => {
     try {
       await mkdir(dest, { recursive: true })
@@ -754,9 +895,10 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     nodes?: {
       id:                string
       name?:             string
-      input?:            'mesh' | 'image' | 'text'
-      inputs?:           ('mesh' | 'image' | 'text')[]
-      output?:           'mesh' | 'image' | 'text'
+      input?:            'mesh' | 'image' | 'text' | 'audio'
+      inputs?:           ('mesh' | 'image' | 'text' | 'audio')[]
+      input_labels?:     string[]
+      output?:           'mesh' | 'image' | 'text' | 'audio'
       params_schema?:    unknown[]
       param_defaults?:   Record<string, unknown>
       hf_repo?:          string
@@ -783,6 +925,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       name:           n.name ?? n.id,
       input:          n.input  ?? 'image' as const,
       inputs:         n.inputs,
+      inputLabels:    n.input_labels,
       output:         n.output ?? 'mesh'  as const,
       paramsSchema:   n.params_schema ?? parsed.params_schema ?? [],
       paramDefaults:  { ...(parsed.param_defaults ?? {}), ...(n.param_defaults ?? {}) },
@@ -814,15 +957,24 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         // On Windows, junction points are reported by Node.js as isSymbolicLink()=true,
         // isDirectory()=false. Use statSync (which follows links) as the authoritative check.
         const dirs = entries.filter(e => {
+          // Staging/backup dirs are never extensions (ids can't start with '.')
+          if (isInternalExtensionDirName(e.name)) return false
           if (e.isDirectory()) return true
           if (e.isSymbolicLink()) {
             try { return statSync(join(dir, e.name)).isDirectory() } catch { return false }
           }
           return false
         })
-        return Promise.all(dirs.map(async (entry) => {
-          const base = { type: 'model' as const, id: entry.name, name: entry.name, trusted: isBuiltin, builtin: isBuiltin, nodes: [] }
+        const results = await Promise.all(dirs.map(async (entry) => {
           const entryPath = join(dir, entry.name)
+          const skeleton  = { type: 'model' as const, id: entry.name, name: entry.name, trusted: isBuiltin, builtin: isBuiltin, nodes: [], corrupted: true }
+
+          // Marker still present → an install of this folder never completed.
+          // Hidden entirely while that install is still in flight.
+          if (existsSync(join(entryPath, EXT_INCOMPLETE_MARKER))) {
+            if (activeExtensionInstalls.has(entry.name)) return null
+            return { ...skeleton, manifestError: 'incomplete' as const }
+          }
 
           // Detect local extensions: check for .modly-local sentinel
           let localSourcePath: string | undefined
@@ -835,6 +987,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
             }
           }
 
+          // 'missing' = no manifest at all (gutted folder); 'invalid' = a manifest
+          // exists but doesn't parse (fixable by hand, don't push deletion only)
+          let manifestError: 'missing' | 'invalid' = 'missing'
           for (const manifestFile of ['manifest.json', 'package.json']) {
             const p = join(entryPath, manifestFile)
             if (existsSync(p)) {
@@ -844,11 +999,12 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
                 // Inject local:// source so the UI shows the Local badge
                 if (localSourcePath) parsed.source = `local://${localSourcePath}`
                 return parseExtensionManifest(parsed, entry.name, trustedRepos, isBuiltin)
-              } catch { /* ignore parse errors, fall through */ }
+              } catch { manifestError = 'invalid' }
             }
           }
-          return base
+          return { ...skeleton, manifestError }
         }))
+        return results.filter((e): e is Exclude<typeof e, null> => e !== null)
       } catch {
         return []
       }
@@ -871,6 +1027,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
     let tarPath    = ''
     let extractDir = ''
+    let trackedExtensionId = ''
 
     try {
       // 1. Parse and validate GitHub URL
@@ -926,109 +1083,136 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       if (!hasNodes) throw new Error('manifest.json: required field "nodes" missing or empty')
       const extensionId = assertSafeExtensionId(rawManifestId)
       manifest.id = extensionId
+      trackedExtensionId = extensionId
+      activeExtensionInstalls.add(extensionId)
 
       // Override source field with the actual GitHub URL so trust is based on origin
       manifest.source = `https://github.com/${owner}/${repo}`
       await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf-8')
 
-      // 5. Copy to extensions directory (overwrite if already present)
+      // 5. Stage into a fresh, unique dir next to the final location (so a new
+      //    attempt can never merge into leftovers of a previous one), mark it
+      //    incomplete, and swap it in with atomic renames BEFORE the long setup
+      //    phase. setup.py then runs in the final path — venvs record absolute
+      //    paths, so the folder must not move after setup. If anything dies
+      //    mid-way, the marker + backup let the startup reconciler put the
+      //    previous version back.
       const extensionsDir = getSettings(app.getPath('userData')).extensionsDir
       await mkdir(extensionsDir, { recursive: true })
-      const destDir = resolveExtensionPathWithinRoot(extensionsDir, extensionId)
-      const backupDir = existsSync(destDir) ? buildExtensionBackupPath(extensionsDir, extensionId, String(Date.now())) : null
+      const destDir    = resolveExtensionPathWithinRoot(extensionsDir, extensionId)
+      const stagingDir = buildExtensionStagingPath(extensionsDir, extensionId, String(Date.now()))
 
       try {
+        await cp(extractDir, stagingDir, { recursive: true })
+        await writeFile(join(stagingDir, EXT_INCOMPLETE_MARKER), new Date().toISOString(), 'utf-8')
+
+        // Compile TypeScript entry to JS at install time (once, no runtime overhead)
+        if (isProcess && entryFile.endsWith('.ts')) {
+          emit({ step: 'setting_up', message: 'Compiling TypeScript entry…' })
+          const compiledEntry = entryFile.replace(/\.ts$/, '.js')
+          buildSync({
+            entryPoints: [join(stagingDir, entryFile)],
+            outfile:     join(stagingDir, compiledEntry),
+            bundle:      true,
+            platform:    'node',
+            format:      'cjs',
+            external:    ['electron'],
+          })
+          manifest.entry = compiledEntry
+          await writeFile(join(stagingDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf-8')
+        }
+      } catch (stageErr) {
+        await rmWithRetry(stagingDir, 'ext-install')
+        throw stageErr
+      }
+
+      // 6. Swap into place (backup the previous version first)
+      terminateProcessRunner(extensionId)
+      const backupDir = existsSync(destDir) ? buildExtensionBackupPath(extensionsDir, extensionId, String(Date.now())) : null
       if (backupDir) {
-        terminateProcessRunner(extensionId)
-        await rename(destDir, backupDir)
+        const parked = await renameWithRetry(destDir, backupDir, 'ext-install')
+        if (!parked.ok) {
+          await rmWithRetry(stagingDir, 'ext-install')
+          throw new Error('The current extension folder is locked (antivirus or a running process) — close what might be using it and try again.')
+        }
       }
-      await cp(extractDir, destDir, { recursive: true })
-
-      // Compile TypeScript entry to JS at install time (once, no runtime overhead)
-      if (isProcess && entryFile.endsWith('.ts')) {
-        emit({ step: 'setting_up', message: 'Compiling TypeScript entry…' })
-        const compiledEntry = entryFile.replace(/\.ts$/, '.js')
-        buildSync({
-          entryPoints: [join(destDir, entryFile)],
-          outfile:     join(destDir, compiledEntry),
-          bundle:      true,
-          platform:    'node',
-          format:      'cjs',
-          external:    ['electron'],
-        })
-        manifest.entry = compiledEntry
-        await writeFile(join(destDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf-8')
+      const activated = await renameWithRetry(stagingDir, destDir, 'ext-install')
+      if (!activated.ok) {
+        await rmWithRetry(stagingDir, 'ext-install')
+        if (backupDir) await renameWithRetry(backupDir, destDir, 'ext-install')
+        throw new Error('Could not move the staged extension into place — the folder is locked. Try again.')
       }
 
-      if (isPythonProcess) {
-        // 6a. Python process extension: run setup.py if present (same as model extensions)
-        if (existsSync(join(destDir, 'setup.py'))) {
-          emit({ step: 'setting_up', message: 'Setting up Python environment…' })
-          const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
-          try {
+      // 7. Setup runs in the final folder; a failure restores the previous version
+      try {
+        if (isPythonProcess) {
+          // 7a. Python process extension: run setup.py if present (same as model extensions)
+          if (existsSync(join(destDir, 'setup.py'))) {
+            emit({ step: 'setting_up', message: 'Setting up Python environment…' })
+            const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
             await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
               logger.info(`[ext-setup] ${line}`)
               emit({ step: 'setting_up', message: line })
             })
-          } catch (err) {
-            if (isSetupFailureFatal({ isProcess, isPythonProcess })) {
-              throw new Error(`Extension setup failed: ${err}`)
-            }
-            logger.warn(`[ext-setup] setup.py failed: ${err}`)
-            emit({ step: 'setting_up', message: `Warning: setup failed — ${err}` })
+          }
+        } else if (isProcess) {
+          // 7b. JS process extension: npm install if package.json present
+          if (existsSync(join(destDir, 'package.json'))) {
+            emit({ step: 'setting_up', message: 'Installing dependencies…' })
+            await new Promise<void>((resolve, reject) => {
+              const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+              const child = spawn(npm, ['install', '--omit=dev', '--no-audit', '--no-fund'], {
+                cwd:   destDir,
+                stdio: 'pipe',
+              })
+              let buf = ''
+              const onData = (chunk: Buffer) => {
+                buf += chunk.toString()
+                const lines = buf.split('\n')
+                buf = lines.pop() ?? ''
+                for (const raw of lines) {
+                  const line = raw.replace(/\x1b\[[0-9;]*m/g, '').trim()
+                  if (line) emit({ step: 'setting_up', message: line })
+                }
+              }
+              child.stdout?.on('data', onData)
+              child.stderr?.on('data', onData)
+              child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`npm install failed (exit ${code})`)))
+              child.on('error', reject)
+            })
+          }
+        } else {
+          // 7c. Model extension: run setup.py directly (no FastAPI required)
+          if (existsSync(join(destDir, 'setup.py'))) {
+            emit({ step: 'setting_up', message: 'Setting up Python environment…' })
+            const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
+            await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
+              logger.info(`[ext-setup] ${line}`)
+              emit({ step: 'setting_up', message: line })
+            })
           }
         }
-      } else if (isProcess) {
-        // 6b. JS process extension: npm install if package.json present
-        if (existsSync(join(destDir, 'package.json'))) {
-          emit({ step: 'setting_up', message: 'Installing dependencies…' })
-          await new Promise<void>((resolve, reject) => {
-            const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-            const child = spawn(npm, ['install', '--omit=dev', '--no-audit', '--no-fund'], {
-              cwd:   destDir,
-              stdio: 'pipe',
-            })
-            let buf = ''
-            const onData = (chunk: Buffer) => {
-              buf += chunk.toString()
-              const lines = buf.split('\n')
-              buf = lines.pop() ?? ''
-              for (const raw of lines) {
-                const line = raw.replace(/\x1b\[[0-9;]*m/g, '').trim()
-                if (line) emit({ step: 'setting_up', message: line })
-              }
-            }
-            child.stdout?.on('data', onData)
-            child.stderr?.on('data', onData)
-            child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`npm install failed (exit ${code})`)))
-            child.on('error', reject)
-          })
-        }
-      } else {
-        // 6b. Model extension: run setup.py directly (no FastAPI required)
-        if (existsSync(join(destDir, 'setup.py'))) {
-          emit({ step: 'setting_up', message: 'Setting up Python environment…' })
-          const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
-          await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
-            logger.info(`[ext-setup] ${line}`)
-            emit({ step: 'setting_up', message: line })
-          })
-        }
+      } catch (setupErr) {
+        // Discard the half-set-up folder and put the previous version back. If
+        // the folder is locked, the marker keeps it flagged corrupted and the
+        // startup reconciler restores the backup on next launch.
+        const discarded = await rmWithRetry(destDir, 'ext-install')
+        if (discarded.ok && backupDir) await renameWithRetry(backupDir, destDir, 'ext-install')
+        throw setupErr
+      }
 
+      // 8. Success: clear the marker, then drop the backup. The backup is only
+      //    discarded once the marker is confirmed gone — a still-marked folder
+      //    would make the startup reconciler restore the backup over this
+      //    freshly completed install.
+      const markerGone = await rmWithRetry(join(destDir, EXT_INCOMPLETE_MARKER), 'ext-install')
+      if (backupDir && markerGone.ok) void rmWithRetry(backupDir, 'ext-install')
+
+      // Hot-reload Python so it picks up the new/updated model extension
+      if (!isProcess) {
         try {
           await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
         } catch { /* Python might not be running yet */ }
-      }
-
-      if (backupDir) {
-        await rmAsync(backupDir, { recursive: true, force: true })
-      }
-      } catch (installErr) {
-        await rmAsync(destDir, { recursive: true, force: true }).catch(() => {})
-        if (backupDir && existsSync(backupDir)) {
-          await rename(backupDir, destDir)
-        }
-        throw installErr
       }
 
       emit({ step: 'done', extensionId })
@@ -1041,6 +1225,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       emit({ step: 'error', message: String(err) })
       return { success: false, error: String(err) }
     } finally {
+      if (trackedExtensionId) activeExtensionInstalls.delete(trackedExtensionId)
       // Cleanup temp files
       if (tarPath    && existsSync(tarPath))    rmAsync(tarPath,    { force: true }).catch(() => {})
       if (extractDir && existsSync(extractDir)) rmAsync(extractDir, { recursive: true, force: true }).catch(() => {})
@@ -1049,20 +1234,33 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   // Uninstall an extension — built-ins cannot be uninstalled
   ipcMain.handle('extensions:uninstall', async (_, extensionId: string) => {
-    const userData      = app.getPath('userData')
-    const safeExtensionId = assertSafeExtensionId(extensionId)
-    const builtinPath   = resolveExtensionPathWithinRoot(getBuiltinExtensionsDir(), safeExtensionId)
-    if (existsSync(builtinPath)) {
-      return { success: false, error: `"${safeExtensionId}" is a built-in extension and cannot be uninstalled.` }
-    }
-
-    const extensionsDir = getSettings(userData).extensionsDir
-    const extPath       = resolveExtensionPathWithinRoot(extensionsDir, safeExtensionId)
     try {
-      // Terminate process runner if it's a process extension
-      terminateProcessRunner(safeExtensionId)
+      // Corrupted folders can carry arbitrary names (manual copies, failed
+      // unzips), so only enforce root confinement for the deletion path. The
+      // strict id pattern still guards the built-in check — a non-conforming
+      // name can never be a built-in.
+      const extensionsDir = getSettings(app.getPath('userData')).extensionsDir
+      const extPath       = resolvePathWithinRoot(extensionsDir, String(extensionId))
 
-      await rmAsync(extPath, { recursive: true, force: true })
+      try {
+        const safeExtensionId = assertSafeExtensionId(extensionId)
+        if (existsSync(resolveExtensionPathWithinRoot(getBuiltinExtensionsDir(), safeExtensionId))) {
+          return { success: false, error: `"${safeExtensionId}" is a built-in extension and cannot be uninstalled.` }
+        }
+      } catch { /* non-conforming folder name → not a built-in */ }
+
+      // Terminate process runner if it's a process extension
+      terminateProcessRunner(extensionId)
+
+      const removed = await rmWithRetry(extPath, 'ext-uninstall')
+      if (!removed.ok) {
+        return {
+          success: false,
+          error: removed.locked
+            ? 'Could not delete the extension folder — a file inside it is locked (antivirus or a running process). Close what might be using it and try again.'
+            : String(removed.error),
+        }
+      }
       // Hot-reload Python so it stops using the deleted model extension
       try {
         await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
@@ -1079,7 +1277,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       const safeExtensionId = assertSafeExtensionId(extensionId)
       const extDir = resolveExtensionPathWithinRoot(getSettings(app.getPath('userData')).extensionsDir, safeExtensionId)
       if (!existsSync(join(extDir, 'setup.py'))) {
-        return { success: false, error: 'No setup.py found for this extension' }
+        return { success: false, error: 'setup.py is missing from the extension folder — the install looks incomplete. Uninstall the extension and install it again.' }
       }
       const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
       await runExtensionSetup(extDir, gpuSm, cudaVersion, (line) => logger.info(`[ext-repair] ${line}`))
@@ -1093,7 +1291,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   // Install a local extension by creating a symlink/junction to a local folder
-  ipcMain.handle('extensions:installFromLocal', async (event) => {
+  ipcMain.handle('extensions:installFromLocal', async () => {
     const win  = getWindow()
     const emit = (data: object) => win?.webContents.send('extensions:installProgress', data)
 
@@ -1197,7 +1395,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   // Run a process extension in an isolated worker thread
-  ipcMain.handle('extensions:runProcess', async (_, extensionId: string, input: { filePath?: string; text?: string; nodeId?: string }, params: Record<string, unknown>) => {
+  ipcMain.handle('extensions:runProcess', async (_, extensionId: string, input: { filePath?: string; text?: string; texts?: (string | undefined)[]; nodeId?: string }, params: Record<string, unknown>) => {
     const userData        = app.getPath('userData')
     const { extensionsDir, workspaceDir } = getSettings(userData)
 
@@ -1237,7 +1435,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   // Auto-updater
   ipcMain.handle('updater:check', async () => {
-    if (!app.isPackaged) return { success: false }
+    if (!app.isPackaged || !updatesSupported) return { success: false }
     try {
       await autoUpdater.checkForUpdates()
       return { success: true }
@@ -1248,6 +1446,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   ipcMain.handle('updater:quitAndInstall', () => {
+    if (!updatesSupported) return
     app.removeAllListeners('window-all-closed')
     BrowserWindow.getAllWindows().forEach(w => w.destroy())
     autoUpdater.quitAndInstall(true, true)

@@ -1,0 +1,12 @@
+#!/bin/sh
+# Run the full test suite before every push; abort on any failure.
+# Bypass in a pinch with:  git push --no-verify
+echo "[pre-push] Running test suite (npm test)..."
+if ! npm test; then
+  echo ""
+  echo "[pre-push] Tests failed — push aborted."
+  echo "[pre-push] Fix the tests, or bypass with: git push --no-verify"
+  exit 1
+fi
+echo "[pre-push] All tests passed — pushing."
+exit 0

@@ -14,12 +14,11 @@ import {
   type Edge,
   type OnConnectStartParams,
 } from '@xyflow/react'
-import { useWorkflowsStore } from '@shared/stores/workflowsStore'
+import { useWorkflowsStore, NODE_TYPES_WITHOUT_TARGET, NODE_TYPES_WITHOUT_SOURCE, FOLDER_COLORS } from '@shared/stores/workflowsStore'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
-import { useNavStore } from '@shared/stores/navStore'
 import { useAppStore } from '@shared/stores/appStore'
 import type { Workflow, WFNode, WFEdge, WFNodeData } from '@shared/types/electron.d'
-import { buildAllWorkflowExtensions, getWorkflowExtension } from './mockExtensions'
+import { buildAllWorkflowExtensions } from './mockExtensions'
 import type { WorkflowExtension } from './mockExtensions'
 import { useWorkflowRunStore } from './workflowRunStore'
 import { validateWorkflowPreflight } from './preflight'
@@ -30,26 +29,46 @@ import AddToSceneNode   from './nodes/AddToSceneNode'
 import Load3DMeshNode   from './nodes/Load3DMeshNode'
 import PreviewImageNode from './nodes/PreviewImageNode'
 import WaitNode         from './nodes/WaitNode'
+import WhileNode        from './nodes/WhileNode'
+import ForEachNode      from './nodes/ForEachNode'
 import WorkflowEdge     from './nodes/WorkflowEdge'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const DRAG_KEY      = 'modly/extension-id'
 const DRAG_NODE_KEY = 'modly/node-type'
-const NODE_TYPES = { extensionNode: ExtensionNode, imageNode: ImageNode, textNode: TextNode, outputNode: AddToSceneNode, meshNode: Load3DMeshNode, previewNode: PreviewImageNode, waitNode: WaitNode }
+const NODE_TYPES = { extensionNode: ExtensionNode, imageNode: ImageNode, textNode: TextNode, outputNode: AddToSceneNode, meshNode: Load3DMeshNode, previewNode: PreviewImageNode, waitNode: WaitNode, whileNode: WhileNode, forEachNode: ForEachNode }
+
+// Loop-container node types: resizable frames whose children form a loop body.
+// (For Each iterators are plain source nodes, not containers.)
+const CONTAINER_TYPES = new Set(['whileNode'])
+const isContainerType = (type: string | undefined): boolean => !!type && CONTAINER_TYPES.has(type)
 const EDGE_TYPES = { workflowEdge: WorkflowEdge }
 
 const DEFAULT_EDGE_OPTS = { type: 'workflowEdge' }
 
+// The While container whose bounds contain a flow-space point, if any. Used to
+// auto-parent nodes dropped (or created) inside a While so they join its loop body.
+function findWhileContainerAt(nodes: Node[], pos: { x: number; y: number }): Node | undefined {
+  return nodes.find((n) => {
+    if (!isContainerType(n.type)) return false
+    const gw = (n.measured?.width  ?? n.width  ?? (n.style?.width  as number)) || 0
+    const gh = (n.measured?.height ?? n.height ?? (n.style?.height as number)) || 0
+    return pos.x >= n.position.x && pos.x <= n.position.x + gw
+        && pos.y >= n.position.y && pos.y <= n.position.y + gh
+  })
+}
+
 // ─── IO badge ─────────────────────────────────────────────────────────────────
 
-const IO_STYLES: Record<'image' | 'text' | 'mesh', string> = {
+const IO_STYLES: Record<'image' | 'text' | 'mesh' | 'audio', string> = {
+  audio: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/25',
   image: 'bg-sky-500/15 text-sky-400 border-sky-500/25',
   mesh:  'bg-violet-500/15 text-violet-400 border-violet-500/25',
   text:  'bg-amber-500/15 text-amber-400 border-amber-500/25',
 }
 
-function IoBadge({ type }: { type: 'image' | 'text' | 'mesh' }) {
+function IoBadge({ type }: { type: 'image' | 'text' | 'mesh' | 'audio' }) {
   return (
     <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${IO_STYLES[type]}`}>
       {type}
@@ -61,90 +80,13 @@ function IoBadge({ type }: { type: 'image' | 'text' | 'mesh' }) {
 
 function newId(): string { return crypto.randomUUID() }
 
+// Node clipboard (module-level so Ctrl+C in one workflow tab can be pasted in
+// another — the canvas remounts per tab but the module survives).
+const _nodeClipboard: { current: { nodes: Node[]; edges: Edge[]; pastes: number } | null } = { current: null }
+
 function newWorkflow(): Workflow {
   const now = new Date().toISOString()
   return { id: newId(), name: 'New Workflow', description: '', nodes: [], edges: [], createdAt: now, updatedAt: now }
-}
-
-function newWorkflowFromTemplate(): Workflow {
-  const now         = new Date().toISOString()
-  const imageNodeId = newId()
-  const outputNodeId = newId()
-  return {
-    id:          newId(),
-    name:        'New Workflow',
-    description: '',
-    nodes: [
-      { id: imageNodeId,  type: 'imageNode',  position: { x: 150, y: 180 }, data: { enabled: true, params: {}, showInGenerate: true } },
-      { id: outputNodeId, type: 'outputNode', position: { x: 500, y: 180 }, data: { enabled: true, params: {} } },
-    ],
-    edges: [
-      { id: newId(), source: imageNodeId, target: outputNodeId, type: 'workflowEdge' },
-    ],
-    createdAt: now,
-    updatedAt: now,
-  }
-}
-
-// ─── New workflow modal ───────────────────────────────────────────────────────
-
-function NewWorkflowModal({ onBlank, onTemplate, onClose }: {
-  onBlank:    () => void
-  onTemplate: () => void
-  onClose:    () => void
-}) {
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-[2px]"
-      onMouseDown={onClose}
-    >
-      <div
-        className="w-80 bg-zinc-900 border border-zinc-700/80 rounded-2xl shadow-2xl overflow-hidden"
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <div className="px-5 py-4 border-b border-zinc-800">
-          <h2 className="text-sm font-semibold text-zinc-100">New Workflow</h2>
-          <p className="text-[11px] text-zinc-500 mt-0.5">Choose how to start</p>
-        </div>
-
-        <div className="p-4 grid grid-cols-2 gap-3">
-          {/* Blank */}
-          <button
-            onClick={onBlank}
-            className="flex flex-col items-center gap-3 px-3 py-5 rounded-xl border border-zinc-800 hover:border-zinc-600 hover:bg-zinc-800/40 transition-all"
-          >
-            <div className="w-10 h-10 rounded-xl bg-zinc-800 border border-zinc-700/60 flex items-center justify-center text-zinc-500">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <rect x="3" y="3" width="18" height="18" rx="2"/>
-              </svg>
-            </div>
-            <div className="text-center">
-              <p className="text-xs font-semibold text-zinc-200">Blank</p>
-              <p className="text-[10px] text-zinc-500 mt-0.5 leading-relaxed">Empty canvas</p>
-            </div>
-          </button>
-
-          {/* Starter template */}
-          <button
-            onClick={onTemplate}
-            className="flex flex-col items-center gap-3 px-3 py-5 rounded-xl border border-zinc-800 hover:border-accent/40 hover:bg-accent/5 transition-all"
-          >
-            <div className="w-10 h-10 rounded-xl bg-accent/10 border border-accent/25 flex items-center justify-center text-accent-light">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <rect x="3" y="3" width="6" height="5" rx="1"/>
-                <path d="M9 5.5h6"/>
-                <rect x="15" y="3" width="6" height="5" rx="1"/>
-              </svg>
-            </div>
-            <div className="text-center">
-              <p className="text-xs font-semibold text-zinc-200">Starter</p>
-              <p className="text-[10px] text-zinc-500 mt-0.5 leading-relaxed">Image → Scene</p>
-            </div>
-          </button>
-        </div>
-      </div>
-    </div>
-  )
 }
 
 // ─── Extensions panel ────────────────────────────────────────────────────────
@@ -159,6 +101,8 @@ const PANEL_BUILTIN_NODES = [
   { type: 'outputNode',  label: 'Add to Scene',   color: '#a78bfa', icon: <><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></> },
   { type: 'previewNode', label: 'Preview Views',  color: '#38bdf8', icon: <><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></> },
   { type: 'waitNode',    label: 'Wait',           color: '#71717a', icon: <><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></> },
+  { type: 'whileNode',   label: 'While',          color: '#f59e0b', icon: <><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></> },
+  { type: 'forEachNode', label: 'For Each', color: '#38bdf8', icon: <><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></> },
 ]
 
 function ExtGroupHeader({ title, author, expanded, onToggle, count }: { title: string; author?: string; expanded: boolean; onToggle: () => void; count: number }) {
@@ -195,7 +139,7 @@ function ExtensionsPanel({ allExtensions, open }: { allExtensions: WorkflowExten
     const onMove = (e: MouseEvent) => {
       if (!dragging.current) return
       const delta = startX.current - e.clientX
-      setWidth((w) => Math.min(PANEL_MAX, Math.max(PANEL_MIN, startW.current + delta)))
+      setWidth(() => Math.min(PANEL_MAX, Math.max(PANEL_MIN, startW.current + delta)))
     }
     const onUp = () => { dragging.current = false; document.body.style.cursor = '' }
     document.addEventListener('mousemove', onMove)
@@ -403,6 +347,8 @@ const BUILTIN_NODES = [
   { type: 'outputNode',  label: 'Add to Scene',   color: '#a78bfa', description: 'Output node — adds the mesh to the 3D scene' },
   { type: 'previewNode', label: 'Preview Views',  color: '#38bdf8', description: 'Displays multi-view image outputs in a 2×3 grid' },
   { type: 'waitNode',    label: 'Wait',           color: '#71717a', description: 'Pauses the workflow until you click Continue' },
+  { type: 'whileNode',   label: 'While',          color: '#f59e0b', description: 'Container: wrap nodes to loop them N times or with Continue/Retry' },
+  { type: 'forEachNode', label: 'For Each', color: '#38bdf8', description: 'Iterates a folder (image / text / mesh) alphabetically, one item per run of the downstream nodes' },
 ]
 
 type PaletteItem =
@@ -479,6 +425,7 @@ function NodePalette({
     }
 
     return { groups, totalItems: flatIdx }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- isExpanded only reads `collapsed`, already a dep
   }, [q, allExtensions, nonBuiltinMap, collapsed])
 
   useEffect(() => { setActiveIndex(0) }, [query])
@@ -605,13 +552,20 @@ function HelpModal({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     window.electron.fs.readScreenshotDataUrl('workflow-helper.png').then(setHelperImg).catch(() => {})
   }, [])
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
   return createPortal(
     <div
-      className="fixed inset-0 z-[9999] flex items-center justify-center"
-      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-zinc-950/70 backdrop-blur-sm"
+      onMouseDown={onClose}
     >
-      <div className="absolute inset-0 bg-zinc-950/70 backdrop-blur-sm" />
-      <div className="relative w-[520px] max-h-[80vh] rounded-2xl bg-zinc-900 border border-zinc-700/60 shadow-2xl overflow-hidden flex flex-col">
+      <div
+        className="w-[520px] max-h-[80vh] rounded-2xl bg-zinc-900 border border-zinc-700/60 shadow-2xl overflow-hidden flex flex-col"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
 
         {/* Header */}
         <div className="sticky top-0 flex items-center justify-between px-5 py-4 border-b border-zinc-800 bg-zinc-900 z-10">
@@ -769,19 +723,17 @@ function getNodeInputType(
 // ─── Workflow canvas (inner, requires ReactFlowProvider) ──────────────────────
 
 function WorkflowCanvasInner({
-  workflow, allExtensions, onSave, onDelete, onExport, panelOpen, onTogglePanel, onNew, onImport,
+  workflow, allExtensions, onSave, panelOpen, onTogglePanel, onOpen, onImport,
 }: {
   workflow:         Workflow
   allExtensions:    WorkflowExtension[]
   onSave:           (w: Workflow) => void
-  onDelete:         () => void
-  onExport:         () => void
   panelOpen:        boolean
   onTogglePanel:    () => void
-  onNew:            () => void
+  onOpen:           () => void
   onImport:         () => void
 }) {
-  const { screenToFlowPosition, updateNodeData, getNode } = useReactFlow()
+  const { screenToFlowPosition, getNode } = useReactFlow()
   const { runState, run: runWorkflow, cancel } = useWorkflowRunStore()
   const currentMeshUrl = useAppStore((s) => s.currentJob?.outputUrl)
   const showToast = useAppStore((s) => s.showToast)
@@ -789,7 +741,6 @@ function WorkflowCanvasInner({
 
   const [nodes, setNodes, onNodesChange] = useNodesState(workflow.nodes as Node[])
   const [edges, setEdges, onEdgesChange] = useEdgesState(workflow.edges as Edge[])
-  const [name, setName]       = useState(workflow.name)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
 
@@ -803,8 +754,8 @@ function WorkflowCanvasInner({
   const didMountRef = useRef(false)
 
   // ─── Undo / Redo ──────────────────────────────────────────────────────────
-  type Snapshot = { nodes: Node[]; edges: Edge[]; name: string }
-  const historyRef  = useRef<Snapshot[]>([{ nodes: workflow.nodes as Node[], edges: workflow.edges as Edge[], name: workflow.name }])
+  type Snapshot = { nodes: Node[]; edges: Edge[] }
+  const historyRef  = useRef<Snapshot[]>([{ nodes: workflow.nodes as Node[], edges: workflow.edges as Edge[] }])
   const histIdxRef  = useRef(0)
   const [histIdx, setHistIdx] = useState(0)
   const skipPushRef = useRef(true) // skip the initial autosave-triggered push
@@ -813,11 +764,11 @@ function WorkflowCanvasInner({
   useEffect(() => {
     setNodes(workflow.nodes as Node[])
     setEdges(workflow.edges as Edge[])
-    setName(workflow.name)
-    historyRef.current = [{ nodes: workflow.nodes as Node[], edges: workflow.edges as Edge[], name: workflow.name }]
+    historyRef.current = [{ nodes: workflow.nodes as Node[], edges: workflow.edges as Edge[] }]
     histIdxRef.current = 0
     setHistIdx(0)
     skipPushRef.current = true
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- re-sync only when the workflow switches; adding nodes/edges would reset the editor on every change
   }, [workflow.id])
 
   // Auto-save + history push debounced
@@ -826,7 +777,6 @@ function WorkflowCanvasInner({
     saveTimer.current = setTimeout(() => {
       const updated: Workflow = {
         ...workflow,
-        name,
         nodes: nodes as WFNode[],
         edges: edges as WFEdge[],
         updatedAt: new Date().toISOString(),
@@ -835,7 +785,7 @@ function WorkflowCanvasInner({
 
       if (!skipPushRef.current) {
         const next = historyRef.current.slice(0, histIdxRef.current + 1)
-        next.push({ nodes, edges, name })
+        next.push({ nodes, edges })
         if (next.length > 50) next.shift()
         historyRef.current = next
         const newIdx = next.length - 1
@@ -845,18 +795,18 @@ function WorkflowCanvasInner({
       skipPushRef.current = false
     }, 500)
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current) }
-  }, [nodes, edges, name])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- debounce on editable state; latest workflow/onSave read in the timeout
+  }, [nodes, edges])
 
   const preflightIssues = useMemo(() => {
     const draft: Workflow = {
       ...workflow,
-      name,
       nodes: nodes as WFNode[],
       edges: edges as WFEdge[],
       updatedAt: workflow.updatedAt,
     }
     return validateWorkflowPreflight(draft, allExtensions, { currentMeshUrl })
-  }, [workflow, name, nodes, edges, allExtensions, currentMeshUrl])
+  }, [workflow, nodes, edges, allExtensions, currentMeshUrl])
 
   useEffect(() => {
     if (!didMountRef.current) {
@@ -881,7 +831,6 @@ function WorkflowCanvasInner({
     skipPushRef.current = true
     setNodes(snap.nodes)
     setEdges(snap.edges)
-    setName(snap.name)
     histIdxRef.current = newIdx
     setHistIdx(newIdx)
   }, [setNodes, setEdges])
@@ -894,7 +843,6 @@ function WorkflowCanvasInner({
     skipPushRef.current = true
     setNodes(snap.nodes)
     setEdges(snap.edges)
-    setName(snap.name)
     histIdxRef.current = newIdx
     setHistIdx(newIdx)
   }, [setNodes, setEdges])
@@ -902,7 +850,7 @@ function WorkflowCanvasInner({
   const canUndo = histIdx > 0
   const canRedo = histIdx < historyRef.current.length - 1
 
-  const isValidConnection = useCallback((connection: Connection) => {
+  const isValidConnection = useCallback((connection: Edge | Connection) => {
     const srcType = getNodeOutputType(getNode(connection.source) as Node, allExtensions)
     const tgtType = getNodeInputType(getNode(connection.target) as Node, connection.targetHandle, allExtensions)
     if (srcType && tgtType && srcType !== tgtType) return false  // type mismatch (unknown types allowed)
@@ -922,7 +870,7 @@ function WorkflowCanvasInner({
     return true
   }, [getNode, allExtensions, edges])
 
-  const onConnectStart = useCallback((_: React.MouseEvent | React.TouchEvent, params: OnConnectStartParams) => {
+  const onConnectStart = useCallback((_: MouseEvent | TouchEvent, params: OnConnectStartParams) => {
     pendingConnectionRef.current  = params
     connectionCompletedRef.current = false
   }, [])
@@ -937,9 +885,13 @@ function WorkflowCanvasInner({
       pendingConnectionRef.current = null
       return
     }
-    // Dropped on empty canvas (not on a handle or node body)
+    // Dropped on empty canvas — or inside a While body — opens the palette. The
+    // While is a giant node, so don't treat its empty body as "dropped on a node";
+    // bail only on a real node or a handle.
     const target = event.target as Element
-    if (target.closest('.react-flow__node') || target.closest('.react-flow__handle')) {
+    const nodeEl = target.closest('.react-flow__node')
+    const onContainer = !!nodeEl && [...CONTAINER_TYPES].some((t) => nodeEl.classList.contains(`react-flow__node-${t}`))
+    if (target.closest('.react-flow__handle') || (nodeEl && !onContainer)) {
       pendingConnectionRef.current = null
       return
     }
@@ -959,19 +911,34 @@ function WorkflowCanvasInner({
 
     const nodeType = e.dataTransfer.getData(DRAG_NODE_KEY)
     if (nodeType) {
-      setNodes((nds) => [...nds, {
-        id: newId(), type: nodeType, position,
-        data: { enabled: true, params: {} } as WFNodeData,
-      }])
+      const isContainer = isContainerType(nodeType)
+      setNodes((nds) => {
+        const parent = isContainer ? undefined : findWhileContainerAt(nds, position)
+        const node: Node = {
+          id: newId(), type: nodeType,
+          position: parent ? { x: position.x - parent.position.x, y: position.y - parent.position.y } : position,
+          data: { enabled: true, params: {} } as WFNodeData,
+          ...(isContainer ? { style: { width: 420, height: 240 }, width: 420, height: 240 } : {}),
+          ...(parent ? { parentId: parent.id } : {}),
+        }
+        // Containers must sit before their future children in the array → prepend.
+        return isContainer ? [node, ...nds] : [...nds, node]
+      })
       return
     }
 
     const extensionId = e.dataTransfer.getData(DRAG_KEY)
     if (!extensionId) return
-    setNodes((nds) => [...nds, {
-      id: newId(), type: 'extensionNode', position,
-      data: { extensionId, enabled: true, params: {} } as WFNodeData,
-    }])
+    setNodes((nds) => {
+      const parent = findWhileContainerAt(nds, position)
+      const node: Node = {
+        id: newId(), type: 'extensionNode',
+        position: parent ? { x: position.x - parent.position.x, y: position.y - parent.position.y } : position,
+        data: { extensionId, enabled: true, params: {} } as WFNodeData,
+        ...(parent ? { parentId: parent.id } : {}),
+      }
+      return [...nds, node]
+    })
   }, [screenToFlowPosition, setNodes])
 
   // Keyboard shortcuts (Space, Ctrl+Z, Ctrl+Y / Ctrl+Shift+Z)
@@ -998,24 +965,105 @@ function WorkflowCanvasInner({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [undo, redo])
 
+  // Copy/paste selected nodes (Ctrl+C / Ctrl+V) — works across workflow tabs
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return
+      if (!(e.ctrlKey || e.metaKey) || e.shiftKey) return
+
+      if (e.key === 'c') {
+        const selected = nodes.filter((n) => n.selected)
+        if (selected.length === 0) return
+        const selIds = new Set(selected.map((n) => n.id))
+        const copied = selected.map((n) => {
+          // Child copied without its container → detach to absolute coordinates
+          if (n.parentId && !selIds.has(n.parentId)) {
+            const parent = nodes.find((p) => p.id === n.parentId)
+            return {
+              ...structuredClone(n),
+              parentId: undefined,
+              position: { x: n.position.x + (parent?.position.x ?? 0), y: n.position.y + (parent?.position.y ?? 0) },
+            }
+          }
+          return structuredClone(n)
+        })
+        const copiedEdges = edges
+          .filter((ed) => selIds.has(ed.source) && selIds.has(ed.target))
+          .map((ed) => structuredClone(ed))
+        _nodeClipboard.current = { nodes: copied, edges: copiedEdges, pastes: 0 }
+        return
+      }
+
+      if (e.key === 'v') {
+        const clip = _nodeClipboard.current
+        if (!clip || clip.nodes.length === 0) return
+        clip.pastes += 1
+        const offset = 32 * clip.pastes
+        const idMap = new Map(clip.nodes.map((n) => [n.id, newId()]))
+        const pasted: Node[] = clip.nodes.map((n) => {
+          const keepParent = n.parentId != null && idMap.has(n.parentId)
+          return {
+            ...structuredClone(n),
+            id:       idMap.get(n.id)!,
+            parentId: keepParent ? idMap.get(n.parentId!) : undefined,
+            // Children keep their parent-relative position; top-level nodes shift
+            // a bit more on every paste so repeated pastes don't stack.
+            position: keepParent ? n.position : { x: n.position.x + offset, y: n.position.y + offset },
+            selected: true,
+          }
+        })
+        const pastedEdges: Edge[] = clip.edges.map((ed) => ({
+          ...structuredClone(ed),
+          id:     `e-${newId()}`,
+          source: idMap.get(ed.source)!,
+          target: idMap.get(ed.target)!,
+        }))
+        setNodes((nds) => [...nds.map((n) => ({ ...n, selected: false })), ...pasted])
+        setEdges((eds) => [...eds, ...pastedEdges])
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [nodes, edges, setNodes, setEdges])
+
   const addNodeFromPalette = useCallback((type: string, extensionId?: string) => {
     const position = screenToFlowPosition(
       pendingDropPos ?? { x: window.innerWidth / 2, y: window.innerHeight / 2 }
     )
     const newNodeId = newId()
-    setNodes((nds) => [...nds, {
-      id: newNodeId, type, position,
-      data: { extensionId, enabled: true, params: {} } as WFNodeData,
-    }])
+    const isContainer = isContainerType(type)
+    setNodes((nds) => {
+      const parent = isContainer ? undefined : findWhileContainerAt(nds, position)
+      const node: Node = {
+        id: newNodeId, type,
+        position: parent ? { x: position.x - parent.position.x, y: position.y - parent.position.y } : position,
+        data: { extensionId, enabled: true, params: {} } as WFNodeData,
+        ...(isContainer ? { style: { width: 420, height: 240 }, width: 420, height: 240 } : {}),
+        ...(parent ? { parentId: parent.id } : {}),
+      }
+      // Containers must sit before their future children in the array → prepend.
+      return isContainer ? [node, ...nds] : [...nds, node]
+    })
 
-    // If palette was opened from a connection drag, wire the edge automatically
+    // If palette was opened from a connection drag, wire the edge automatically.
+    // ExtensionNodes use id'd handles (input-0 / output), not the default null
+    // handle, so the new node's side must reference them or React Flow can't place
+    // the edge ("Couldn't create edge for target handle id: null").
     const pending = pendingConnectionRef.current
     if (pending?.nodeId) {
       const isSource = pending.handleType === 'source'
-      const edge = isSource
-        ? { id: newId(), source: pending.nodeId, sourceHandle: pending.handleId ?? undefined, target: newNodeId }
-        : { id: newId(), source: newNodeId, target: pending.nodeId, targetHandle: pending.handleId ?? undefined }
-      setEdges((eds) => addEdge({ ...edge, ...DEFAULT_EDGE_OPTS }, eds))
+      const isExt = type === 'extensionNode'
+      // Skip wiring when the new node can't take the connection: a source-only node
+      // (Image/Text/Mesh) as target, or a sink-only node (Add to Scene/Preview) as
+      // source — those have no matching handle and would orphan the edge.
+      const canWire = isSource ? !NODE_TYPES_WITHOUT_TARGET.has(type) : !NODE_TYPES_WITHOUT_SOURCE.has(type)
+      if (canWire) {
+        const edge = isSource
+          ? { id: newId(), source: pending.nodeId, sourceHandle: pending.handleId ?? undefined, target: newNodeId, targetHandle: isExt ? 'input-0' : undefined }
+          : { id: newId(), source: newNodeId, sourceHandle: isExt ? 'output' : undefined, target: pending.nodeId, targetHandle: pending.handleId ?? undefined }
+        setEdges((eds) => addEdge({ ...edge, ...DEFAULT_EDGE_OPTS }, eds))
+      }
     }
 
     pendingConnectionRef.current = null
@@ -1023,16 +1071,78 @@ function WorkflowCanvasInner({
     setPaletteOpen(false)
   }, [screenToFlowPosition, setNodes, setEdges, pendingDropPos])
 
+  // When a While container is deleted (button or keyboard), detach its children
+  // to absolute coordinates so they don't get orphaned to the canvas origin.
+  const onNodesDelete = useCallback((deleted: Node[]) => {
+    const removedContainers = deleted.filter((n) => isContainerType(n.type))
+    if (removedContainers.length === 0) return
+    setNodes((nds) => nds.map((n) => {
+      const container = removedContainers.find((c) => c.id === n.parentId)
+      if (!container) return n
+      const { parentId: _p, extent: _ext, ...rest } = n
+      return { ...rest, position: { x: container.position.x + n.position.x, y: container.position.y + n.position.y } }
+    }))
+  }, [setNodes])
+
+  // When a node is dropped, attach/detach it to a While container based on overlap.
+  // Children get a parentId + parent-relative position (no extent, so they can be dragged back out).
+  const onNodeDragStop = useCallback((_e: unknown, dragged: Node) => {
+    if (isContainerType(dragged.type)) return
+    setNodes((nds) => {
+      const containers = nds.filter((n) => isContainerType(n.type))
+      if (containers.length === 0 && !dragged.parentId) return nds
+
+      const parent = dragged.parentId ? nds.find((n) => n.id === dragged.parentId) : undefined
+      const absX = (parent?.position.x ?? 0) + dragged.position.x
+      const absY = (parent?.position.y ?? 0) + dragged.position.y
+      const w = dragged.measured?.width  ?? dragged.width  ?? 200
+      const h = dragged.measured?.height ?? dragged.height ?? 80
+      const cx = absX + w / 2
+      const cy = absY + h / 2
+
+      const container = containers.find((g) => {
+        const gw = (g.measured?.width  ?? g.width  ?? (g.style?.width  as number)) || 0
+        const gh = (g.measured?.height ?? g.height ?? (g.style?.height as number)) || 0
+        return cx >= g.position.x && cx <= g.position.x + gw && cy >= g.position.y && cy <= g.position.y + gh
+      })
+
+      const newParentId = container?.id
+      if (newParentId === dragged.parentId) return nds   // no change
+
+      const next: Node[] = nds.map((n) => {
+        if (n.id !== dragged.id) return n
+        if (container) {
+          // parentId (no extent) → child moves with the container but can still be dragged out
+          return { ...n, parentId: container.id,
+                   position: { x: absX - container.position.x, y: absY - container.position.y } }
+        }
+        const { parentId: _p, extent: _ext, ...rest } = n   // detach
+        return { ...rest, position: { x: absX, y: absY } }
+      })
+
+      // ReactFlow requires the parent to appear before its child in the array.
+      if (newParentId) {
+        const cIdx = next.findIndex((n) => n.id === dragged.id)
+        const pIdx = next.findIndex((n) => n.id === newParentId)
+        if (pIdx > cIdx) {
+          const [child] = next.splice(cIdx, 1)
+          next.splice(next.findIndex((n) => n.id === newParentId) + 1, 0, child)
+        }
+      }
+      return next
+    })
+  }, [setNodes])
+
   const handleRun = useCallback(() => {
     if (isRunning) { cancel(); return }
     if (preflightIssues.length > 0) {
       showToast(preflightIssues[0].message)
       return
     }
-    const wf: Workflow = { ...workflow, name, nodes: nodes as WFNode[], edges: edges as WFEdge[], updatedAt: new Date().toISOString() }
+    const wf: Workflow = { ...workflow, nodes: nodes as WFNode[], edges: edges as WFEdge[], updatedAt: new Date().toISOString() }
     onSave(wf)
     runWorkflow(wf, allExtensions)
-  }, [workflow, name, nodes, edges, onSave, allExtensions, isRunning, runWorkflow, cancel, preflightIssues, showToast])
+  }, [workflow, nodes, edges, onSave, allExtensions, isRunning, runWorkflow, cancel, preflightIssues, showToast])
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden">
@@ -1052,16 +1162,16 @@ function WorkflowCanvasInner({
       {/* Header toolbar */}
       <div className="flex items-center gap-2 px-5 py-3 border-b border-zinc-800 shrink-0 bg-zinc-950/20">
 
-        {/* New */}
+        {/* Open */}
         <button
-          onClick={onNew}
-          title="New workflow"
+          onClick={onOpen}
+          title="Open workflow"
           className="flex items-center gap-2 px-3.5 py-2 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 transition-colors shrink-0"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
           </svg>
-          <span className="text-sm font-medium">New</span>
+          <span className="text-sm font-medium">Open</span>
         </button>
 
         {/* Import */}
@@ -1103,17 +1213,6 @@ function WorkflowCanvasInner({
           </svg>
         </button>
 
-        <div className="w-px h-6 bg-zinc-800 mx-0.5 shrink-0" />
-
-        {/* Name input */}
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
-          placeholder="Workflow name…"
-          className="flex-1 min-w-0 bg-zinc-800 border border-zinc-700/80 rounded-md px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-accent/60"
-        />
-
         <div className="flex-1" />
 
         <div className="flex items-center gap-1">
@@ -1147,30 +1246,6 @@ function WorkflowCanvasInner({
               <span className="text-[11px] text-zinc-400 truncate">{runState.blockStep}</span>
             </div>
           )}
-
-          {/* Export */}
-          <button
-            onClick={onExport}
-            className="p-2.5 rounded-lg text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 transition-colors"
-            title="Export JSON"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-              <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-            </svg>
-          </button>
-
-          {/* Delete */}
-          <button
-            onClick={onDelete}
-            className="p-2.5 rounded-lg text-zinc-600 hover:text-red-400 hover:bg-red-950/30 border border-zinc-800 hover:border-red-800/40 transition-colors"
-            title="Delete workflow"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polyline points="3 6 5 6 21 6"/>
-              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-            </svg>
-          </button>
 
           {/* Help */}
           <button
@@ -1218,6 +1293,8 @@ function WorkflowCanvasInner({
           nodeTypes={NODE_TYPES}
           edgeTypes={EDGE_TYPES}
           onNodesChange={onNodesChange}
+          onNodeDragStop={onNodeDragStop}
+          onNodesDelete={onNodesDelete}
           onEdgesChange={onEdgesChange}
           onConnectStart={onConnectStart}
           onConnect={onConnect}
@@ -1239,40 +1316,444 @@ function WorkflowCanvasInner({
   )
 }
 
+// ─── Mini graph preview ───────────────────────────────────────────────────────
+// Schematic thumbnail of a workflow's graph for the Open popup cards — plain
+// SVG built from stored node positions, no React Flow instance needed.
+
+// Node tint by role, echoing the real canvas: inputs green, processing violet,
+// outputs blue, everything else neutral.
+const MINI_NODE_TINTS: Record<string, { fill: string; stroke: string }> = {
+  imageNode:     { fill: 'rgba(52,211,153,0.22)',  stroke: '#34d399' },
+  textNode:      { fill: 'rgba(52,211,153,0.22)',  stroke: '#34d399' },
+  meshNode:      { fill: 'rgba(52,211,153,0.22)',  stroke: '#34d399' },
+  extensionNode: { fill: 'rgba(167,139,250,0.24)', stroke: '#a78bfa' },
+  outputNode:    { fill: 'rgba(56,189,248,0.22)',  stroke: '#38bdf8' },
+  previewNode:   { fill: 'rgba(56,189,248,0.22)',  stroke: '#38bdf8' },
+}
+const MINI_NODE_DEFAULT_TINT = { fill: 'rgba(113,113,122,0.25)', stroke: '#71717a' }
+
+function WorkflowMiniPreview({ wf }: { wf: Workflow }): JSX.Element {
+  const VIEW_W = 200
+  const VIEW_H = 88
+  const PAD = 12
+
+  if (wf.nodes.length === 0) {
+    return (
+      <div className="flex items-center justify-center w-full h-full text-zinc-700">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <rect x="3" y="3" width="7" height="5" rx="1"/><rect x="14" y="16" width="7" height="5" rx="1"/>
+          <path d="M10 5.5h5a2 2 0 0 1 2 2V16"/>
+        </svg>
+      </div>
+    )
+  }
+
+  // Children of a container store positions relative to their parent
+  const byId  = new Map(wf.nodes.map((n) => [n.id, n]))
+  const boxes = wf.nodes.map((n) => {
+    const parent = n.parentId ? byId.get(n.parentId) : undefined
+    return {
+      id:   n.id,
+      type: n.type,
+      x:    n.position.x + (parent?.position.x ?? 0),
+      y:    n.position.y + (parent?.position.y ?? 0),
+      w:    n.width ?? (n.style?.width  as number | undefined) ?? 150,
+      h:    n.height ?? (n.style?.height as number | undefined) ?? 48,
+    }
+  })
+  const boxById = new Map(boxes.map((b) => [b.id, b]))
+
+  const minX  = Math.min(...boxes.map((b) => b.x))
+  const minY  = Math.min(...boxes.map((b) => b.y))
+  const maxX  = Math.max(...boxes.map((b) => b.x + b.w))
+  const maxY  = Math.max(...boxes.map((b) => b.y + b.h))
+  // Cap the scale so a near-empty graph doesn't blow one node up to card size
+  const scale = Math.min(
+    (VIEW_W - PAD * 2) / Math.max(maxX - minX, 1),
+    (VIEW_H - PAD * 2) / Math.max(maxY - minY, 1),
+    0.5,
+  )
+  const offX = (VIEW_W - (maxX - minX) * scale) / 2
+  const offY = (VIEW_H - (maxY - minY) * scale) / 2
+  const tx   = (x: number): number => offX + (x - minX) * scale
+  const ty   = (y: number): number => offY + (y - minY) * scale
+
+  // While containers render as dashed outlines behind the flow
+  const containers = boxes.filter((b) => b.type === 'whileNode')
+  const plain      = boxes.filter((b) => b.type !== 'whileNode')
+
+  return (
+    <svg viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} className="w-full h-full" preserveAspectRatio="xMidYMid meet">
+      <defs>
+        <pattern id="wf-mini-grid" width="11" height="11" patternUnits="userSpaceOnUse">
+          <circle cx="1" cy="1" r="0.8" fill="#27272a" />
+        </pattern>
+      </defs>
+      <rect width={VIEW_W} height={VIEW_H} fill="url(#wf-mini-grid)" />
+      {containers.map((b) => (
+        <rect
+          key={b.id}
+          x={tx(b.x)} y={ty(b.y)}
+          width={Math.max(b.w * scale, 3)} height={Math.max(b.h * scale, 3)}
+          rx="3" fill="rgba(113,113,122,0.06)" stroke="#52525b" strokeWidth="0.75" strokeDasharray="2.5 2"
+        />
+      ))}
+      {wf.edges.map((e) => {
+        const s = boxById.get(e.source)
+        const t = boxById.get(e.target)
+        if (!s || !t) return null
+        const x1 = tx(s.x + s.w), y1 = ty(s.y + s.h / 2)
+        const x2 = tx(t.x),       y2 = ty(t.y + t.h / 2)
+        const d  = Math.max(Math.abs(x2 - x1) * 0.45, 6)
+        return (
+          <path
+            key={e.id}
+            d={`M ${x1} ${y1} C ${x1 + d} ${y1}, ${x2 - d} ${y2}, ${x2} ${y2}`}
+            fill="none" stroke="#5b5b66" strokeWidth="1" strokeLinecap="round" opacity="0.9"
+          />
+        )
+      })}
+      {plain.map((b) => {
+        const tint = MINI_NODE_TINTS[b.type] ?? MINI_NODE_DEFAULT_TINT
+        return (
+          <rect
+            key={b.id}
+            x={tx(b.x)} y={ty(b.y)}
+            width={Math.max(b.w * scale, 3)} height={Math.max(b.h * scale, 3)}
+            rx="2" fill={tint.fill} stroke={tint.stroke} strokeWidth="0.75"
+          />
+        )
+      })}
+    </svg>
+  )
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function WorkflowsPage(): JSX.Element {
-  const { workflows, loading, activeId, load, save, remove, importFile, exportFile, setActive } = useWorkflowsStore()
+  const { workflows, loading, activeId, openIds, folders, folderColors, bookmarkedFolders, load, save, remove, importFile, exportFile, setActive, openWorkflow, closeWorkflow, moveOpenTab, addFolder, removeFolder, setFolderColor, toggleFolderBookmark } = useWorkflowsStore()
   const { modelExtensions, processExtensions, loadExtensions } = useExtensionsStore()
 
   const [panelOpen, setPanelOpen] = useState(true)
+  const [tabMenu, setTabMenu] = useState<{ id: string; x: number; y: number } | null>(null)
+  const [renameTarget, setRenameTarget] = useState<{ id: string; value: string } | null>(null)
+  const [openListVisible, setOpenListVisible] = useState(false)
+  const [openSearch, setOpenSearch] = useState('')
+  const [newFolderName, setNewFolderName] = useState<string | null>(null)   // null = input hidden
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set())
+  const [dragOverFolder, setDragOverFolder] = useState<string | null>(null) // '' = root area
+  const [dragOverTab, setDragOverTab] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)     // workflow id pending deletion
+  const [colorPickerFolder, setColorPickerFolder] = useState<string | null>(null)
+
+  // Folder color of a workflow, if it lives in a colored folder
+  const workflowColor = (wf: Workflow): string | undefined =>
+    wf.folder ? folderColors[wf.folder] : undefined
+
+  // Tab of the workflow currently executing (dot indicator), if any
+  const runningWorkflowId = useWorkflowRunStore((s) =>
+    s.runState.status === 'running' || s.runState.status === 'paused' ? s.activeWorkflowId : null,
+  )
+
+  // Close the tab context menu on any outside click (it has no backdrop of its own)
+  useEffect(() => {
+    if (!tabMenu) return
+    const close = (): void => setTabMenu(null)
+    window.addEventListener('mousedown', close)
+    return () => window.removeEventListener('mousedown', close)
+  }, [tabMenu])
+
+  // Escape closes whichever popup is topmost, regardless of what's focused —
+  // relying on a focused element's own onKeyDown would miss presses right after
+  // a popup opens (before anything inside it has focus).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return
+      if (deleteTarget)          { setDeleteTarget(null); return }
+      if (renameTarget)          { setRenameTarget(null); return }
+      if (newFolderName !== null) { setNewFolderName(null); return }
+      if (tabMenu)               { setTabMenu(null); return }
+      if (openListVisible)       { setOpenListVisible(false); return }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [deleteTarget, renameTarget, newFolderName, tabMenu, openListVisible])
+
+  // Browser-style tab shortcuts: Ctrl+T new, Ctrl+W close, Ctrl(+Shift)+Tab cycle
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (!(e.ctrlKey || e.metaKey)) return
+      if (e.key === 't' && !e.shiftKey) {
+        e.preventDefault()
+        handleCreateBlank()
+      } else if (e.key === 'w' && !e.shiftKey) {
+        e.preventDefault()
+        if (activeId) handleCloseTab(activeId)
+      } else if (e.key === 'Tab') {
+        e.preventDefault()
+        if (openIds.length < 2 || !activeId) return
+        const idx  = openIds.indexOf(activeId)
+        const next = e.shiftKey ? (idx - 1 + openIds.length) % openIds.length : (idx + 1) % openIds.length
+        setActive(openIds[next])
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- store setters are stable; handleCreateBlank only uses them
+  }, [activeId, openIds])
+
+  // Fresh search / closed color picker each time the Open popup opens
+  useEffect(() => {
+    if (!openListVisible) { setOpenSearch(''); setColorPickerFolder(null) }
+  }, [openListVisible])
 
   const allExtensions = useMemo(
     () => buildAllWorkflowExtensions(modelExtensions, processExtensions),
     [modelExtensions, processExtensions],
   )
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- load once on mount
   useEffect(() => { load(); loadExtensions() }, [])
 
-  // Auto-select first workflow when none is active or the active id no longer exists
+  // Auto-select the first open tab when none is active or the active id is gone
   useEffect(() => {
     if (loading) return
-    if (workflows.length === 0) return
-    if (activeId && workflows.find((w) => w.id === activeId)) return
-    setActive(workflows[0].id)
-  }, [workflows, loading, activeId])
+    if (openIds.length === 0) return
+    if (activeId && openIds.includes(activeId) && workflows.find((w) => w.id === activeId)) return
+    setActive(openIds[0])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setActive is a stable store setter
+  }, [workflows, loading, activeId, openIds])
 
+  const openWorkflows  = openIds.map((id) => workflows.find((w) => w.id === id)).filter((w): w is Workflow => !!w)
   const activeWorkflow = workflows.find((w) => w.id === activeId) ?? null
 
   async function handleCreateBlank() {
     const wf = newWorkflow()
     await save(wf)
-    setActive(wf.id)
+    openWorkflow(wf.id)
   }
 
   async function handleImport() {
     const result = await importFile()
-    if (result.success && result.workflow) setActive((result.workflow as Workflow).id)
+    if (result.success && result.workflow) openWorkflow((result.workflow as Workflow).id)
+  }
+
+  async function handleRename() {
+    if (!renameTarget) return
+    const wf = workflows.find((w) => w.id === renameTarget.id)
+    const trimmed = renameTarget.value.trim()
+    if (wf && trimmed && trimmed !== wf.name) {
+      await save({ ...wf, name: trimmed, updatedAt: new Date().toISOString() })
+    }
+    setRenameTarget(null)
+  }
+
+  function renderWorkflowCard(wf: Workflow): JSX.Element {
+    const isOpen = openIds.includes(wf.id)
+    const cardActionCls = 'flex items-center justify-center w-5 h-5 rounded-md bg-zinc-900/70 backdrop-blur-sm text-zinc-500 opacity-0 group-hover:opacity-100 transition-all hover:scale-110'
+    return (
+      <div
+        key={wf.id}
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.setData('modly/workflow-id', wf.id)
+          e.dataTransfer.effectAllowed = 'move'
+        }}
+        onClick={() => { openWorkflow(wf.id); setOpenListVisible(false) }}
+        className={`group relative flex flex-col rounded-lg overflow-hidden border cursor-pointer transition-colors
+          ${isOpen ? 'border-violet-500/50 bg-violet-500/10' : 'border-zinc-800 bg-zinc-950/40 hover:border-zinc-700 hover:bg-zinc-800/40'}`}
+      >
+        <div className="relative h-[72px] border-b border-zinc-800/60 bg-zinc-950/50">
+          {workflowColor(wf) && (
+            <div
+              className="absolute inset-0 pointer-events-none"
+              style={{ background: `radial-gradient(ellipse 90% 110% at 50% 45%, ${workflowColor(wf)}30, ${workflowColor(wf)}08 60%, transparent 80%)` }}
+            />
+          )}
+          <WorkflowMiniPreview wf={wf} />
+          <div className="absolute top-1 right-1 flex items-center gap-0.5">
+            <button
+              onClick={(e) => { e.stopPropagation(); handleToggleBookmark(wf.id) }}
+              title={wf.bookmarked ? 'Remove bookmark' : 'Bookmark'}
+              className={`flex items-center justify-center w-5 h-5 rounded-md bg-zinc-900/70 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-all hover:scale-110
+                ${wf.bookmarked ? 'text-amber-400 drop-shadow-[0_0_5px_rgba(251,191,36,0.55)]' : 'text-zinc-500 hover:text-amber-300'}`}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill={wf.bookmarked ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round">
+                <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+              </svg>
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); handleDuplicate(wf.id) }}
+              title="Duplicate"
+              className={`${cardActionCls} hover:text-zinc-200 hover:bg-zinc-700/80`}
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+              </svg>
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); setRenameTarget({ id: wf.id, value: wf.name }) }}
+              title="Rename"
+              className={`${cardActionCls} hover:text-zinc-200 hover:bg-zinc-700/80`}
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
+              </svg>
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); setDeleteTarget(wf.id) }}
+              title="Delete"
+              className={`${cardActionCls} hover:text-red-400 hover:bg-red-950/60`}
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="3 6 5 6 21 6"/>
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div className="px-2.5 py-1.5">
+          <p className="text-xs font-medium text-zinc-200 truncate">{wf.name || 'Untitled'}</p>
+          <p className="text-[10px] text-zinc-600 truncate">{new Date(wf.updatedAt).toLocaleString()}</p>
+        </div>
+      </div>
+    )
+  }
+
+  function renderFolder(folder: string): JSX.Element {
+    const inFolder  = workflows.filter((w) => w.folder === folder).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    const collapsed = collapsedFolders.has(folder)
+    return (
+      <div key={folder}>
+        <div
+          onClick={() => setCollapsedFolders((s) => {
+            const next = new Set(s)
+            if (next.has(folder)) next.delete(folder); else next.add(folder)
+            return next
+          })}
+          onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragOverFolder(folder) }}
+          onDragLeave={() => setDragOverFolder(null)}
+          onDrop={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            setDragOverFolder(null)
+            const id = e.dataTransfer.getData('modly/workflow-id')
+            if (id) handleMoveToFolder(id, folder)
+          }}
+          className={`group flex items-center gap-2 px-4 py-2 cursor-pointer text-zinc-400 hover:text-zinc-200 transition-colors
+            ${dragOverFolder === folder ? 'bg-accent/10 text-accent-light' : ''}`}
+        >
+          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+            className={`shrink-0 transition-transform ${collapsed ? '' : 'rotate-90'}`}>
+            <polyline points="9 18 15 12 9 6"/>
+          </svg>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill={folderColors[folder] ? `${folderColors[folder]}33` : 'none'} stroke={folderColors[folder] ?? 'currentColor'} strokeWidth="2" className="shrink-0">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+          </svg>
+          <span className="text-xs font-medium truncate">{folder}</span>
+          <span className="text-[10px] text-zinc-600">{inFolder.length}</span>
+          <div className="flex-1" />
+          <button
+            onClick={(e) => { e.stopPropagation(); toggleFolderBookmark(folder) }}
+            title={bookmarkedFolders.includes(folder) ? 'Remove bookmark' : 'Bookmark folder'}
+            className={`shrink-0 flex items-center justify-center w-5 h-5 rounded-md opacity-0 group-hover:opacity-100 transition-all hover:scale-110 hover:bg-zinc-800
+              ${bookmarkedFolders.includes(folder) ? 'text-amber-400 drop-shadow-[0_0_5px_rgba(251,191,36,0.55)]' : 'text-zinc-600 hover:text-amber-300'}`}
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill={bookmarkedFolders.includes(folder) ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round">
+              <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+            </svg>
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); setColorPickerFolder((cur) => (cur === folder ? null : folder)) }}
+            title="Folder color"
+            className="shrink-0 flex items-center justify-center w-5 h-5 rounded opacity-0 group-hover:opacity-100 hover:bg-zinc-800 transition-all"
+          >
+            <span className="w-2.5 h-2.5 rounded-full border border-zinc-600" style={{ background: folderColors[folder] ?? 'transparent' }} />
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder) }}
+            title="Delete folder (workflows move to root)"
+            className="shrink-0 flex items-center justify-center w-5 h-5 rounded text-zinc-700 opacity-0 group-hover:opacity-100 hover:text-red-400 hover:bg-red-950/30 transition-all"
+          >
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+            </svg>
+          </button>
+        </div>
+        {colorPickerFolder === folder && (
+          <div className="flex items-center gap-1.5 pl-11 pr-4 py-1.5">
+            {FOLDER_COLORS.map((c) => (
+              <button
+                key={c}
+                onClick={() => { setFolderColor(folder, c); setColorPickerFolder(null) }}
+                className={`w-4 h-4 rounded-full transition-transform hover:scale-125 ${folderColors[folder] === c ? 'ring-2 ring-zinc-400 ring-offset-1 ring-offset-zinc-900' : ''}`}
+                style={{ background: c }}
+              />
+            ))}
+          </div>
+        )}
+        {!collapsed && inFolder.length > 0 && (
+          <div className="grid grid-cols-3 gap-2 pl-8 pr-4 py-1.5">
+            {inFolder.map((wf) => renderWorkflowCard(wf))}
+          </div>
+        )}
+        {!collapsed && inFolder.length === 0 && (
+          <p className="pl-11 pr-5 py-1.5 text-[10px] text-zinc-700 italic">Empty — drag workflows here</p>
+        )}
+      </div>
+    )
+  }
+
+  // Closing the tab of an empty workflow (no nodes) deletes it too — a blank
+  // "New Workflow" the user closes is throwaway, don't let them pile up on disk.
+  // Reads the store directly so a keyboard shortcut never acts on a stale list.
+  function handleCloseTab(id: string) {
+    const wf = useWorkflowsStore.getState().workflows.find((w) => w.id === id)
+    if (wf && wf.nodes.length === 0) { remove(id); return }
+    closeWorkflow(id)
+  }
+
+  async function handleToggleBookmark(id: string) {
+    const wf = workflows.find((w) => w.id === id)
+    if (!wf) return
+    // Not an edit — keep updatedAt so the recency sort doesn't reshuffle
+    await save({ ...wf, bookmarked: !wf.bookmarked })
+  }
+
+  async function handleMoveToFolder(id: string, folder?: string) {
+    const wf = workflows.find((w) => w.id === id)
+    if (!wf || (wf.folder ?? undefined) === folder) return
+    await save({ ...wf, folder })
+  }
+
+  async function handleDeleteFolder(name: string) {
+    for (const wf of workflows.filter((w) => w.folder === name)) {
+      await save({ ...wf, folder: undefined })
+    }
+    removeFolder(name)
+  }
+
+  function handleCreateFolder() {
+    const trimmed = (newFolderName ?? '').trim()
+    if (trimmed) addFolder(trimmed)
+    setNewFolderName(null)
+  }
+
+  async function handleDuplicate(id: string) {
+    const src = workflows.find((w) => w.id === id)
+    if (!src) return
+    const now = new Date().toISOString()
+    const copy: Workflow = {
+      ...structuredClone(src),
+      id:         newId(),
+      name:       `${src.name || 'Untitled'} copy`,
+      bookmarked: undefined,   // a copy isn't the favorite
+      createdAt:  now,
+      updatedAt:  now,
+    }
+    await save(copy)
+    openWorkflow(copy.id)
   }
 
   return (
@@ -1281,30 +1762,349 @@ export default function WorkflowsPage(): JSX.Element {
       {/* Tab bar */}
       {!loading && (
         <div className="flex items-stretch border-b border-zinc-800 bg-zinc-950/30 overflow-x-auto shrink-0 h-9">
-          {workflows.map((wf) => (
+          {openWorkflows.map((wf) => (
             <div
               key={wf.id}
+              draggable
+              onDragStart={(e) => { e.dataTransfer.setData('modly/tab-id', wf.id); e.dataTransfer.effectAllowed = 'move' }}
+              onDragOver={(e) => {
+                if (!e.dataTransfer.types.includes('modly/tab-id')) return
+                e.preventDefault()
+                setDragOverTab(wf.id)
+              }}
+              onDragLeave={() => setDragOverTab((cur) => (cur === wf.id ? null : cur))}
+              onDrop={(e) => {
+                e.preventDefault()
+                setDragOverTab(null)
+                const dragId = e.dataTransfer.getData('modly/tab-id')
+                if (dragId) moveOpenTab(dragId, wf.id)
+              }}
               onClick={() => setActive(wf.id)}
-              onMouseDown={(e) => { if (e.button === 1) { e.preventDefault(); remove(wf.id) } }}
+              onMouseDown={(e) => { if (e.button === 1) { e.preventDefault(); handleCloseTab(wf.id) } }}
+              onContextMenu={(e) => { e.preventDefault(); setTabMenu({ id: wf.id, x: e.clientX, y: e.clientY }) }}
               className={`relative flex items-center gap-1.5 pl-3 pr-1.5 h-full text-[11px] font-medium shrink-0 transition-colors border-b-2 cursor-pointer group
                 ${wf.id === activeId
                   ? 'text-zinc-100 border-accent bg-zinc-900/50'
                   : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/20 border-transparent'
                 }`}
             >
+              {dragOverTab === wf.id && <span className="absolute left-0 top-1 bottom-1 w-0.5 bg-accent rounded" />}
+              {/* Folder color dot; doubles as the running indicator (pulses) */}
+              {(workflowColor(wf) || runningWorkflowId === wf.id) && (
+                <span
+                  className={`w-1.5 h-1.5 rounded-full shrink-0 ${runningWorkflowId === wf.id ? 'animate-pulse' : ''} ${workflowColor(wf) ? '' : 'bg-accent'}`}
+                  title={runningWorkflowId === wf.id ? 'Running' : undefined}
+                  style={workflowColor(wf) ? { background: workflowColor(wf), boxShadow: `0 0 4px ${workflowColor(wf)}80` } : undefined}
+                />
+              )}
               <span className="truncate max-w-[120px]">{wf.name || 'Untitled'}</span>
               <button
-                onClick={(e) => { e.stopPropagation(); remove(wf.id) }}
-                title="Close workflow"
-                className="shrink-0 flex items-center justify-center w-4 h-4 rounded text-zinc-600 hover:text-zinc-300 hover:bg-zinc-700/60 transition-colors"
+                onClick={(e) => { e.stopPropagation(); handleCloseTab(wf.id) }}
+                title="Close tab"
+                className="shrink-0 flex items-center justify-center w-5 h-5 rounded text-zinc-600 hover:text-zinc-300 hover:bg-zinc-700/60 transition-colors"
               >
-                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                   <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
                 </svg>
               </button>
             </div>
           ))}
+          <button
+            onClick={handleCreateBlank}
+            title="New workflow"
+            className="shrink-0 flex items-center justify-center w-9 h-full text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/40 transition-colors"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+          </button>
         </div>
+      )}
+
+      {/* Tab context menu */}
+      {tabMenu && (
+        <div
+          style={{ left: tabMenu.x, top: tabMenu.y }}
+          className="fixed z-50 min-w-[140px] py-1 rounded-lg bg-zinc-900 border border-zinc-700 shadow-xl"
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => {
+              const wf = workflows.find((w) => w.id === tabMenu.id)
+              if (wf) setRenameTarget({ id: wf.id, value: wf.name })
+              setTabMenu(null)
+            }}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 transition-colors"
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0">
+              <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
+            </svg>
+            Rename
+          </button>
+          <button
+            onClick={() => { handleDuplicate(tabMenu.id); setTabMenu(null) }}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 transition-colors"
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0">
+              <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+            </svg>
+            Duplicate
+          </button>
+          <button
+            onClick={() => {
+              const wf = workflows.find((w) => w.id === tabMenu.id)
+              if (wf) exportFile(wf)
+              setTabMenu(null)
+            }}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 transition-colors"
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            Export JSON
+          </button>
+          <div className="my-1 h-px bg-zinc-800" />
+          <button
+            onClick={() => { setDeleteTarget(tabMenu.id); setTabMenu(null) }}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-zinc-400 hover:bg-red-950/40 hover:text-red-400 transition-colors"
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+            </svg>
+            Delete
+          </button>
+        </div>
+      )}
+
+      {/* Rename popup (above the Open popup, which can trigger it) */}
+      {renameTarget && createPortal(
+        <div
+          className="fixed inset-0 z-[10000] flex items-center justify-center bg-zinc-950/70 backdrop-blur-sm"
+          onMouseDown={() => setRenameTarget(null)}
+        >
+          <div
+            className="w-[320px] rounded-2xl bg-zinc-900 border border-zinc-700/60 shadow-2xl p-5"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <p className="text-sm font-semibold text-zinc-200 mb-3">Rename workflow</p>
+            <input
+              autoFocus
+              value={renameTarget.value}
+              onChange={(e) => setRenameTarget({ ...renameTarget, value: e.target.value })}
+              onFocus={(e) => e.currentTarget.select()}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleRename() }}
+              placeholder="Workflow name…"
+              className="w-full bg-zinc-800 border border-zinc-700/80 rounded-md px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-accent/60"
+            />
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => setRenameTarget(null)}
+                className="px-3 py-1.5 rounded-md border border-zinc-700 text-zinc-400 text-xs font-medium hover:bg-zinc-800 hover:text-zinc-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleRename}
+                disabled={!renameTarget.value.trim()}
+                className="px-3 py-1.5 rounded-md bg-accent text-white text-xs font-semibold hover:bg-accent/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Rename
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+
+      {/* Delete confirmation popup (topmost — reachable from the Open popup) */}
+      {deleteTarget && createPortal(
+        <div
+          className="fixed inset-0 z-[10001] flex items-center justify-center bg-zinc-950/70 backdrop-blur-sm"
+          onMouseDown={() => setDeleteTarget(null)}
+        >
+          <div
+            className="w-[320px] rounded-2xl bg-zinc-900 border border-zinc-700/60 shadow-2xl p-5"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <p className="text-sm font-semibold text-zinc-200">Delete workflow?</p>
+            <p className="text-xs text-zinc-500 mt-2">
+              &ldquo;{workflows.find((w) => w.id === deleteTarget)?.name || 'Untitled'}&rdquo; will be permanently deleted. This cannot be undone.
+            </p>
+            <div className="flex justify-end gap-2 mt-5">
+              <button
+                onClick={() => setDeleteTarget(null)}
+                className="px-3 py-1.5 rounded-md border border-zinc-700 text-zinc-400 text-xs font-medium hover:bg-zinc-800 hover:text-zinc-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { remove(deleteTarget); setDeleteTarget(null) }}
+                className="px-3 py-1.5 rounded-md bg-red-600 text-white text-xs font-semibold hover:bg-red-500 transition-colors"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+
+      {/* Open workflow popup */}
+      {openListVisible && createPortal(
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-zinc-950/70 backdrop-blur-sm"
+          onMouseDown={() => setOpenListVisible(false)}
+        >
+          <div
+            className="w-[640px] max-w-[92vw] max-h-[70vh] rounded-2xl bg-zinc-900 border border-zinc-700/60 shadow-2xl flex flex-col overflow-hidden"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
+              <p className="text-sm font-semibold text-zinc-200">Open workflow</p>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setNewFolderName('')}
+                  title="New folder"
+                  className="flex items-center justify-center w-6 h-6 rounded text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                    <line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/>
+                  </svg>
+                </button>
+                <button
+                  onClick={() => setOpenListVisible(false)}
+                  className="flex items-center justify-center w-6 h-6 rounded text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+                >
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            {/* Search */}
+            <div className="px-4 py-2 border-b border-zinc-800">
+              <div className="flex items-center gap-2 bg-zinc-800 border border-zinc-700/80 rounded-md px-2.5 py-1.5 focus-within:border-accent/60">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0 text-zinc-500">
+                  <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                </svg>
+                <input
+                  autoFocus
+                  value={openSearch}
+                  onChange={(e) => setOpenSearch(e.target.value)}
+                  placeholder="Search workflows…"
+                  className="flex-1 min-w-0 bg-transparent text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none"
+                />
+                {openSearch && (
+                  <button onClick={() => setOpenSearch('')} className="shrink-0 text-zinc-600 hover:text-zinc-300 transition-colors">
+                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* New folder inline input */}
+            {newFolderName !== null && (
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-zinc-800 bg-zinc-950/40">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0 text-zinc-500">
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                </svg>
+                <input
+                  autoFocus
+                  value={newFolderName}
+                  onChange={(e) => setNewFolderName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleCreateFolder() }}
+                  onBlur={() => setNewFolderName(null)}
+                  placeholder="Folder name… (Enter to create)"
+                  className="flex-1 min-w-0 bg-zinc-800 border border-zinc-700/80 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-accent/60"
+                />
+              </div>
+            )}
+
+            <div
+              className="flex-1 overflow-y-auto py-1"
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                // Drop on the list background (not a folder) → move back to root
+                e.preventDefault()
+                setDragOverFolder(null)
+                const id = e.dataTransfer.getData('modly/workflow-id')
+                if (id) handleMoveToFolder(id, undefined)
+              }}
+            >
+              {workflows.length === 0 && folders.length === 0 && (
+                <p className="px-5 py-6 text-center text-xs text-zinc-600 italic">No saved workflows.</p>
+              )}
+
+              {/* Search results — flat list across all folders */}
+              {openSearch.trim() !== '' && (() => {
+                const q = openSearch.trim().toLowerCase()
+                const matches = workflows
+                  .filter((w) => (w.name || 'Untitled').toLowerCase().includes(q))
+                  .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+                if (matches.length === 0) {
+                  return <p className="px-5 py-6 text-center text-xs text-zinc-600 italic">No workflow matches &ldquo;{openSearch.trim()}&rdquo;.</p>
+                }
+                return (
+                  <div className="grid grid-cols-3 gap-2 px-4 py-2">
+                    {matches.map((wf) => renderWorkflowCard(wf))}
+                  </div>
+                )
+              })()}
+
+              {/* Bookmarks — pinned section: starred folders, then starred workflows */}
+              {openSearch.trim() === '' && (() => {
+                const markedFolders = [...bookmarkedFolders].filter((f) => folders.includes(f)).sort((a, b) => a.localeCompare(b))
+                // Starred workflows already shown inside a starred folder aren't repeated
+                const marked = workflows
+                  .filter((w) => w.bookmarked && !(w.folder && bookmarkedFolders.includes(w.folder)))
+                  .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+                if (marked.length === 0 && markedFolders.length === 0) return null
+                return (
+                  <div className="border-b border-zinc-800/60 pb-1 mb-1">
+                    <div className="flex items-center gap-2 px-4 py-2 text-amber-400/80">
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" className="shrink-0">
+                        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                      </svg>
+                      <span className="text-xs font-medium">Bookmarks</span>
+                    </div>
+                    {markedFolders.map((folder) => renderFolder(folder))}
+                    {marked.length > 0 && (
+                      <div className="grid grid-cols-3 gap-2 px-4 py-1.5">
+                        {marked.map((wf) => renderWorkflowCard(wf))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })()}
+
+              {/* Folders (bookmarked ones live in the section above) */}
+              {openSearch.trim() === '' && [...folders]
+                .filter((f) => !bookmarkedFolders.includes(f))
+                .sort((a, b) => a.localeCompare(b))
+                .map((folder) => renderFolder(folder))}
+
+              {/* Root workflows */}
+              {openSearch.trim() === '' && (() => {
+                const root = workflows
+                  .filter((w) => !w.folder || !folders.includes(w.folder))
+                  .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+                if (root.length === 0) return null
+                return (
+                  <div className="grid grid-cols-3 gap-2 px-4 py-2">
+                    {root.map((wf) => renderWorkflowCard(wf))}
+                  </div>
+                )
+              })()}
+            </div>
+          </div>
+        </div>,
+        document.body,
       )}
 
       {/* Canvas + extensions panel */}
@@ -1317,11 +2117,9 @@ export default function WorkflowsPage(): JSX.Element {
               workflow={activeWorkflow}
               allExtensions={allExtensions}
               onSave={save}
-              onDelete={() => { remove(activeWorkflow.id) }}
-              onExport={() => exportFile(activeWorkflow)}
               panelOpen={panelOpen}
               onTogglePanel={() => setPanelOpen((o) => !o)}
-              onNew={handleCreateBlank}
+              onOpen={() => setOpenListVisible(true)}
               onImport={handleImport}
             />
           </ReactFlowProvider>
@@ -1332,11 +2130,16 @@ export default function WorkflowsPage(): JSX.Element {
               <path d="M9 5.5h3.5a1 1 0 0 1 1 1v5"/><rect x="13" y="9" width="8" height="7" rx="1"/>
             </svg>
             <div className="text-center">
-              <p className="text-sm font-medium">No workflows yet</p>
-              <p className="text-xs mt-1">Create one to get started</p>
+              <p className="text-sm font-medium">{workflows.length === 0 ? 'No workflows yet' : 'No workflow open'}</p>
+              <p className="text-xs mt-1">{workflows.length === 0 ? 'Create one to get started' : 'Open a saved workflow or create a new one'}</p>
             </div>
             <div className="flex items-center gap-2 mt-2">
-              <button onClick={handleCreateBlank} className="px-4 py-2 rounded-lg bg-accent text-white text-xs font-semibold hover:bg-accent/90 transition-colors">
+              {workflows.length > 0 && (
+                <button onClick={() => setOpenListVisible(true)} className="px-4 py-2 rounded-lg bg-accent text-white text-xs font-semibold hover:bg-accent/90 transition-colors">
+                  Open
+                </button>
+              )}
+              <button onClick={handleCreateBlank} className={`px-4 py-2 rounded-lg text-xs font-semibold transition-colors ${workflows.length === 0 ? 'bg-accent text-white hover:bg-accent/90' : 'border border-zinc-700 text-zinc-300 hover:bg-zinc-800'}`}>
                 New Workflow
               </button>
               <button onClick={handleImport} className="px-4 py-2 rounded-lg border border-zinc-700 text-zinc-300 text-xs font-semibold hover:bg-zinc-800 transition-colors">

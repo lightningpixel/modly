@@ -50,10 +50,16 @@ export function archiveCurrentSession(): void {
   } catch {}
 }
 
+// Console writes throw EPIPE when the parent process' stdout/stderr pipe is
+// gone (e.g. launching terminal closed). Never let logging crash the app.
+function safeConsole(fn: (msg: string) => void, msg: string): void {
+  try { fn(msg) } catch {}
+}
+
 export const logger = {
-  info:   (msg: string) => { console.log(msg);   writeTo('modly.log', line('INFO',   msg)) },
-  warn:   (msg: string) => { console.warn(msg);  writeTo('modly.log', line('WARN',   msg)) },
-  error:  (msg: string) => { console.error(msg); writeTo('modly.log', line('ERROR',  msg)); writeTo('errors.log', line('ERROR', msg)) },
+  info:   (msg: string) => { safeConsole(console.log, msg);   writeTo('modly.log', line('INFO',   msg)) },
+  warn:   (msg: string) => { safeConsole(console.warn, msg);  writeTo('modly.log', line('WARN',   msg)) },
+  error:  (msg: string) => { safeConsole(console.error, msg); writeTo('modly.log', line('ERROR',  msg)); writeTo('errors.log', line('ERROR', msg)) },
   python: (msg: string) => {
     writeTo('runtime.log', line('RUNTIME', msg))
     if (/error|exception|traceback|critical/i.test(msg)) {

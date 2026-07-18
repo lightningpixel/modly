@@ -4,8 +4,18 @@ import { logger } from './logger'
 
 type WindowGetter = () => BrowserWindow | null
 
+// Les builds macOS ne sont pas signés avec un Developer ID (pas de licence Apple).
+// electron-updater valide la signature du bundle avant d'appliquer une mise à
+// jour : sur darwin il échouerait systématiquement, en boucle toutes les 2 h.
+// Les utilisateurs mac mettent donc à jour manuellement via les releases GitHub.
+export const updatesSupported = process.platform !== 'darwin'
+
 export function initAutoUpdater(getWindow: WindowGetter): void {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  if (!updatesSupported) {
+    logger.info('[updater] Disabled on macOS (unsigned build) — manual updates only')
+    return
+  }
+
   autoUpdater.logger = logger as any
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true

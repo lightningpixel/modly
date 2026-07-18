@@ -1,6 +1,8 @@
 node_modules/
 out/
 dist/
+install.bat
+launch.bat
 
 # Generated at build time by scripts/download-python-embed.js
 resources/python-embed/

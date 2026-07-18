@@ -6,7 +6,7 @@ import { UpdateModal } from '@shared/components/ui/UpdateModal'
 import { ErrorModal } from '@shared/components/ui/ErrorModal'
 import { Toast } from '@shared/components/ui/Toast'
 
-const UI_SCALE_FACTORS: Record<UiScale, number> = { small: 0.875, medium: 1, large: 1.25 }
+const UI_SCALE_FACTORS: Record<UiScale, number> = { small: 0.875, medium: 1, large: 1.25, 'very-large': 1.5 }
 
 export default function App(): JSX.Element {
   const { checkSetup, setupStatus, initApp, backendStatus, showError, useAtkinsonFont, uiScale } = useAppStore()
@@ -23,6 +23,7 @@ export default function App(): JSX.Element {
       window.electron.app.offError()
       window.electron.updater.offMajorMinorAvailable()
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount; store actions are stable
   }, [])
 
   // Apply before paint to avoid a flash of default font/size on launch.
@@ -38,6 +39,7 @@ export default function App(): JSX.Element {
 
   useEffect(() => {
     if (setupStatus === 'done') initApp()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- react to setup transition only; initApp is stable
   }, [setupStatus])
 
   useEffect(() => {

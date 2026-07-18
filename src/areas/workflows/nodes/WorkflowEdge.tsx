@@ -4,6 +4,7 @@ import { useExtensionsStore } from '@shared/stores/extensionsStore'
 import { buildAllWorkflowExtensions } from '../mockExtensions'
 
 const HANDLE_COLOR: Record<string, string> = {
+  audio: '#34d399',
   image: '#38bdf8',
   mesh:  '#a78bfa',
   text:  '#fbbf24',

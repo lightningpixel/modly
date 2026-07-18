@@ -31,7 +31,7 @@ logging.getLogger("uvicorn.access").addFilter(_StatusFilter())
 
 app = FastAPI(
     title="Modly API",
-    version="0.4.0",
+    version="0.4.1",
     lifespan=lifespan,
 )
 

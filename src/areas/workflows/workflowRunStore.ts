@@ -29,8 +29,93 @@ const IDLE: WorkflowRunState = {
 
 const _cancel      = { current: false }
 const _activeJobId = { current: null as string | null }
+// While container (manual mode) pause/resume — set by continueWhile()/retryWhile().
+const _resume      = { current: null as (() => void) | null }
+const _retry       = { current: false }
+// For Each auto-loop: the user asked to pause at the next iteration boundary.
+const _pauseRequested = { current: false }
+// Live node params — the UI pushes edits here so a looping/paused run re-reads the
+// latest values when a body node starts (instead of the snapshot from run start).
+const _liveParams  = { current: new Map<string, Record<string, unknown>>() }
+
+function flushResume(): void {
+  const fn = _resume.current
+  _resume.current = null
+  if (fn) fn()
+}
 
 interface NodeOutput { filePath?: string; text?: string; outputType?: string }
+
+function isSceneMeshOutput(output: NodeOutput | undefined): output is NodeOutput & { filePath: string } {
+  return output?.outputType === 'mesh' && typeof output.filePath === 'string'
+}
+
+// ─── For Each iterator (image / text / mesh) ───────────────────────────────────
+// A "For Each" node walks a folder alphabetically and emits one file per loop
+// iteration. Its loop body = the executable nodes reachable downstream, which
+// re-run for every file. The `mode` param picks what it emits and which files it
+// matches.
+
+const FOR_EACH_MODES: Record<string, { exts: string[]; outputType: 'image' | 'text' | 'mesh' }> = {
+  image: { exts: ['png', 'jpg', 'jpeg', 'webp'],              outputType: 'image' },
+  text:  { exts: ['txt', 'md', 'prompt'],                     outputType: 'text'  },
+  mesh:  { exts: ['glb', 'gltf', 'obj', 'stl', 'ply', 'fbx'], outputType: 'mesh'  },
+}
+
+function iteratorConfig(node: WFNode): { exts: string[]; outputType: 'image' | 'text' | 'mesh' } {
+  return FOR_EACH_MODES[(node.data.params?.mode as string) ?? 'image'] ?? FOR_EACH_MODES.image
+}
+
+function isIterator(type: string | undefined): boolean {
+  return type === 'forEachNode'
+}
+
+/** True for nodes the runner executes (and can re-run inside a loop body). */
+function isExecutable(node: WFNode): boolean {
+  if (isIterator(node.type)) return true
+  return node.type === 'extensionNode' && !!node.data.enabled
+}
+
+/** Absolute, alphabetically-sorted paths of an iterator's files (listFiles sorts). */
+async function listIteratorFiles(dir: string, exts: string[]): Promise<string[]> {
+  const names = await window.electron.fs.listFiles(dir, exts)
+  const norm  = dir.replace(/\\/g, '/').replace(/\/+$/, '')
+  return names.map((n) => `${norm}/${n}`)
+}
+
+/** Read a UTF-8 text file through the base64 IPC bridge. */
+async function readTextFile(filePath: string): Promise<string> {
+  const b64 = await window.electron.fs.readFileBase64(filePath)
+  return new TextDecoder('utf-8').decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)))
+}
+
+/**
+ * Executable nodes reachable downstream from `startId` (its loop body). Traversal
+ * stops at Wait boundaries — those nodes belong to branches, not the pre-phase loop.
+ */
+function reachableExecutable(startId: string, edges: WFEdge[], nodeMap: Map<string, WFNode>): Set<string> {
+  const body = new Set<string>([startId])
+  const stack = [startId]
+  const seen = new Set<string>([startId])
+  while (stack.length > 0) {
+    const id = stack.pop()!
+    for (const e of edges) {
+      if (e.source !== id || seen.has(e.target)) continue
+      seen.add(e.target)
+      const t = nodeMap.get(e.target)
+      if (!t || isBranchStarter(t.type)) continue
+      if (isExecutable(t)) body.add(e.target)
+      stack.push(e.target)
+    }
+  }
+  return body
+}
+
+function toWorkspaceUrl(filePath: string, workspaceDir: string): string | undefined {
+  const norm = filePath.replace(/\\/g, '/')
+  if (!norm.startsWith(workspaceDir)) return undefined
+  return `/workspace/${norm.slice(workspaceDir.length).replace(/^\//, '')}`
+}
 
 interface RunContext {
   workflow:           Workflow
@@ -48,6 +133,8 @@ interface RunContext {
   waitIds:            string[]
   /** waitId → nearest upstream waitId (null = top-level, runnable from the start) */
   parentWait:         Map<string, string | null>
+  /** iterator node id → its resolved file paths, one per loop iteration */
+  iteratorFiles:      Map<string, string[]>
   /** workspace URL of the most recently pushed scene mesh (last branch the user ran wins) */
   lastSceneMesh?:     string
 }
@@ -85,6 +172,38 @@ function topoSort(nodes: WFNode[], edges: WFEdge[]): WFNode[] {
   return result
 }
 
+// ─── While container geometry ──────────────────────────────────────────────────
+// Body membership can't rely on parentId alone: React Flow only assigns it when a
+// node is dragged into the container, so a While resized around existing nodes (or
+// nodes added by palette click) leaves them unparented. We therefore also test
+// on-canvas containment at run time.
+
+interface WhileBounds { x: number; y: number; w: number; h: number }
+
+function nodeSize(n: WFNode): { w: number; h: number } {
+  const measured = (n as { measured?: { width?: number; height?: number } }).measured
+  const styleW = n.style?.width
+  const styleH = n.style?.height
+  return {
+    w: measured?.width  ?? n.width  ?? (typeof styleW === 'number' ? styleW : 200),
+    h: measured?.height ?? n.height ?? (typeof styleH === 'number' ? styleH : 80),
+  }
+}
+
+function whileBounds(w: WFNode): WhileBounds {
+  const s = nodeSize(w)
+  return { x: w.position.x, y: w.position.y, w: s.w, h: s.h }
+}
+
+function isInsideWhile(n: WFNode, whileId: string, b: WhileBounds): boolean {
+  if (n.parentId === whileId) return true
+  if (n.parentId) return false   // explicit child of another container
+  const s = nodeSize(n)
+  const cx = n.position.x + s.w / 2
+  const cy = n.position.y + s.h / 2
+  return cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h
+}
+
 // ─── Branch identification ────────────────────────────────────────────────────
 // A node belongs to Wait W's branch if its single nearest upstream Wait is W
 // (dominance). Nodes with no upstream Wait — or with multiple (merges) — execute
@@ -105,7 +224,7 @@ function identifyBranches(workflow: Workflow): {
   // Wait → … → Wait chains nest: nodes after the 2nd Wait belong to it, not the 1st.
   const branchOwner = new Map<string, string>()
   for (const node of workflow.nodes) {
-    if (isBranchStarter(node.type)) continue
+    if (isBranchStarter(node.type) || !isExecutable(node)) continue
     const nearest = nearestUpstreamWaits(node.id, workflow.edges, nodeMap)
     if (nearest.size === 1) branchOwner.set(node.id, [...nearest][0])
   }
@@ -121,13 +240,41 @@ function identifyBranches(workflow: Workflow): {
   for (const w of waitIds) branches.set(w, [])
   const preExecExtNodes: WFNode[] = []
   for (const node of ordered) {
-    if (node.type !== 'extensionNode' || !node.data.enabled) continue
+    if (!isExecutable(node)) continue
     const owner = branchOwner.get(node.id)
     if (owner) branches.get(owner)!.push(node)
     else preExecExtNodes.push(node)
   }
 
   return { preExecExtNodes, branches, waitIds, parentWait, ordered }
+}
+
+// ─── For Each iterator execution ───────────────────────────────────────────────
+// Emits the current iteration's file. Image iterators emit an image path; text
+// iterators read the file and emit its text. The iteration index comes from the
+// loop's progress (its own node id keys the loop).
+
+async function executeIteratorNode(
+  node:        WFNode,
+  ctx:         RunContext,
+  setRunState: (updater: (s: WorkflowRunState) => WorkflowRunState) => void,
+): Promise<void> {
+  const files   = ctx.iteratorFiles.get(node.id) ?? []
+  const current = useWorkflowRunStore.getState().whileProgress[node.id]?.current ?? 1
+  const path    = files[current - 1]
+  if (!path) throw new Error('For Each: no file for this iteration')
+
+  const kind = iteratorConfig(node)
+  const name = path.split(/[\\/]/).pop()
+  setRunState((s) => ({ ...s, blockProgress: 30, blockStep: `Reading ${name}` }))
+
+  if (kind.outputType === 'text') {
+    const text = await readTextFile(path)
+    ctx.nodeOutputs.set(node.id, { text, outputType: 'text' })
+  } else {
+    ctx.nodeOutputs.set(node.id, { filePath: path, outputType: kind.outputType })
+  }
+  setRunState((s) => ({ ...s, blockProgress: 100, blockStep: `Loaded ${name}` }))
 }
 
 // ─── Per-node execution ──────────────────────────────────────────────────────
@@ -140,10 +287,18 @@ async function executeExtensionNode(
   ctx:         RunContext,
   setRunState: (updater: (s: WorkflowRunState) => WorkflowRunState) => void,
 ): Promise<void> {
+  if (isIterator(node.type)) {
+    await executeIteratorNode(node, ctx, setRunState)
+    return
+  }
+
   const { workflow, allExtensions, client, workspaceDir, nodeOutputs, nodeMap,
           selectedImagePath, selectedImageData } = ctx
 
   const ext = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
+  // Freshest params at the moment the node starts (so loop iterations / Retry pick
+  // up edits made while paused, not the values captured at run start).
+  const liveParams = _liveParams.current.get(node.id) ?? node.data.params ?? {}
 
   const resolveSource = (sourceId: string): NodeOutput | undefined => {
     const realId = resolveDataSource(sourceId, workflow.edges, nodeMap)
@@ -153,6 +308,9 @@ async function executeExtensionNode(
   let nodeInputPath:     string | undefined
   let nodeInputText:     string | undefined
   let nodeInputMeshPath: string | undefined
+  // Per-slot texts for multi-text-input nodes (e.g. positive/negative prompts).
+  // Indexed by target handle: input-0 → texts[0], input-1 → texts[1].
+  const nodeInputTexts: (string | undefined)[] = []
 
   const incomingEdges = workflow.edges.filter((e) => e.target === node.id)
 
@@ -163,29 +321,43 @@ async function executeExtensionNode(
       if (src.outputType === 'mesh')        nodeInputMeshPath = src.filePath
       else if (src.outputType === 'image')  nodeInputPath     = src.filePath
       else if (src.filePath !== undefined)  nodeInputPath     = src.filePath
-      if (src.text !== undefined)           nodeInputText     = src.text
+      if (src.text !== undefined && src.text.trim().length > 0) {
+        nodeInputText = src.text
+        const slot = /^input-(\d+)$/.exec(edge.targetHandle ?? '')
+        if (slot) nodeInputTexts[Number(slot[1])] = src.text
+      }
     }
   } else {
     for (const edge of incomingEdges) {
       const src = resolveSource(edge.source)
       if (src?.filePath !== undefined) nodeInputPath = src.filePath
-      if (src?.text     !== undefined) nodeInputText = src.text
+      if (src?.text !== undefined && src.text.trim().length > 0) nodeInputText = src.text
     }
   }
 
   const isModelNode = ext?.type === 'model'
 
   if (isModelNode) {
-    const activeImagePath = nodeInputPath ?? selectedImagePath
-    if (!selectedImageData && (!activeImagePath || activeImagePath.trim().length === 0)) {
+    const isTextInput = ext?.inputs ? ext.inputs.every((i) => i === 'text') : ext?.input === 'text'
+    const activeImagePath = isTextInput ? undefined : (nodeInputPath ?? selectedImagePath)
+    if (!isTextInput && !selectedImageData && (!activeImagePath || activeImagePath.trim().length === 0)) {
       throw new Error('No input image selected for model node')
     }
-    const base64 = selectedImageData && nodeInputPath === undefined
-      ? selectedImageData
-      : await window.electron.fs.readFileBase64(activeImagePath as string)
-    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
-    const blob  = new Blob([bytes], { type: 'image/png' })
-    const fname = activeImagePath?.split(/[\\/]/).pop() ?? 'image.png'
+
+    let blob: Blob
+    let fname: string
+    if (isTextInput || (selectedImageData && nodeInputPath === undefined)) {
+      const base64 = selectedImageData && nodeInputPath === undefined
+        ? selectedImageData
+        : 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==' // 1x1 transparent PNG
+      fname = 'placeholder.png'
+      blob = new Blob([Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))], { type: 'image/png' })
+    } else {
+      const base64 = await window.electron.fs.readFileBase64(activeImagePath as string)
+      const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+      blob = new Blob([bytes], { type: 'image/png' })
+      fname = activeImagePath?.split(/[\\/]/).pop() ?? 'image.png'
+    }
 
     const extraParams: Record<string, unknown> = {}
     if (nodeInputMeshPath) {
@@ -194,11 +366,15 @@ async function executeExtensionNode(
         ? norm.slice(workspaceDir.length).replace(/^\//, '')
         : norm
     }
+    if (nodeInputText !== undefined && nodeInputText.trim().length > 0) {
+      extraParams.prompt = nodeInputText
+      extraParams.text   = nodeInputText
+    }
 
     const schemaDefaults = Object.fromEntries(
       (ext.params ?? []).map((p) => [p.id, p.default]),
     )
-    const effectiveParams = { ...schemaDefaults, ...(node.data.params ?? {}) }
+    const effectiveParams = { ...schemaDefaults, ...liveParams }
 
     const fd = new FormData()
     fd.append('image', blob, fname)
@@ -244,6 +420,7 @@ async function executeExtensionNode(
   } else {
     if (ext?.input === 'mesh'  && !nodeInputPath) throw new Error(`${ext.name} needs an incoming mesh connection`)
     if (ext?.input === 'image' && !nodeInputPath) throw new Error(`${ext.name} needs an incoming image connection`)
+    if (ext?.input === 'audio' && !nodeInputPath) throw new Error(`${ext.name} needs an incoming audio connection`)
     if (ext?.input === 'text'  && !nodeInputText) throw new Error(`${ext.name} needs an incoming text connection`)
 
     const parts  = (node.data.extensionId ?? '').split('/')
@@ -251,8 +428,13 @@ async function executeExtensionNode(
     const nid    = parts[1] ?? ''
     const result = await window.electron.extensions.runProcess(
       extId,
-      { filePath: nodeInputPath, text: nodeInputText, nodeId: nid },
-      node.data.params as Record<string, unknown>,
+      {
+        filePath: nodeInputPath,
+        text:     nodeInputText,
+        texts:    nodeInputTexts.length > 0 ? nodeInputTexts : undefined,
+        nodeId:   nid,
+      },
+      liveParams as Record<string, unknown>,
     )
     if (!result.success) throw new Error(result.error ?? 'Process extension failed')
     nodeInputPath = result.result?.filePath ?? nodeInputPath
@@ -263,9 +445,9 @@ async function executeExtensionNode(
   const outputType = ext?.output ?? (nodeInputPath ? 'mesh' : undefined)
   nodeOutputs.set(node.id, { filePath: nodeInputPath, text: nodeInputText, outputType })
 
-  const norm = nodeInputPath?.replace(/\\/g, '/')
-  if (norm?.startsWith(workspaceDir) && reachesSceneOutput(node.id, workflow.edges, nodeMap)) {
-    const url = `/workspace/${norm.slice(workspaceDir.length).replace(/^\//, '')}`
+  const output = nodeOutputs.get(node.id)
+  const url = isSceneMeshOutput(output) ? toWorkspaceUrl(output.filePath, workspaceDir) : undefined
+  if (url && reachesSceneOutput(node.id, workflow.edges, nodeMap)) {
     ctx.lastSceneMesh = url   // remember it so finalize() keeps the last-run branch in view
     useAppStore.getState().updateCurrentJob({ status: 'done', progress: 100, outputUrl: url })
   }
@@ -302,9 +484,9 @@ function pushBranchSceneMesh(ctx: RunContext, waitId: string): void {
     const inEdge = ctx.workflow.edges.find((e) => e.target === node.id)
     if (!inEdge) continue
     const srcId = resolveDataSource(inEdge.source, ctx.workflow.edges, ctx.nodeMap)
-    const fp = srcId ? ctx.nodeOutputs.get(srcId)?.filePath?.replace(/\\/g, '/') : undefined
-    if (fp && fp.startsWith(ctx.workspaceDir)) {
-      const url = `/workspace/${fp.slice(ctx.workspaceDir.length).replace(/^\//, '')}`
+    const sourceOutput = srcId ? ctx.nodeOutputs.get(srcId) : undefined
+    const url = isSceneMeshOutput(sourceOutput) ? toWorkspaceUrl(sourceOutput.filePath, ctx.workspaceDir) : undefined
+    if (url) {
       ctx.lastSceneMesh = url
       useAppStore.getState().updateCurrentJob({ status: 'done', progress: 100, outputUrl: url })
     }
@@ -320,11 +502,23 @@ interface WorkflowRunStore {
   nodeImageOutputs: Record<string, string>
   waitStates:       Record<string, WaitState>
   runningBranchId:  string | null
+  /** whileId → current iteration / total (total null = manual/unbounded) */
+  whileProgress:    Record<string, { current: number; total: number | null }>
+  /** iterator ids paused together at a shared boundary (lockstep For Each group) */
+  pausedGroup:      string[]
 
   run:         (workflow: Workflow, allExtensions: WorkflowExtension[], overrideImageData?: string) => Promise<void>
   cancel:      () => void
   reset:       () => void
   continueRun: (waitId: string) => Promise<void>
+  /** While container: resume past the loop (Continue) */
+  continueWhile: () => void
+  /** While container: resume and re-run the loop body once more (Retry) */
+  retryWhile:    () => void
+  /** For Each container: request a pause at the next file boundary */
+  pauseWhile:    () => void
+  /** UI → runner: push the latest params for a node so a looping run uses them */
+  setLiveNodeParams: (nodeId: string, params: Record<string, unknown>) => void
 }
 
 export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
@@ -355,23 +549,21 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
     if (lastOutputNode) {
       for (const edge of ctx.workflow.edges.filter((e) => e.target === lastOutputNode.id)) {
         const src = ctx.nodeOutputs.get(edge.source)
-        if (src?.filePath) {
-          const norm = src.filePath.replace(/\\/g, '/')
-          if (norm.startsWith(ctx.workspaceDir)) {
-            outputUrl = `/workspace/${norm.slice(ctx.workspaceDir.length).replace(/^\//, '')}`
-          }
+        if (isSceneMeshOutput(src)) {
+          outputUrl = toWorkspaceUrl(src.filePath, ctx.workspaceDir)
         }
       }
     }
     if (!outputUrl) {
       for (const [, o] of ctx.nodeOutputs) {
         if (o.filePath) {
-          const norm = o.filePath.replace(/\\/g, '/')
-          if (norm.startsWith(ctx.workspaceDir)) {
-            outputUrl = `/workspace/${norm.slice(ctx.workspaceDir.length).replace(/^\//, '')}`
-          } else {
+          if (o.outputType === 'audio') {
             outputPath = o.filePath
+            continue
           }
+          const workspaceUrl = toWorkspaceUrl(o.filePath, ctx.workspaceDir)
+          if (workspaceUrl) outputUrl = workspaceUrl
+          else outputPath = o.filePath
         }
       }
     }
@@ -379,6 +571,8 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
     set((s) => ({
       activeNodeId:     null,
       runningBranchId:  null,
+      whileProgress:    {},
+      pausedGroup:      [],
       waitStates:       finalWaitStates ?? s.waitStates,
       nodeImageOutputs: collectImageOutputs(ctx),
       runState: {
@@ -401,16 +595,111 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
     nodeImageOutputs: {},
     waitStates:       {},
     runningBranchId:  null,
+    whileProgress:    {},
+    pausedGroup:      [],
 
     async run(workflow, allExtensions, overrideImageData?) {
       _cancel.current = false
+      _pauseRequested.current = false
+      // Seed live params from the snapshot; UI edits during the run override these.
+      _liveParams.current = new Map(workflow.nodes.map((n) => [n.id, { ...(n.data.params ?? {}) }]))
 
       const appState = useAppStore.getState()
       const apiUrl   = appState.apiUrl
 
       const { preExecExtNodes, branches, waitIds, parentWait, ordered } = identifyBranches(workflow)
       const branchSteps = waitIds.reduce((acc, w) => acc + (branches.get(w)?.length ?? 0), 0)
-      const totalSteps  = preExecExtNodes.length + branchSteps
+
+      const nodeMap = new Map(workflow.nodes.map((n) => [n.id, n]))
+
+      // ── For Each iterators → resolve their folders up front ────────────────────
+      // The loop count is driven by the folder contents, so the listing must resolve
+      // before the loop table (and its progress totals) below.
+      const iteratorFiles = new Map<string, string[]>()
+      for (const w of workflow.nodes) {
+        if (!isIterator(w.type)) continue
+        const dir = (w.data.params?.dir as string | undefined)?.trim()
+        const fail = (msg: string, step: string): void => {
+          set((s) => ({ runState: { ...s.runState, status: 'error', error: msg, blockStep: step }, activeNodeId: null }))
+        }
+        if (!dir) { fail('For Each: pick a folder first', 'No folder selected'); return }
+        try {
+          const files = await listIteratorFiles(dir, iteratorConfig(w).exts)
+          if (files.length === 0) { fail(`For Each: no matching files in ${dir}`, 'Empty folder'); return }
+          iteratorFiles.set(w.id, files)
+        } catch (err) {
+          fail(String(err), 'Failed to read folder'); return
+        }
+      }
+
+      // ── Loop table ─────────────────────────────────────────────────────────────
+      // While containers loop their geometric body N× (or manually). For Each
+      // iterators loop the executable nodes reachable downstream, once per file.
+      // Replays filter by bodyIds membership (not a contiguous range), so unrelated
+      // pre-phase nodes sorting between body members aren't replayed.
+      interface LoopInfo { whileId: string; kind: 'while' | 'forEach'; firstIdx: number; lastIdx: number; bodyIds: Set<string>; iterations: number | null }
+      const loops: LoopInfo[] = []
+      const indexOf = new Map(preExecExtNodes.map((n, i) => [n.id, i]))
+
+      for (const w of workflow.nodes) {
+        if (w.type !== 'whileNode') continue
+        const bounds = whileBounds(w)
+        const idxs = preExecExtNodes.reduce<number[]>((acc, n, idx) => {
+          if (isInsideWhile(n, w.id, bounds)) acc.push(idx)
+          return acc
+        }, [])
+        if (idxs.length === 0) continue
+        const iters = Number(w.data?.iterations)
+        loops.push({
+          whileId:  w.id,
+          kind:     'while',
+          firstIdx: Math.min(...idxs),
+          lastIdx:  Math.max(...idxs),
+          bodyIds:  new Set(idxs.map((i) => preExecExtNodes[i].id)),
+          iterations: Number.isFinite(iters) && iters > 0 ? Math.floor(iters) : null,
+        })
+      }
+
+      for (const [iterId, files] of iteratorFiles) {
+        const bodyIds = new Set([...reachableExecutable(iterId, workflow.edges, nodeMap)].filter((id) => indexOf.has(id)))
+        const idxs = [...bodyIds].map((id) => indexOf.get(id)!)
+        if (idxs.length === 0) continue
+        loops.push({
+          whileId:    iterId,
+          kind:       'forEach',
+          firstIdx:   Math.min(...idxs),
+          lastIdx:    Math.max(...idxs),
+          bodyIds,
+          iterations: files.length,   // one pass per file
+        })
+      }
+      const loopCounters = new Map(loops.map((l) => [l.whileId, l.iterations]))
+      // Auto-mode loops replay their body N times; count the extra passes so the
+      // progress total reflects the real work (manual loops stay unbounded). While
+      // loops are independent. For Each loops sharing a boundary (same lastIdx) run
+      // in lockstep over the union of their bodies, so that union is replayed once
+      // per pass — count it once, for max(files) − 1 extra passes.
+      const forEachGroups = new Map<number, LoopInfo[]>()
+      let loopExtraSteps = 0
+      for (const l of loops) {
+        if (l.kind === 'while') {
+          loopExtraSteps += l.iterations != null ? (l.iterations - 1) * l.bodyIds.size : 0
+        } else {
+          const g = forEachGroups.get(l.lastIdx) ?? []
+          g.push(l)
+          forEachGroups.set(l.lastIdx, g)
+        }
+      }
+      for (const group of forEachGroups.values()) {
+        const union = new Set<string>()
+        let maxIter = 0
+        for (const l of group) {
+          l.bodyIds.forEach((id) => union.add(id))
+          if (l.iterations != null) maxIter = Math.max(maxIter, l.iterations)
+        }
+        if (maxIter > 0) loopExtraSteps += (maxIter - 1) * union.size
+      }
+      const totalSteps = preExecExtNodes.length + branchSteps + loopExtraSteps
 
       const selectedImagePath = appState.selectedImagePath ?? undefined
       const selectedImageData = overrideImageData ?? appState.selectedImageData ?? undefined
@@ -422,6 +711,8 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
         // Top-level Waits are pending; nested Waits start blocked until their parent finishes.
         waitStates:       Object.fromEntries(waitIds.map((id) => [id, parentWait.get(id) ? 'blocked' as WaitState : 'pending' as WaitState])),
         runningBranchId:  null,
+        whileProgress:    Object.fromEntries(loops.map((l) => [l.whileId, { current: 1, total: l.iterations }])),
+        pausedGroup:      [],
         runState: {
           status: 'running', blockIndex: 0, blockTotal: totalSteps,
           blockProgress: 0, blockStep: 'Starting…',
@@ -445,7 +736,6 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
         window.electron.fs.deleteDirectory(tmpAbsPath).catch(() => {})
 
         const nodeOutputs = new Map<string, NodeOutput>()
-        const nodeMap     = new Map(workflow.nodes.map((n) => [n.id, n]))
 
         // Pre-populate source nodes
         for (const node of ordered) {
@@ -478,19 +768,129 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
 
         const ctx: RunContext = {
           workflow, allExtensions, client, workspaceDir, selectedImagePath, selectedImageData,
-          overrideImageData, nodeOutputs, nodeMap, ordered, branches, waitIds, parentWait,
+          overrideImageData, nodeOutputs, nodeMap, ordered, branches, waitIds, parentWait, iteratorFiles,
         }
         _ctx.current = ctx
 
+        // While the runner is replaying a loop body, this holds the body nodes of the
+        // active loop (or the union of several For Each loops sharing a boundary);
+        // re-iterations then execute only those members and skip everything else in
+        // the range. null = first pass / no active loop (run all nodes once).
+        let activeLoopBody: Set<string> | null = null
+
+        // End-of-body handler for While containers. Called after each pre-phase node;
+        // when the index is a loop's last body node, it either jumps back (auto N× or
+        // Retry) or pauses for Continue/Retry. Returns the index to resume at,
+        // 'cancel', or undefined to continue normally.
+        const bumpWhileProgress = (whileId: string): void => set((s) => {
+          const prev = s.whileProgress[whileId]
+          return { whileProgress: { ...s.whileProgress, [whileId]: { current: (prev?.current ?? 1) + 1, total: prev?.total ?? null } } }
+        }
+        )
+
+        const handleLoopEnd = async (idx: number): Promise<number | 'cancel' | undefined> => {
+          const forEachLoops = loops.filter((l) => l.lastIdx === idx && l.kind === 'forEach')
+          const whileLoop    = loops.find((l) => l.lastIdx === idx && l.kind === 'while')
+
+          // ── For Each: run through every file automatically. Several iterators can
+          // share the same downstream body (e.g. an image folder + a mesh folder both
+          // feeding one node); they advance together, in lockstep. It only stops if
+          // the user hit Pause; then Continue advances to the next file(s) and Retry
+          // re-runs the current one. No forced pause at the end — it just finishes.
+          if (forEachLoops.length > 0) {
+            const groupBody = new Set<string>()
+            let jumpTo = Infinity
+            for (const loop of forEachLoops) {
+              loop.bodyIds.forEach((id) => groupBody.add(id))
+              jumpTo = Math.min(jumpTo, loop.firstIdx)
+            }
+
+            if (_pauseRequested.current) {
+              _pauseRequested.current = false
+              _retry.current = false
+              // Pause every iterator of the group together (they show the same state).
+              const groupIds = forEachLoops.map((l) => l.whileId)
+              set({ activeNodeId: groupIds[0], runningBranchId: groupIds[0], pausedGroup: groupIds })
+              setRunState((s) => ({ ...s, status: 'paused', blockStep: 'Paused — Continue or Retry' }))
+              await new Promise<void>((resolve) => { _resume.current = resolve })
+              if (_cancel.current) return 'cancel'
+              set({ runningBranchId: null, pausedGroup: [] })
+              setRunState((s) => ({ ...s, status: 'running' }))
+              if (_retry.current) {   // re-run the current file(s), no advance
+                _retry.current = false
+                activeLoopBody = groupBody
+                return jumpTo
+              }
+              // Continue → fall through to the normal advance below
+            }
+
+            // Advance every iterator that still has files left; they move together.
+            let anyMore = false
+            for (const loop of forEachLoops) {
+              const remaining = loopCounters.get(loop.whileId)
+              if (remaining != null && remaining > 1) {
+                loopCounters.set(loop.whileId, remaining - 1)
+                bumpWhileProgress(loop.whileId)
+                anyMore = true
+              }
+            }
+            if (anyMore) {
+              setRunState((s) => ({ ...s, blockStep: 'Next file…' }))
+              activeLoopBody = groupBody
+              return jumpTo
+            }
+            activeLoopBody = null
+            return undefined
+          }
+
+          if (!whileLoop) return undefined
+          const remaining = loopCounters.get(whileLoop.whileId)
+
+          // Auto mode with iterations left → loop back automatically.
+          if (remaining != null && remaining > 1) {
+            loopCounters.set(whileLoop.whileId, remaining - 1)
+            bumpWhileProgress(whileLoop.whileId)
+            setRunState((s) => ({ ...s, blockStep: `Looping… ${remaining - 1} left` }))
+            activeLoopBody = whileLoop.bodyIds
+            return whileLoop.firstIdx
+          }
+          // Otherwise the auto counter is exhausted (or it's manual mode): pause on
+          // the While and wait for Continue (proceed) or Retry (run the body again).
+          // runningBranchId blocks Wait branches while the pre-phase is parked here.
+          _retry.current = false
+          set({ activeNodeId: whileLoop.whileId, runningBranchId: whileLoop.whileId })
+          setRunState((s) => ({ ...s, status: 'paused', blockStep: 'Loop finished — Continue or Retry' }))
+          await new Promise<void>((resolve) => { _resume.current = resolve })
+          if (_cancel.current) return 'cancel'
+          set({ runningBranchId: null })
+          setRunState((s) => ({ ...s, status: 'running' }))
+          if (_retry.current) {
+            _retry.current = false
+            bumpWhileProgress(whileLoop.whileId)
+            activeLoopBody = whileLoop.bodyIds
+            return whileLoop.firstIdx
+          }
+          activeLoopBody = null   // Continue → resume normal forward execution
+          return undefined
+        }
+
         // Pre-phase: nodes that don't belong to any single branch (sources + merges).
+        let stepsDone = 0
         for (let i = 0; i < preExecExtNodes.length; i++) {
           if (_cancel.current) { _ctx.current = null; set({ runState: IDLE, activeNodeId: null }); return }
           const node = preExecExtNodes[i]
+          // During a loop replay, only re-run the active loop's body members.
+          if (activeLoopBody && !activeLoopBody.has(node.id)) continue
           set((s) => ({
             activeNodeId: node.id,
-            runState: { ...s.runState, blockIndex: i, blockProgress: 0, blockStep: 'Starting…' },
+            runState: { ...s.runState, blockIndex: stepsDone, blockProgress: 0, blockStep: 'Starting…' },
           }))
           await executeExtensionNode(node, ctx, setRunState)
+          stepsDone++
+
+          const jump = await handleLoopEnd(i)
+          if (jump === 'cancel') { _ctx.current = null; set({ runState: IDLE, activeNodeId: null }); return }
+          if (jump !== undefined) { i = jump - 1 }
         }
 
         if (waitIds.length > 0) {
@@ -604,19 +1004,38 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
 
     cancel() {
       _cancel.current = true
+      _pauseRequested.current = false
+      flushResume()   // unblock a manual While pause so the run can tear down
       if (_activeJobId.current) {
         const apiUrl = useAppStore.getState().apiUrl
         axios.create({ baseURL: apiUrl }).post(`/generate/cancel/${_activeJobId.current}`).catch(() => {})
         _activeJobId.current = null
       }
       _ctx.current = null
-      set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null, nodeImageOutputs: {}, waitStates: {}, runningBranchId: null })
+      set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null, nodeImageOutputs: {}, waitStates: {}, runningBranchId: null, whileProgress: {}, pausedGroup: [] })
       useAppStore.getState().setCurrentJob(null)
     },
 
     reset() {
       _ctx.current = null
-      set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null, nodeImageOutputs: {}, waitStates: {}, runningBranchId: null })
+      set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null, nodeImageOutputs: {}, waitStates: {}, runningBranchId: null, whileProgress: {}, pausedGroup: [] })
+    },
+
+    continueWhile() {
+      flushResume()
+    },
+
+    retryWhile() {
+      _retry.current = true
+      flushResume()
+    },
+
+    pauseWhile() {
+      _pauseRequested.current = true
+    },
+
+    setLiveNodeParams(nodeId, params) {
+      _liveParams.current.set(nodeId, params)
     },
   }
 })

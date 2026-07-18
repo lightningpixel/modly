@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
-export type UiScale = 'small' | 'medium' | 'large'
+export type UiScale = 'small' | 'medium' | 'large' | 'very-large'
 export type BackendStatus = 'not_started' | 'starting' | 'ready' | 'error'
 export type SetupStatus = 'idle' | 'checking' | 'needed' | 'installing' | 'done' | 'error'
 export interface SetupProgress { step: string; percent: number; currentPackage?: string }

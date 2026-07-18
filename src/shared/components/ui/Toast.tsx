@@ -8,6 +8,7 @@ export function Toast(): JSX.Element | null {
     if (!toast) return
     const timer = window.setTimeout(() => hideToast(), toast.durationMs ?? 2800)
     return () => window.clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- key off id/duration, not the toast object identity
   }, [toast?.id, toast?.durationMs, hideToast])
 
   if (!toast) return null

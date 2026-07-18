@@ -40,7 +40,16 @@ export function ExtensionDrawer({
   const [syncing,     setSyncing]     = useState(false)
   const [syncError,   setSyncError]   = useState<string | null>(null)
 
-  const isModel = ext.type === 'model'
+  const isModel     = ext.type === 'model'
+  // Built-ins are corrupted-flagged too (builtin-sync repairs them on restart),
+  // but they can't be deleted — show the banner without the delete action.
+  const isCorrupted = !!ext.corrupted
+  const corruptedMsg =
+    ext.manifestError === 'invalid'
+      ? 'This extension folder has a manifest that cannot be parsed. Fix the JSON syntax in its manifest.json, or delete the folder and reinstall.'
+      : ext.manifestError === 'incomplete'
+        ? 'A previous install of this extension never completed. Delete the folder, then install the extension again.'
+        : 'This extension folder is incomplete (its manifest is missing) — usually the leftover of an interrupted install. Delete the folder, then install the extension again.'
   const isLocal = typeof ext.source === 'string' && ext.source.startsWith('local://')
   const localPath = isLocal ? ext.source!.replace('local://', '') : null
   const { total, done, installing, hasAvailable } = extInstallSummary(ext, installedIds, downloading)
@@ -125,6 +134,22 @@ export function ExtensionDrawer({
 
         {/* Body */}
         <div className="flex-1 min-h-0 overflow-y-auto px-5 py-5">
+          {/* Corrupted install */}
+          {isCorrupted && (
+            <div className="mb-5 flex items-start gap-2.5 px-3 py-3 rounded-lg bg-amber-950/30 border border-amber-800/40">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-amber-400 shrink-0 mt-0.5">
+                <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
+              </svg>
+              <div className="min-w-0">
+                <p className="text-[12px] font-semibold text-amber-400">Corrupted installation</p>
+                <p className="text-[11px] leading-5 text-amber-400/80 mt-1">
+                  {ext.builtin ? 'This built-in extension folder is damaged — restart Modly to let it re-sync.' : corruptedMsg}
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Error */}
           {error && (
             <div className="mb-5 flex items-start gap-2 px-3 py-2.5 rounded-lg bg-red-950/30 border border-red-800/30">
@@ -242,7 +267,20 @@ export function ExtensionDrawer({
 
         {/* Footer */}
         <div className="px-5 py-4 border-t border-zinc-800/80 flex items-center gap-2.5 shrink-0">
-          {isModel && hasAvailable ? (
+          {isCorrupted && !ext.builtin ? (
+            <button
+              onClick={() => onUninstall(ext.id)}
+              disabled={disabled}
+              className="flex-1 inline-flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-[9px] text-xs font-semibold bg-red-600/90 text-white hover:bg-red-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" />
+                <path d="M10 11v6M14 11v6" />
+              </svg>
+              Delete broken folder
+            </button>
+          ) : isModel && hasAvailable ? (
             <button
               onClick={() => onInstallAll(ext)}
               disabled={disabled || installing}
@@ -263,7 +301,7 @@ export function ExtensionDrawer({
             </button>
           )}
 
-          {isModel && (
+          {isModel && !isCorrupted && (
             <button
               onClick={handleRepair}
               disabled={repairing || disabled}
@@ -295,7 +333,7 @@ export function ExtensionDrawer({
             </button>
           )}
 
-          {!ext.builtin && (
+          {!ext.builtin && !isCorrupted && (
             <button
               onClick={() => onUninstall(ext.id)}
               disabled={disabled}

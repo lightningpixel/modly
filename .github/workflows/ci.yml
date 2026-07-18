@@ -37,3 +37,22 @@ jobs:
         run: sudo apt-get install -y rpm
       - name: Build & Package (Linux)
         run: npx electron-vite build && npx electron-builder --linux --publish never
+
+  # Même build que release.yml (arm64, signature ad-hoc via after-pack.js),
+  # sans publication : vérifie juste que le packaging macOS ne casse pas.
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm install
+      - name: Download Python embed
+        run: node scripts/download-python-embed.js
+      - name: Build & Package (macOS arm64)
+        run: npx electron-vite build && npx electron-builder --mac --arm64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false

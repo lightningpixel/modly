@@ -705,6 +705,7 @@ export default function GeneratePage(): JSX.Element {
   useEffect(() => {
     if (openPanel !== 'library' || libraryLoaded || libraryLoading) return
     void loadLibraryEntries()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- lazy-load guarded by loaded/loading flags
   }, [openPanel, libraryLoaded, libraryLoading])
 
   async function handleUnloadAll() {
@@ -948,8 +949,8 @@ export default function GeneratePage(): JSX.Element {
               ) : (
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                  <polyline points="7 10 12 5 17 10" />
-                  <line x1="12" y1="5" x2="12" y2="15" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
                 </svg>
               )}
               {importing ? 'Importing…' : 'Import'}
@@ -1026,8 +1027,8 @@ export default function GeneratePage(): JSX.Element {
                 >
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="7 10 12 15 17 10" />
-                    <line x1="12" y1="15" x2="12" y2="3" />
+                    <polyline points="7 10 12 5 17 10" />
+                    <line x1="12" y1="5" x2="12" y2="15" />
                   </svg>
                   Export
                   <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">

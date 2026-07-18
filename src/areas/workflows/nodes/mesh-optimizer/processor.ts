@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-require-imports */
 import path = require('path')
 
 interface ProcessInput  { filePath?: string; text?: string }
@@ -22,6 +21,7 @@ const processor = async (
 
   // Lazy requires — resolved from the extension's own node_modules
   const { NodeIO }             = require('@gltf-transform/core')
+  const { ALL_EXTENSIONS }     = require('@gltf-transform/extensions')
   const { simplify, weld }     = require('@gltf-transform/functions')
   const { MeshoptSimplifier }  = require('meshoptimizer')
 
@@ -29,7 +29,7 @@ const processor = async (
   await MeshoptSimplifier.ready
 
   context.progress(10, 'Loading mesh…')
-  const io  = new NodeIO()
+  const io  = new NodeIO().registerExtensions(ALL_EXTENSIONS)
   const doc = await io.read(input.filePath)
 
   // Count current triangles across all primitives

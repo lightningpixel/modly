@@ -1,5 +1,5 @@
 import { useCallback } from 'react'
-import { Handle, Position, useReactFlow } from '@xyflow/react'
+import { Handle, Position } from '@xyflow/react'
 import { useAppStore } from '@shared/stores/appStore'
 import { useNavStore } from '@shared/stores/navStore'
 import type { WFNodeData } from '@shared/types/electron.d'

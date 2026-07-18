@@ -4,6 +4,7 @@
   "private": true,
   "dependencies": {
     "@gltf-transform/core": "^3.9.0",
+    "@gltf-transform/extensions": "^3.9.0",
     "@gltf-transform/functions": "^3.9.0",
     "meshoptimizer": "^0.22.0"
   }

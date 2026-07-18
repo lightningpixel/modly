@@ -63,6 +63,7 @@ function ChoosePathPanel({
   // Sync if defaultPath arrives after mount (async IPC)
   useEffect(() => {
     if (defaultPath && !selectedPath) setSelectedPath(defaultPath)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only sync when defaultPath arrives, not on user edits
   }, [defaultPath])
 
   async function handleBrowse() {
