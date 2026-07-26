@@ -19,7 +19,7 @@ import { checkSetupNeeded, markSetupDone, runFullSetup, getVenvPythonExe, ensure
 import { logger } from './logger'
 import { getProcessRunner, getPythonProcessRunner, getExtPythonExe, terminateProcessRunner, terminateAllProcessRunners } from './process-runner'
 import { getBuiltinExtensionsDir } from './builtin-sync'
-import { spawn, execFile } from 'child_process'
+import { spawn, execFile, execFileSync } from 'child_process'
 import {
   EXT_BACKUP_PREFIX,
   EXT_INCOMPLETE_MARKER,
@@ -87,6 +87,25 @@ function detectGpuInfo(): Promise<GpuInfo> {
   })
 }
 
+// ─── ROCm detect (AMD GPU) ────────────────────────────────────────────────────
+// True when ROCm userspace is installed and rocminfo reports at least one AMD
+// GPU compute agent (gfx*). Used to select the ROCm PyTorch wheel flavor so
+// AMD GPUs install the rocm build instead of falling through to CUDA/CPU.
+function detectRocmGpu(): boolean {
+  if (process.platform !== 'linux') return false
+  if (!existsSync('/opt/rocm') && !existsSync('/usr/bin/rocminfo')) return false
+  try {
+    const out = execFileSync('rocminfo', [], {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    return /gfx\d{3}/.test(out)
+  } catch {
+    return false
+  }
+}
+
 // ─── Run an extension's setup.py directly (no FastAPI needed) ─────────────────
 
 function runExtensionSetup(
@@ -108,12 +127,16 @@ function runExtensionSetup(
     try { mkdirSync(pipCacheDir, { recursive: true }) } catch { /* pip creates it too */ }
 
     const accelerator = process.platform === 'darwin' && process.arch === 'arm64' ? 'mps' : gpuSm > 0 ? 'cuda' : 'cpu'
+    // AMD GPU under ROCm: use the ROCm PyTorch wheel flavor. Falls back to CUDA
+    // when an NVIDIA GPU is present (gpuSm > 0) or ROCm is unavailable.
+    const torchFlavor = process.platform === 'linux' && gpuSm === 0 && detectRocmGpu() ? 'rocm' : 'cuda'
     const args = JSON.stringify({
       python_exe: pythonExe,
       ext_dir: extDir,
       gpu_sm: gpuSm,
       cuda_version: cudaVersion,
       accelerator,
+      torch_flavor: torchFlavor,
       platform: process.platform,
       arch: process.arch,
     })
