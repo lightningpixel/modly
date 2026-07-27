@@ -10,6 +10,7 @@ import {
   normalizeWorkspaceAssetPath,
   openWorkspaceAssetLibraryEntry,
   readWorkspaceAssetLibraryEntry,
+  readWorkspaceAssetLibraryThumbnail,
   registerWorkspaceAssetLibraryIpcHandlers,
 } from './artifact-registry-service.ts'
 
@@ -198,6 +199,27 @@ test('fails closed for unsafe, self, missing, and mismatched sourceWorkspacePath
   assert.equal(!mismatched.success && mismatched.error.code, 'not-openable')
 }))
 
+test('reads a sibling .thumb.png for GLB assets and stays silent when one is missing', () => withWorkspace(async (workspaceDir) => {
+  await mkdir(path.join(workspaceDir, 'Exports/props'), { recursive: true })
+  await writeFile(path.join(workspaceDir, 'Exports/props/hero.glb'), 'glb')
+  await writeFile(path.join(workspaceDir, 'Exports/props/hero.thumb.png'), 'fake-png-bytes')
+  await writeFile(path.join(workspaceDir, 'Exports/props/no-thumb.glb'), 'glb')
+  await writeFile(path.join(workspaceDir, 'Exports/static.ply'), 'ply')
+
+  const withThumb = await readWorkspaceAssetLibraryThumbnail({ workspaceDir, workspacePath: 'Exports/props/hero.glb' })
+  assert.equal(withThumb.success, true)
+  assert.equal(withThumb.success && withThumb.dataUrl, `data:image/png;base64,${Buffer.from('fake-png-bytes').toString('base64')}`)
+
+  const withoutThumb = await readWorkspaceAssetLibraryThumbnail({ workspaceDir, workspacePath: 'Exports/props/no-thumb.glb' })
+  assert.equal(withoutThumb.success, false)
+
+  const nonMesh = await readWorkspaceAssetLibraryThumbnail({ workspaceDir, workspacePath: 'Exports/static.ply' })
+  assert.equal(nonMesh.success, false)
+
+  const unsafe = await readWorkspaceAssetLibraryThumbnail({ workspaceDir, workspacePath: '../secret.glb' })
+  assert.equal(unsafe.success, false)
+}))
+
 test('IPC read and open handlers forward sourceWorkspacePath without trusting malformed payloads', async () => {
   const handlers = new Map<string, (event: unknown, payload: unknown) => Promise<unknown>>()
   registerWorkspaceAssetLibraryIpcHandlers({
@@ -224,7 +246,12 @@ test('registers workspace library IPC handlers with structured results', async (
   assert.equal(typeof handlers.get('workspace:library:list'), 'function')
   assert.equal(typeof handlers.get('workspace:library:read'), 'function')
   assert.equal(typeof handlers.get('workspace:library:open'), 'function')
+  assert.equal(typeof handlers.get('workspace:library:thumbnail'), 'function')
   const result = await handlers.get('workspace:library:read')?.({}, { workspacePath: '../escape.glb' })
   assert.equal(typeof (result as { success?: unknown }).success, 'boolean')
   assert.equal((result as { success: boolean, error?: { code: string } }).error?.code, 'unsafe-path')
+  const thumbnail = await handlers.get('workspace:library:thumbnail')?.({}, { workspacePath: '../escape.glb' })
+  assert.equal((thumbnail as { success: boolean }).success, false)
+  const missingPayload = await handlers.get('workspace:library:thumbnail')?.({}, {})
+  assert.equal((missingPayload as { success: boolean }).success, false)
 })
