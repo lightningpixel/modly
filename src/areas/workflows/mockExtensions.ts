@@ -31,6 +31,21 @@ function applyParamDefaults(
   )
 }
 
+// Extension manifests are untyped JSON at runtime. `inputs` is documented as
+// an array of plain type strings, but some manifests declare it as an array
+// of objects instead (e.g. `{ name, label, type, required }` slots). A string
+// never equals such an object, so the workflow preflight check silently
+// treats every declared input as missing. Normalize once here, at the
+// manifest boundary, so everything downstream can trust the documented type.
+function normalizeInputs(
+  raw: WorkflowExtension['inputs'],
+): WorkflowExtension['inputs'] {
+  if (!raw) return raw
+  return raw.map((entry) =>
+    typeof entry === 'string' ? entry : (entry as unknown as { type: WorkflowExtension['input'] }).type,
+  )
+}
+
 export function buildAllWorkflowExtensions(
   modelExtensions:   ModelExtension[],
   processExtensions: ProcessExtension[],
@@ -48,7 +63,7 @@ export function buildAllWorkflowExtensions(
         name:            node.name,
         description:     ext.description ?? '',
         input:           node.input,
-        inputs:          node.inputs,
+        inputs:          normalizeInputs(node.inputs),
         inputLabels:     node.inputLabels,
         output:          node.output,
         params:          applyParamDefaults(node.paramsSchema as ParamSchema[], node.paramDefaults),
@@ -69,7 +84,7 @@ export function buildAllWorkflowExtensions(
         name:            node.name,
         description:     ext.description ?? '',
         input:           node.input,
-        inputs:          node.inputs,
+        inputs:          normalizeInputs(node.inputs),
         inputLabels:     node.inputLabels,
         output:          node.output,
         params:          applyParamDefaults(node.paramsSchema as ParamSchema[], node.paramDefaults),

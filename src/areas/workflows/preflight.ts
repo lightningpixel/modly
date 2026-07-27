@@ -30,7 +30,8 @@ function formatType(type: DataType): string {
   if (type === 'mesh') return 'mesh'
   if (type === 'image') return 'image'
   if (type === 'audio') return 'audio'
-  return 'text'
+  if (type === 'text') return 'text'
+  return String(type)
 }
 
 function formatRequiredTypes(types: DataType[]): string {
