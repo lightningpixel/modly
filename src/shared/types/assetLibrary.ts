@@ -11,7 +11,7 @@ export const ASSET_CAPABILITIES = [
 
 export const ASSET_ENTRY_STATES = ['ready', 'unknown-metadata', 'unsupported', 'unsafe'] as const
 export const ASSET_LIBRARY_PREVIEW_KINDS = ['3d-model', 'text', 'binary', 'none'] as const
-export const ASSET_LIBRARY_SOURCE_SCOPES = ['workflows', 'exports'] as const
+export const ASSET_LIBRARY_SOURCE_SCOPES = ['generated', 'workflows', 'exports'] as const
 export const ASSET_LIBRARY_MANIFEST_CAPABILITIES = ['generated-world', 'scene-manifest'] as const
 
 export type AssetCapability = typeof ASSET_CAPABILITIES[number]
@@ -43,6 +43,32 @@ export interface AssetLibraryEntry {
   nonOpenableReason?: string
   createdAt?: string
   updatedAt?: string
+  semantic?: AssetLibrarySemanticMetadata
+}
+
+export interface AssetLibraryLineageLink {
+  workspacePath: string
+  displayName?: string
+}
+
+export interface AssetLibraryDerivedFrom {
+  /** The asset used directly to create this version. */
+  parent: AssetLibraryLineageLink
+  /** The first asset in the version family. */
+  root: AssetLibraryLineageLink
+}
+
+/**
+ * Human and structural metadata stored beside a model in `<model>.tags.json`.
+ * The embedded `asset.extras.modly` copy carries the same name/project/tags
+ * fields; the sidecar additionally owns creation time and lineage.
+ */
+export interface AssetLibrarySemanticMetadata {
+  name?: string
+  project?: string
+  tags: string[]
+  created?: string
+  derivedFrom?: AssetLibraryDerivedFrom
 }
 
 export interface AssetLibrarySourceLink {

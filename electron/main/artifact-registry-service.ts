@@ -12,6 +12,8 @@ import type {
   AssetLibraryPreviewKind,
   AssetLibraryPreviewPayload,
   AssetLibraryReadResult,
+  AssetLibraryLineageLink,
+  AssetLibrarySemanticMetadata,
   AssetLibrarySourceScope,
   AssetLibraryThumbnailResult,
 } from '../../src/shared/types/assetLibrary'
@@ -19,9 +21,9 @@ import type { ArtifactProvenance } from '../../src/shared/types/artifacts'
 
 const WINDOWS_ABSOLUTE_PATH = /^[a-zA-Z]:[\\/]/
 const ENCODED_ESCAPE_PATTERN = /%2e|%2f|%5c/i
-const ALLOWED_ROOTS = ['Workflows', 'Exports'] as const
+const ALLOWED_ROOTS = ['Default', 'Workflows', 'Exports'] as const
 const SKIPPED_DIRS = new Set(['tmp', 'temp', 'cache'])
-const INTERNAL_SUFFIXES = ['.artifact.json', '.rigmeta.json'] as const
+const INTERNAL_SUFFIXES = ['.artifact.json', '.rigmeta.json', '.tags.json', '.previews.json', '.thumb.png'] as const
 const TEXT_EXTENSIONS = new Set(['json', 'txt', 'md'])
 const INTRINSIC_MOTION_EXTENSIONS = new Set(['bvh', 'npz'])
 const MESH_EXTENSIONS = new Set(['glb', 'gltf', 'obj', 'stl', 'ply', 'splat'])
@@ -64,6 +66,11 @@ interface AssetLibraryMetadata {
   artifactId?: string
   versionId?: string
   provenance?: ArtifactProvenance
+  warnings: string[]
+}
+
+interface AssetLibrarySemanticRead {
+  semantic?: AssetLibrarySemanticMetadata
   warnings: string[]
 }
 
@@ -119,7 +126,9 @@ function isGlbOrGltf(workspacePath: string): boolean {
 }
 
 function sourceScopeFor(workspacePath: string): AssetLibrarySourceScope {
-  return workspacePath.startsWith('Exports/') ? 'exports' : 'workflows'
+  if (workspacePath.startsWith('Exports/')) return 'exports'
+  if (workspacePath.startsWith('Workflows/')) return 'workflows'
+  return 'generated'
 }
 
 export function classifyAssetLibraryCandidate(candidate: AssetLibraryClassificationCandidate): AssetLibraryClassification {
@@ -155,6 +164,11 @@ function stringField(value: unknown): string | undefined {
 
 function objectField(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+}
+
+function stringListField(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return [...new Set(value.map(stringField).filter((item): item is string => item !== undefined))]
 }
 
 function manifestCapabilityFor(workspacePath: string): 'generated-world' | 'scene-manifest' | undefined {
@@ -210,12 +224,87 @@ async function readMetadata(workspaceDir: string, workspacePath: string, absolut
   return metadata
 }
 
+function semanticSidecarPathFor(absolutePath: string): string {
+  return absolutePath.replace(/\.[^./\\]+$/, '') + '.tags.json'
+}
+
+function safeSemanticLineageLink(
+  workspaceDir: string,
+  value: unknown,
+): AssetLibraryLineageLink | undefined {
+  const candidate = objectField(value)
+  const rawPath = stringField(candidate?.path ?? candidate?.workspacePath)
+  if (!rawPath) return undefined
+  try {
+    const { workspacePath } = normalizeWorkspaceAssetPath(workspaceDir, rawPath)
+    return {
+      workspacePath,
+      displayName: stringField(candidate?.name ?? candidate?.displayName),
+    }
+  } catch {
+    return undefined
+  }
+}
+
+async function readSemanticMetadata(
+  workspaceDir: string,
+  absolutePath: string,
+): Promise<AssetLibrarySemanticRead> {
+  let parsed: Record<string, unknown>
+  try {
+    const raw = JSON.parse(await readFile(semanticSidecarPathFor(absolutePath), 'utf8')) as unknown
+    const object = objectField(raw)
+    if (!object) return { warnings: ['Asset metadata sidecar is not a JSON object.'] }
+    parsed = object
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { warnings: [] }
+    return { warnings: ['Asset metadata sidecar could not be read.'] }
+  }
+
+  const warnings: string[] = []
+  const name = stringField(parsed.name)
+  const project = stringField(parsed.project)
+  const tags = stringListField(parsed.tags)
+  if (parsed.tags !== undefined && !Array.isArray(parsed.tags)) {
+    warnings.push('Ignored invalid asset tags.')
+  }
+
+  const createdRaw = stringField(parsed.created)
+  const created = createdRaw && Number.isFinite(Date.parse(createdRaw)) ? createdRaw : undefined
+  if (createdRaw && !created) warnings.push('Ignored invalid asset creation date.')
+
+  let derivedFrom: AssetLibrarySemanticMetadata['derivedFrom']
+  if (parsed.derived_from !== undefined) {
+    const rawDerivedFrom = objectField(parsed.derived_from)
+    const parent = safeSemanticLineageLink(workspaceDir, rawDerivedFrom?.parent)
+    const root = safeSemanticLineageLink(workspaceDir, rawDerivedFrom?.root)
+    if (parent && root) {
+      derivedFrom = { parent, root }
+    } else {
+      warnings.push('Ignored unsafe or invalid asset lineage.')
+    }
+  }
+
+  return {
+    semantic: {
+      ...(name ? { name } : {}),
+      ...(project ? { project } : {}),
+      tags,
+      ...(created ? { created } : {}),
+      ...(derivedFrom ? { derivedFrom } : {}),
+    },
+    warnings,
+  }
+}
+
 function shouldSkipDirectory(name: string): boolean {
   return name.startsWith('.') || SKIPPED_DIRS.has(name.toLowerCase())
 }
 
 function shouldSkipFile(name: string): boolean {
-  return name.startsWith('.') || INTERNAL_SUFFIXES.some((suffix) => name.endsWith(suffix))
+  return name.startsWith('.')
+    || INTERNAL_SUFFIXES.some((suffix) => name.endsWith(suffix))
+    || /\.preview-[^/\\]+\.webp$/i.test(name)
 }
 
 async function hasRigMetadata(absolutePath: string): Promise<boolean> {
@@ -232,13 +321,18 @@ async function hasRigMetadata(absolutePath: string): Promise<boolean> {
 async function buildEntry(workspaceDir: string, workspacePath: string): Promise<AssetLibraryEntry> {
   const { absolutePath } = normalizeWorkspaceAssetPath(workspaceDir, workspacePath)
   const stats = await stat(absolutePath)
-  const classification = classifyAssetLibraryCandidate({ workspacePath, hasRigMetadata: await hasRigMetadata(absolutePath) })
+  const semanticRead = await readSemanticMetadata(workspaceDir, absolutePath)
+  const semanticTags = semanticRead.semantic?.tags ?? []
+  const classification = classifyAssetLibraryCandidate({
+    workspacePath,
+    hasRigMetadata: semanticTags.includes('rigged') || await hasRigMetadata(absolutePath),
+  })
   const metadata = await readMetadata(workspaceDir, workspacePath, absolutePath)
   const manifestCapability = metadata.manifestWorkspacePath ? manifestCapabilityFor(metadata.manifestWorkspacePath) : undefined
   return {
     id: `library:${workspacePath}`,
     workspacePath,
-    displayName: basename(workspacePath),
+    displayName: semanticRead.semantic?.name ?? basename(workspacePath),
     sourceScope: sourceScopeFor(workspacePath),
     capability: classification.capability,
     state: classification.state,
@@ -248,11 +342,12 @@ async function buildEntry(workspaceDir: string, workspacePath: string): Promise<
     artifactId: metadata.artifactId,
     versionId: metadata.versionId,
     provenance: metadata.provenance,
-    warnings: metadata.warnings,
+    warnings: [...metadata.warnings, ...semanticRead.warnings],
     openable: classification.openable,
     nonOpenableReason: classification.nonOpenableReason,
-    createdAt: (stats.birthtime.getTime() > 0 ? stats.birthtime : stats.mtime).toISOString(),
+    createdAt: semanticRead.semantic?.created ?? (stats.birthtime.getTime() > 0 ? stats.birthtime : stats.mtime).toISOString(),
     updatedAt: stats.mtime.toISOString(),
+    semantic: semanticRead.semantic,
   }
 }
 

@@ -11,13 +11,17 @@ import { getDefaultAssetLibraryService } from './assetLibraryService'
 import { resolveAssetLibraryOpenTarget, type ProjectedAssetLibraryEntry } from './assetLibraryProjection'
 import type { AssetLibraryPreviewClip } from '../../shared/types/assetLibrary'
 import {
+  ASSET_LIBRARY_KIND_FILTERS,
+  ASSET_LIBRARY_POLY_FILTERS,
   ASSET_LIBRARY_SORT_OPTIONS,
+  buildAssetLibraryProjectGroups,
   buildAssetLibraryOpenRequest,
   clampAssetLibraryPanelHeight,
   clampAssetLibraryPanelWidth,
+  createDefaultAssetLibraryFilters,
   createAssetLibraryOpenJob,
   describeAssetLibraryOpenability,
-  filterAssetLibraryScopeGroups,
+  formatAssetLibraryClipName,
   getDefaultAssetLibraryCollapsedSectionKeys,
   getStoredAssetLibraryPanelHeight,
   getStoredAssetLibraryPanelWidth,
@@ -27,7 +31,10 @@ import {
   storeAssetLibraryPanelHeight,
   storeAssetLibraryPanelWidth,
   toggleAssetLibrarySectionKey,
+  type AssetLibraryFilters,
+  type AssetLibraryLineageFamily,
   type AssetLibrarySortMode,
+  type AssetLibraryViewMode,
   type GenerateOpenPanel,
 } from './assetLibraryUi'
 
@@ -404,6 +411,8 @@ function AssetLibraryPopover({
   error,
   searchQuery,
   sortMode,
+  viewMode,
+  filters,
   collapsedSectionKeys,
   thumbnails,
   previews,
@@ -412,6 +421,8 @@ function AssetLibraryPopover({
   onActivateEntry,
   onSearchQueryChange,
   onSortModeChange,
+  onViewModeChange,
+  onFiltersChange,
   onToggleSection,
   onOpenSelected,
   onFetchPreviewFrame,
@@ -427,6 +438,8 @@ function AssetLibraryPopover({
   error: string | null
   searchQuery: string
   sortMode: AssetLibrarySortMode
+  viewMode: AssetLibraryViewMode
+  filters: AssetLibraryFilters
   collapsedSectionKeys: string[]
   /** Data URLs keyed by workspacePath, populated lazily as thumbnails load. */
   thumbnails: Record<string, string>
@@ -438,6 +451,8 @@ function AssetLibraryPopover({
   onActivateEntry: (entryId: string) => void
   onSearchQueryChange: (value: string) => void
   onSortModeChange: (value: AssetLibrarySortMode) => void
+  onViewModeChange: (value: AssetLibraryViewMode) => void
+  onFiltersChange: (value: AssetLibraryFilters) => void
   onToggleSection: (sectionKey: string) => void
   onOpenSelected: () => void
   onFetchPreviewFrame: (workspacePath: string, clip: string) => Promise<string | null>
@@ -446,17 +461,20 @@ function AssetLibraryPopover({
   onResizeMouseDown: (event: React.MouseEvent) => void
   onResizeHeightMouseDown: (event: React.MouseEvent) => void
 }) {
-  const scopeGroups = filterAssetLibraryScopeGroups(entries, searchQuery, sortMode)
-  const visibleEntryIds = new Set(scopeGroups.flatMap((scopeGroup) => scopeGroup.entryGroups.flatMap((group) => group.entries.map((entry) => entry.id))))
+  const projectGroups = buildAssetLibraryProjectGroups(entries, searchQuery, sortMode, filters)
+  const visibleEntryIds = new Set(projectGroups.flatMap((group) => group.families.flatMap((family) => family.entries.map((entry) => entry.id))))
   const selectedEntry = selectedEntryId && visibleEntryIds.has(selectedEntryId)
     ? entries.find((entry) => entry.id === selectedEntryId) ?? null
     : null
   const normalizedSearchQuery = searchQuery.trim()
-  const hasActiveSearch = normalizedSearchQuery.length > 0
+  const hasActiveFilters = filters.kind !== 'all' || filters.poly !== 'all' || filters.needsAttention
+  const hasActiveDiscovery = normalizedSearchQuery.length > 0 || hasActiveFilters
+  const familyCount = projectGroups.reduce((count, group) => count + group.families.length, 0)
+  const versionCount = projectGroups.reduce((count, group) => count + group.entryCount, 0)
   const openDisabled = !selectedEntry || !isAssetLibraryEntryOpenable(selectedEntry) || loading || opening
   const selectedMessage = selectedEntry
     ? describeAssetLibraryOpenability(selectedEntry)
-    : scopeGroups.length === 0 && normalizedSearchQuery
+    : projectGroups.length === 0 && normalizedSearchQuery
       ? `No workspace assets match “${normalizedSearchQuery}”.`
       : 'Select an asset to open it in Generate.'
 
@@ -469,16 +487,26 @@ function AssetLibraryPopover({
     >
       <div className="flex items-center justify-between gap-2 shrink-0">
         <div>
-          <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Workspace library</p>
-          <p className="text-xs text-zinc-300">Select a workspace asset and open the supported source in Generate.</p>
+          <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Asset Library</p>
+          <p className="text-xs text-zinc-300">Browse models by project, traits, and version family.</p>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="px-2 py-1 text-[11px] text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 rounded-lg transition-colors"
-        >
-          Close library
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={loading || opening}
+            className="px-2 py-1 text-[11px] text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 rounded-lg transition-colors"
+          >
+            Refresh
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-2 py-1 text-[11px] text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 rounded-lg transition-colors"
+          >
+            Close
+          </button>
+        </div>
       </div>
 
       {/* Resize handle — drag to widen/narrow the library panel; size is persisted. */}
@@ -499,28 +527,19 @@ function AssetLibraryPopover({
         className="absolute bottom-0 left-0 right-0 h-1.5 cursor-row-resize hover:bg-violet-400/40 active:bg-violet-400/60 transition-colors rounded-b-xl"
       />
 
-      <button
-        type="button"
-        onClick={onRefresh}
-        disabled={loading || opening}
-        className="self-start shrink-0 px-2.5 py-1.5 text-[11px] text-zinc-300 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 disabled:pointer-events-none rounded-lg transition-colors"
-      >
-        Refresh assets
-      </button>
-
       <div className="flex items-end gap-2 shrink-0">
         <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-          <label htmlFor="asset-library-search" className="text-[11px] text-zinc-300">Search workspace assets</label>
+          <label htmlFor="asset-library-search" className="text-[11px] text-zinc-300">Search assets</label>
           <input
             id="asset-library-search"
             type="search"
             value={searchQuery}
             onChange={(event) => onSearchQueryChange(event.target.value)}
-            placeholder="Search by name, path, scope, or capability"
+            placeholder="Search names, projects, tags, clips, or locations"
             className="appearance-none bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
           />
         </div>
-        <div className="flex w-24 shrink-0 flex-col gap-1.5">
+        <div className="flex w-36 shrink-0 flex-col gap-1.5">
           <label htmlFor="asset-library-sort" className="text-[11px] text-zinc-300">Sort</label>
           <select
             id="asset-library-sort"
@@ -533,69 +552,136 @@ function AssetLibraryPopover({
             ))}
           </select>
         </div>
+        <div className="flex shrink-0 rounded-lg border border-zinc-700 bg-zinc-800 p-0.5" aria-label="Library view">
+          {(['gallery', 'list'] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              aria-pressed={viewMode === mode}
+              onClick={() => onViewModeChange(mode)}
+              className={`rounded-md px-2.5 py-1.5 text-[11px] capitalize transition-colors ${
+                viewMode === mode ? 'bg-violet-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              {mode}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="shrink-0 space-y-2 rounded-lg border border-zinc-800 bg-zinc-950/40 p-2.5">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="mr-1 text-[10px] font-medium uppercase tracking-wider text-zinc-500">What it is</span>
+          {ASSET_LIBRARY_KIND_FILTERS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              aria-pressed={filters.kind === option.value}
+              onClick={() => onFiltersChange({ ...filters, kind: option.value })}
+              className={`rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
+                filters.kind === option.value
+                  ? 'border-violet-400/70 bg-violet-500/20 text-violet-100'
+                  : 'border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="mr-1 text-[10px] font-medium uppercase tracking-wider text-zinc-500">File weight</span>
+          {ASSET_LIBRARY_POLY_FILTERS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              aria-pressed={filters.poly === option.value}
+              onClick={() => onFiltersChange({ ...filters, poly: option.value })}
+              className={`rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
+                filters.poly === option.value
+                  ? 'border-sky-400/70 bg-sky-500/15 text-sky-100'
+                  : 'border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            aria-pressed={filters.needsAttention}
+            onClick={() => onFiltersChange({ ...filters, needsAttention: !filters.needsAttention })}
+            className={`ml-auto rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
+              filters.needsAttention
+                ? 'border-amber-400/70 bg-amber-500/15 text-amber-100'
+                : 'border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            Needs a name
+          </button>
+        </div>
       </div>
 
       {loading ? (
         <p role="status" className="flex-1 min-h-0 flex items-center justify-center text-xs text-zinc-400">Loading workspace assets…</p>
-      ) : scopeGroups.length === 0 && !normalizedSearchQuery ? (
+      ) : projectGroups.length === 0 && !hasActiveDiscovery ? (
         <p role="status" className="flex-1 min-h-0 flex items-center justify-center text-xs text-zinc-500">No workspace assets are indexed yet.</p>
-      ) : scopeGroups.length === 0 ? (
-        <p role="status" className="flex-1 min-h-0 flex items-center justify-center text-center text-xs text-zinc-500">{`No workspace assets match “${normalizedSearchQuery}”.`}</p>
+      ) : projectGroups.length === 0 ? (
+        <p role="status" className="flex-1 min-h-0 flex items-center justify-center text-center text-xs text-zinc-500">
+          No assets match these search and filter choices.
+        </p>
       ) : (
-        <div role="list" aria-label="Workspace library assets" className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden rounded-lg border border-zinc-800 bg-zinc-950/40">
-          {scopeGroups.map((scopeGroup) => {
-            const scopeExpanded = isAssetLibrarySectionExpanded(collapsedSectionKeys, scopeGroup.sectionKey, hasActiveSearch)
-            const scopeRegionId = `asset-library-${scopeGroup.sectionKey.replace(/[^a-z0-9-]+/gi, '-')}`
+        <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden rounded-lg border border-zinc-800 bg-zinc-950/40">
+          <div className="sticky top-0 z-10 flex items-center justify-between border-b border-zinc-800 bg-zinc-950/95 px-3 py-2 backdrop-blur">
+            <span className="text-[10px] uppercase tracking-wider text-zinc-500">Grouped by project</span>
+            <span className="text-[10px] text-zinc-500">{familyCount} families · {versionCount} versions</span>
+          </div>
+          {projectGroups.map((projectGroup) => {
+            const projectExpanded = isAssetLibrarySectionExpanded(collapsedSectionKeys, projectGroup.sectionKey, hasActiveDiscovery)
+            const projectRegionId = `asset-library-${projectGroup.sectionKey.replace(/[^a-z0-9-]+/gi, '-')}`
             return (
-              <section key={scopeGroup.sectionKey} role="group" aria-label={`Source scope ${scopeGroup.sourceScopeLabel}`} className="border-b border-zinc-800 last:border-b-0">
+              <section key={projectGroup.sectionKey} role="group" aria-label={`Project ${projectGroup.projectLabel}`} className="border-b border-zinc-800 last:border-b-0">
                 <button
                   type="button"
-                  aria-expanded={scopeExpanded}
-                  aria-controls={scopeRegionId}
-                  onClick={() => onToggleSection(scopeGroup.sectionKey)}
-                  disabled={hasActiveSearch}
-                  className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 disabled:opacity-50 disabled:pointer-events-none"
+                  aria-expanded={projectExpanded}
+                  aria-controls={projectRegionId}
+                  onClick={() => onToggleSection(projectGroup.sectionKey)}
+                  disabled={hasActiveDiscovery}
+                  className="flex w-full items-center justify-between gap-3 bg-zinc-900/80 px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 disabled:pointer-events-none"
                 >
-                  <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-300">{scopeGroup.sourceScopeLabel}</span>
-                  <span className="text-[10px] text-zinc-500">{scopeExpanded ? 'Hide' : 'Show'}</span>
+                  <span className="flex items-center gap-2">
+                    <span className={`text-xs font-semibold ${projectGroup.projectKey === 'needs-project' ? 'text-amber-200' : 'text-zinc-200'}`}>
+                      {projectGroup.projectLabel}
+                    </span>
+                    {projectGroup.projectKey === 'needs-project' && (
+                      <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[9px] text-amber-200">Add project metadata</span>
+                    )}
+                  </span>
+                  <span className="text-[10px] text-zinc-500">
+                    {projectGroup.families.length} {projectGroup.families.length === 1 ? 'family' : 'families'} · {projectGroup.entryCount} versions · {projectExpanded ? 'Hide' : 'Show'}
+                  </span>
                 </button>
-                {scopeExpanded && (
-                  <div id={scopeRegionId}>
-                    {scopeGroup.entryGroups.map((group) => {
-                      const capabilityExpanded = isAssetLibrarySectionExpanded(collapsedSectionKeys, group.sectionKey, hasActiveSearch)
-                      const capabilityRegionId = `asset-library-${group.sectionKey.replace(/[^a-z0-9-]+/gi, '-')}`
-                      return (
-                        <section key={group.sectionKey} role="group" aria-label={`Capability category ${group.capabilityLabel}`} className="border-t border-zinc-800 first:border-t-0">
-                          <button
-                            type="button"
-                            aria-expanded={capabilityExpanded}
-                            aria-controls={capabilityRegionId}
-                            onClick={() => onToggleSection(group.sectionKey)}
-                            disabled={hasActiveSearch}
-                            className="flex w-full items-center justify-between gap-2 px-4 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 disabled:opacity-50 disabled:pointer-events-none"
-                          >
-                            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-400">{group.capabilityLabel}</span>
-                            <span className="text-[10px] text-zinc-500">{capabilityExpanded ? 'Hide' : 'Show'}</span>
-                          </button>
-                          {capabilityExpanded && (
-                            <div id={capabilityRegionId}>
-                              {group.entries.map((entry) => (
-                                <AssetLibraryEntryRow
-                                  key={entry.id}
-                                  entry={entry}
-                                  selected={entry.id === selectedEntryId}
-                                  disabled={opening}
-                                  thumbnailDataUrl={thumbnails[entry.workspacePath]}
-                                  previewClips={previews[entry.workspacePath] ?? EMPTY_PREVIEW_CLIPS}
-                                  onActivate={() => onActivateEntry(entry.id)}
-                                  onFetchPreviewFrame={onFetchPreviewFrame}
-                                />
-                              ))}
-                            </div>
-                          )}
-                        </section>
-                      )
-                    })}
+                {projectExpanded && (
+                  <div
+                    id={projectRegionId}
+                    role="list"
+                    aria-label={`${projectGroup.projectLabel} asset families`}
+                    className={viewMode === 'gallery'
+                      ? 'grid grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-3 p-3'
+                      : 'divide-y divide-zinc-800'
+                    }
+                  >
+                    {projectGroup.families.map((family) => (
+                      <AssetLibraryFamilyCard
+                        key={family.key}
+                        family={family}
+                        viewMode={viewMode}
+                        selectedEntryId={selectedEntryId}
+                        disabled={opening}
+                        thumbnails={thumbnails}
+                        previews={previews}
+                        onActivateEntry={onActivateEntry}
+                        onFetchPreviewFrame={onFetchPreviewFrame}
+                      />
+                    ))}
                   </div>
                 )}
               </section>
@@ -623,49 +709,53 @@ function AssetLibraryPopover({
 }
 
 /**
- * One Library row. A click both selects and (when openable) opens the asset —
- * the "Open selected asset" button stays as a secondary affordance, not the
- * only path. Hovering swaps the static thumbnail for a looping preview clip,
- * lazily fetched over the same thumbnail IPC call, when one exists; with no
- * preview manifest yet, `previewClips` is empty and the row behaves exactly
- * as it did before — no extra fetches, no hover swap, no cycle control.
+ * One semantic asset family. Gallery cards load their active motion clip
+ * immediately so animation is visible without a precision hover. List rows
+ * retain the compact scanner from v2 and lazy-load animation on hover.
  */
-function AssetLibraryEntryRow({
-  entry,
-  selected,
+function AssetLibraryFamilyCard({
+  family,
+  viewMode,
+  selectedEntryId,
   disabled,
-  thumbnailDataUrl,
-  previewClips,
-  onActivate,
+  thumbnails,
+  previews,
+  onActivateEntry,
   onFetchPreviewFrame,
 }: {
-  entry: ProjectedAssetLibraryEntry
-  selected: boolean
+  family: AssetLibraryLineageFamily
+  viewMode: AssetLibraryViewMode
+  selectedEntryId: string | null
   disabled: boolean
-  thumbnailDataUrl: string | undefined
-  previewClips: AssetLibraryPreviewClip[]
-  onActivate: () => void
+  thumbnails: Record<string, string>
+  previews: Record<string, AssetLibraryPreviewClip[]>
+  onActivateEntry: (entryId: string) => void
   onFetchPreviewFrame: (workspacePath: string, clip: string) => Promise<string | null>
 }) {
+  const entry = family.primaryEntry
+  const thumbnailDataUrl = thumbnails[entry.workspacePath]
+  const previewClips = previews[entry.workspacePath] ?? EMPTY_PREVIEW_CLIPS
+  const selected = family.entries.some((candidate) => candidate.id === selectedEntryId)
   const [hovered, setHovered] = useState(false)
   const [clipIndex, setClipIndex] = useState(0)
   const [previewFrames, setPreviewFrames] = useState<Record<string, string>>({})
+  const [versionsExpanded, setVersionsExpanded] = useState(false)
   const mountedRef = useRef(true)
   useEffect(() => () => { mountedRef.current = false }, [])
 
   const activeClip = previewClips.length > 0 ? previewClips[clipIndex % previewClips.length] : undefined
   const activeFrameUrl = activeClip ? previewFrames[activeClip.clip] : undefined
 
-  // Lazy, hover-triggered, and cached per clip for this row's lifetime — a
-  // second hover (or cycling back to a clip already seen) never re-fetches.
+  // Gallery motion is the feature, so it begins without requiring a hover.
+  // Compact list rows stay lazy. Every fetched clip is cached per family.
   useEffect(() => {
-    if (!hovered || !activeClip || previewFrames[activeClip.clip]) return
+    if ((viewMode !== 'gallery' && !hovered) || !activeClip || previewFrames[activeClip.clip]) return
     void onFetchPreviewFrame(entry.workspacePath, activeClip.clip).then((dataUrl) => {
       if (mountedRef.current && dataUrl) {
         setPreviewFrames((current) => ({ ...current, [activeClip.clip]: dataUrl }))
       }
     })
-  }, [hovered, activeClip, entry.workspacePath, previewFrames, onFetchPreviewFrame])
+  }, [viewMode, hovered, activeClip, entry.workspacePath, previewFrames, onFetchPreviewFrame])
 
   function cycleClip(step: 1 | -1, event: React.MouseEvent | React.KeyboardEvent) {
     event.preventDefault()
@@ -678,64 +768,243 @@ function AssetLibraryEntryRow({
     cycleClip(step, event)
   }
 
-  const displayedThumbnailUrl = hovered && activeFrameUrl ? activeFrameUrl : thumbnailDataUrl
+  function activateEntry(entryId: string, event?: React.SyntheticEvent) {
+    event?.preventDefault()
+    event?.stopPropagation()
+    if (!disabled) onActivateEntry(entryId)
+  }
+
+  function handleCardKeyDown(event: React.KeyboardEvent<HTMLElement>) {
+    if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return
+    activateEntry(entry.id, event)
+  }
+
+  const displayedThumbnailUrl = activeFrameUrl ?? thumbnailDataUrl
+  const tags = new Set(entry.semantic?.tags ?? [])
+  const badges = [
+    tags.has('animated') ? 'Animated' : null,
+    tags.has('rigged') || entry.capability === 'rigged-mesh' ? 'Rigged' : null,
+    tags.has('character') || tags.has('creature') ? 'Character' : null,
+    tags.has('prop') ? 'Prop' : null,
+    tags.has('low-poly') ? 'Light' : tags.has('mid-poly') ? 'Medium' : tags.has('high-poly') ? 'Heavy' : null,
+    tags.has('unnamed') || !entry.semantic?.name ? 'Needs name' : null,
+  ].filter((badge): badge is string => Boolean(badge))
+  const dateLabel = formatAssetLibraryDate(entry.createdAt)
+
+  const clipControls = activeClip && (
+    <div className={`flex items-center gap-2 ${viewMode === 'gallery'
+      ? 'border-t border-zinc-700/70 bg-zinc-950 px-2 py-2'
+      : 'mt-1'
+    }`}>
+      {previewClips.length > 1 && (
+        <button
+          type="button"
+          aria-label={`Show previous animation for ${family.name}`}
+          onClick={(event) => cycleClip(-1, event)}
+          onKeyDown={(event) => handleCycleKeyDown(-1, event)}
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-zinc-800 text-sm text-zinc-200 hover:bg-zinc-700 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-400"
+        >
+          ‹
+        </button>
+      )}
+      <span className="min-w-0 flex-1 truncate text-center text-[10px] font-medium text-violet-200">
+        {viewMode === 'gallery' ? 'Animation: ' : ''}{formatAssetLibraryClipName(activeClip.clip)}
+      </span>
+      <span className="shrink-0 text-[9px] text-zinc-500">{clipIndex + 1}/{previewClips.length}</span>
+      {previewClips.length > 1 && (
+        <button
+          type="button"
+          aria-label={`Show next animation for ${family.name}`}
+          onClick={(event) => cycleClip(1, event)}
+          onKeyDown={(event) => handleCycleKeyDown(1, event)}
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-zinc-800 text-sm text-zinc-200 hover:bg-zinc-700 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-400"
+        >
+          ›
+        </button>
+      )}
+    </div>
+  )
+
+  if (viewMode === 'list') {
+    return (
+      <article
+        role="listitem"
+        tabIndex={disabled ? -1 : 0}
+        aria-disabled={disabled}
+        aria-label={`Open asset family ${family.name}`}
+        onClick={() => activateEntry(entry.id)}
+        onKeyDown={handleCardKeyDown}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        className={`cursor-pointer px-3 py-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-400 ${
+          selected ? 'bg-violet-500/10' : 'hover:bg-zinc-800/70'
+        } ${disabled ? 'pointer-events-none opacity-50' : ''}`}
+      >
+        <div className="flex items-center gap-3">
+          <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-lg border border-zinc-700 bg-zinc-950">
+            {displayedThumbnailUrl ? (
+              <img src={displayedThumbnailUrl} alt="" className="h-full w-full object-contain" />
+            ) : (
+              <AssetLibraryPreviewPlaceholder />
+            )}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="truncate text-xs font-medium text-zinc-200">{family.name}</span>
+              {family.entries.length > 1 && (
+                <span className="shrink-0 rounded-full bg-violet-500/15 px-2 py-0.5 text-[9px] text-violet-200">{family.entries.length} versions</span>
+              )}
+            </div>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {badges.slice(0, 4).map((badge) => (
+                <span key={badge} className={`rounded-full px-1.5 py-0.5 text-[8px] ${
+                  badge === 'Needs name' ? 'bg-amber-500/15 text-amber-200' : 'bg-zinc-800 text-zinc-400'
+                }`}>{badge}</span>
+              ))}
+            </div>
+            <p className="mt-1 truncate text-[9px] text-zinc-500" title={entry.workspacePath}>{entry.workspacePath}</p>
+          </div>
+          <div className="w-40 shrink-0">{clipControls}</div>
+          <span className="w-16 shrink-0 text-right text-[9px] text-zinc-500">{dateLabel}</span>
+          {family.entries.length > 1 && (
+            <button
+              type="button"
+              aria-expanded={versionsExpanded}
+              onClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                setVersionsExpanded((current) => !current)
+              }}
+              className="shrink-0 rounded-md bg-zinc-800 px-2 py-1 text-[9px] text-zinc-300 hover:bg-zinc-700"
+            >
+              {versionsExpanded ? 'Hide versions' : 'Show versions'}
+            </button>
+          )}
+        </div>
+        {versionsExpanded && <AssetLibraryVersionRows family={family} selectedEntryId={selectedEntryId} onActivateEntry={activateEntry} />}
+      </article>
+    )
+  }
 
   return (
-    <button
-      type="button"
+    <article
       role="listitem"
-      aria-pressed={selected}
-      aria-label={`Open library asset ${entry.displayName}`}
-      onClick={onActivate}
+      tabIndex={disabled ? -1 : 0}
+      aria-disabled={disabled}
+      aria-label={`Open asset family ${family.name}`}
+      onClick={() => activateEntry(entry.id)}
+      onKeyDown={handleCardKeyDown}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      disabled={disabled}
-      className={`flex w-full items-center gap-3 text-left px-4 py-1.5 border-t border-zinc-800 first:border-t-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 disabled:opacity-50 disabled:pointer-events-none
-        ${selected ? 'bg-violet-500/10 text-zinc-100' : 'text-zinc-300 hover:bg-zinc-800/80'}`}
+      className={`min-w-0 cursor-pointer overflow-hidden rounded-xl border bg-zinc-900 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 ${
+        selected ? 'border-violet-400/70 bg-violet-500/10' : 'border-zinc-700/80 hover:border-zinc-600'
+      } ${disabled ? 'pointer-events-none opacity-50' : ''}`}
     >
-      {thumbnailDataUrl && (
-        <div className="relative h-10 w-10 shrink-0">
+      <div className="relative h-40 w-full overflow-hidden bg-zinc-950">
+        {displayedThumbnailUrl ? (
           <img
             src={displayedThumbnailUrl}
             alt=""
-            className="h-10 w-10 rounded-lg border border-zinc-800 bg-zinc-950 object-contain"
+            className="h-full w-full object-contain"
           />
-          {/* Mini clip selector — only once a hover has fetched more than one clip; never rendered otherwise. */}
-          {hovered && previewClips.length > 1 && (
-            <>
-              <span
-                role="button"
-                tabIndex={0}
-                aria-label={`Show previous preview clip for ${entry.displayName}`}
-                onClick={(event) => cycleClip(-1, event)}
-                onKeyDown={(event) => handleCycleKeyDown(-1, event)}
-                className="absolute inset-y-0 left-0 flex w-3.5 cursor-pointer items-center justify-center rounded-l-lg bg-black/60 text-[10px] leading-none text-zinc-100 hover:bg-black/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-400"
-              >
-                ‹
-              </span>
-              <span
-                role="button"
-                tabIndex={0}
-                aria-label={`Show next preview clip for ${entry.displayName}`}
-                onClick={(event) => cycleClip(1, event)}
-                onKeyDown={(event) => handleCycleKeyDown(1, event)}
-                className="absolute inset-y-0 right-0 flex w-3.5 cursor-pointer items-center justify-center rounded-r-lg bg-black/60 text-[10px] leading-none text-zinc-100 hover:bg-black/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-400"
-              >
-                ›
-              </span>
-            </>
-          )}
-        </div>
-      )}
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center justify-between gap-2">
-          <span className="truncate text-xs font-medium">{entry.displayName}</span>
-          <span className="shrink-0 text-[10px] uppercase tracking-wider text-zinc-500">{entry.capability ?? entry.state.replace(/-/g, ' ')}</span>
-        </div>
-        <p className="mt-1 truncate text-[10px] text-zinc-500">{entry.workspacePath}</p>
+        ) : (
+          <AssetLibraryPreviewPlaceholder />
+        )}
+        {activeFrameUrl && (
+          <span className="absolute left-2 top-2 rounded-full border border-violet-300/30 bg-violet-950/80 px-2 py-1 text-[9px] font-medium text-violet-100">
+            Playing
+          </span>
+        )}
+        {family.entries.length > 1 && (
+          <span className="absolute right-2 top-2 rounded-full border border-zinc-600 bg-black/75 px-2 py-1 text-[9px] font-medium text-zinc-100">
+            {family.entries.length} versions
+          </span>
+        )}
       </div>
-    </button>
+      {clipControls}
+      <div className="p-3">
+        <div className="flex items-start justify-between gap-2">
+          <h3 className="min-w-0 truncate text-xs font-semibold text-zinc-100">{family.name}</h3>
+          <span className="shrink-0 text-[9px] text-zinc-500">{dateLabel}</span>
+        </div>
+        <div className="mt-2 flex min-h-5 flex-wrap gap-1">
+          {badges.slice(0, 4).map((badge) => (
+            <span key={badge} className={`rounded-full px-2 py-0.5 text-[9px] ${
+              badge === 'Needs name' ? 'bg-amber-500/15 text-amber-200' : 'bg-zinc-800 text-zinc-300'
+            }`}>{badge}</span>
+          ))}
+        </div>
+        <p className="mt-2 truncate border-t border-zinc-800 pt-2 text-[9px] text-zinc-500" title={entry.workspacePath}>
+          Stored at {entry.workspacePath}
+        </p>
+        {family.entries.length > 1 && (
+          <button
+            type="button"
+            aria-expanded={versionsExpanded}
+            onClick={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              setVersionsExpanded((current) => !current)
+            }}
+            className="mt-2 w-full rounded-lg border border-violet-400/20 bg-violet-500/10 px-2 py-1.5 text-[10px] font-medium text-violet-200 hover:bg-violet-500/20"
+          >
+            {versionsExpanded ? 'Hide version family' : `Show all ${family.entries.length} versions`}
+          </button>
+        )}
+      </div>
+      {versionsExpanded && <AssetLibraryVersionRows family={family} selectedEntryId={selectedEntryId} onActivateEntry={activateEntry} />}
+    </article>
   )
+}
+
+function AssetLibraryVersionRows({
+  family,
+  selectedEntryId,
+  onActivateEntry,
+}: {
+  family: AssetLibraryLineageFamily
+  selectedEntryId: string | null
+  onActivateEntry: (entryId: string, event?: React.SyntheticEvent) => void
+}) {
+  return (
+    <div className="border-t border-zinc-700 bg-zinc-950/70 p-2">
+      <p className="px-1 pb-1.5 text-[9px] font-medium uppercase tracking-wider text-zinc-500">Version family</p>
+      <div className="space-y-1">
+        {family.entries.map((entry, index) => (
+          <button
+            key={entry.id}
+            type="button"
+            onClick={(event) => onActivateEntry(entry.id, event)}
+            className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-zinc-800 ${
+              entry.id === selectedEntryId ? 'bg-violet-500/15' : ''
+            }`}
+          >
+            <span className="w-11 shrink-0 text-[9px] font-medium text-zinc-300">{index === 0 ? 'Latest' : `Older ${index}`}</span>
+            <span className="min-w-0 flex-1 truncate text-[9px] text-zinc-400" title={entry.workspacePath}>{entry.workspacePath}</span>
+            <span className="shrink-0 text-[8px] text-zinc-600">{formatAssetLibraryDate(entry.createdAt)}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function AssetLibraryPreviewPlaceholder() {
+  return (
+    <div className="flex h-full w-full items-center justify-center text-zinc-700" aria-hidden="true">
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2">
+        <path d="m12 2 8 4.5v9L12 20l-8-4.5v-9L12 2Z" />
+        <path d="m4 6.5 8 4.5 8-4.5M12 11v9" />
+      </svg>
+    </div>
+  )
+}
+
+function formatAssetLibraryDate(value: string | undefined): string {
+  if (!value) return 'Unknown date'
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return 'Unknown date'
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
 // ---------------------------------------------------------------------------
@@ -756,7 +1025,9 @@ export default function GeneratePage(): JSX.Element {
   const [libraryOpening, setLibraryOpening] = useState(false)
   const [libraryError, setLibraryError] = useState<string | null>(null)
   const [librarySearchQuery, setLibrarySearchQuery] = useState('')
-  const [librarySortMode, setLibrarySortMode] = useState<AssetLibrarySortMode>('type')
+  const [librarySortMode, setLibrarySortMode] = useState<AssetLibrarySortMode>('date')
+  const [libraryViewMode, setLibraryViewMode] = useState<AssetLibraryViewMode>('gallery')
+  const [libraryFilters, setLibraryFilters] = useState<AssetLibraryFilters>(() => createDefaultAssetLibraryFilters())
   const [libraryCollapsedSectionKeys, setLibraryCollapsedSectionKeys] = useState<string[]>(() => getDefaultAssetLibraryCollapsedSectionKeys())
   const [libraryThumbnails, setLibraryThumbnails] = useState<Record<string, string>>({})
   const [libraryPreviews, setLibraryPreviews] = useState<Record<string, AssetLibraryPreviewClip[]>>({})
@@ -909,10 +1180,18 @@ export default function GeneratePage(): JSX.Element {
         setLibraryError(result.error.message)
         return
       }
+      const defaultPrimaryEntry = buildAssetLibraryProjectGroups(
+        result.entries,
+        '',
+        'date',
+        createDefaultAssetLibraryFilters(),
+      )
+        .flatMap((group) => group.families.map((family) => family.primaryEntry))
+        .find(isAssetLibraryEntryOpenable)
       setLibraryEntries(result.entries)
       setLibrarySelectedEntryId((current) => current && result.entries.some((entry) => entry.id === current)
         ? current
-        : result.entries.find(isAssetLibraryEntryOpenable)?.id ?? result.entries[0]?.id ?? null)
+        : defaultPrimaryEntry?.id ?? result.entries.find(isAssetLibraryEntryOpenable)?.id ?? result.entries[0]?.id ?? null)
       setLibraryLoaded(true)
       void loadLibraryThumbnails(result.entries)
     } catch (err) {
@@ -1226,6 +1505,8 @@ export default function GeneratePage(): JSX.Element {
                 error={libraryError}
                 searchQuery={librarySearchQuery}
                 sortMode={librarySortMode}
+                viewMode={libraryViewMode}
+                filters={libraryFilters}
                 collapsedSectionKeys={libraryCollapsedSectionKeys}
                 thumbnails={libraryThumbnails}
                 previews={libraryPreviews}
@@ -1234,6 +1515,8 @@ export default function GeneratePage(): JSX.Element {
                 onActivateEntry={(entryId) => { void handleActivateLibraryEntry(entryId) }}
                 onSearchQueryChange={setLibrarySearchQuery}
                 onSortModeChange={setLibrarySortMode}
+                onViewModeChange={setLibraryViewMode}
+                onFiltersChange={setLibraryFilters}
                 onToggleSection={(sectionKey) => setLibraryCollapsedSectionKeys((current) => toggleAssetLibrarySectionKey(current, sectionKey))}
                 onOpenSelected={() => { void handleOpenSelectedLibraryEntry() }}
                 onFetchPreviewFrame={fetchLibraryPreviewFrame}

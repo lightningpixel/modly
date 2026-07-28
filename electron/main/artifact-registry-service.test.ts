@@ -23,7 +23,8 @@ async function withWorkspace(run: (workspaceDir: string) => Promise<void>) {
   }
 }
 
-test('normalizes only workspace-relative paths under allowed Workflows and Exports roots', () => withWorkspace(async (workspaceDir) => {
+test('normalizes only workspace-relative paths under allowed model roots', () => withWorkspace(async (workspaceDir) => {
+  assert.equal(normalizeWorkspaceAssetPath(workspaceDir, 'Default/hero.glb').workspacePath, 'Default/hero.glb')
   assert.equal(normalizeWorkspaceAssetPath(workspaceDir, 'Workflows/checkpoints/hero.glb').workspacePath, 'Workflows/checkpoints/hero.glb')
   assert.equal(normalizeWorkspaceAssetPath(workspaceDir, 'Exports/hero.glb').workspacePath, 'Exports/hero.glb')
   assert.throws(() => normalizeWorkspaceAssetPath(workspaceDir, '../secret.glb'), /traversal|escape|relative/i)
@@ -63,6 +64,49 @@ test('lists Workflows and Exports assets while skipping hidden, cache, and inter
   ])
   assert.equal(result.success && result.entries.find((entry) => entry.workspacePath.endsWith('hero.glb'))?.capability, 'rigged-mesh')
   assert.equal(result.success && result.entries.find((entry) => entry.workspacePath.endsWith('exported.ply'))?.openable, false)
+}))
+
+test('indexes generated models and reads project, structural tags, creation time, and lineage from model sidecars', () => withWorkspace(async (workspaceDir) => {
+  await mkdir(path.join(workspaceDir, 'Default'), { recursive: true })
+  await mkdir(path.join(workspaceDir, 'Exports/adventure'), { recursive: true })
+  await writeFile(path.join(workspaceDir, 'Default/hero.glb'), 'glb')
+  await writeFile(path.join(workspaceDir, 'Default/hero.tags.json'), JSON.stringify({
+    name: 'Hero',
+    project: null,
+    tags: ['mid-poly'],
+    created: '2026-06-15T10:00:00.000Z',
+  }))
+  await writeFile(path.join(workspaceDir, 'Exports/adventure/hero-rigged.glb'), 'glb')
+  await writeFile(path.join(workspaceDir, 'Exports/adventure/hero-rigged.tags.json'), JSON.stringify({
+    name: 'Hero Rigged',
+    project: 'Adventure',
+    tags: ['rigged', 'animated', 'clip-hero-walk', 'mid-poly'],
+    created: '2026-06-16T10:00:00.000Z',
+    derived_from: {
+      parent: { path: 'Default/hero.glb', name: 'Hero' },
+      root: { path: 'Default/hero.glb', name: 'Hero' },
+    },
+  }))
+
+  const result = await listWorkspaceAssetLibrary({ workspaceDir })
+  assert.equal(result.success, true)
+  if (!result.success) return
+  assert.deepEqual(result.entries.map((entry) => entry.workspacePath), [
+    'Default/hero.glb',
+    'Exports/adventure/hero-rigged.glb',
+  ])
+
+  const root = result.entries[0]
+  const derived = result.entries[1]
+  assert.equal(root.sourceScope, 'generated')
+  assert.equal(root.displayName, 'Hero')
+  assert.equal(derived.displayName, 'Hero Rigged')
+  assert.equal(derived.capability, 'rigged-mesh')
+  assert.equal(derived.createdAt, '2026-06-16T10:00:00.000Z')
+  assert.equal(derived.semantic?.project, 'Adventure')
+  assert.deepEqual(derived.semantic?.tags, ['rigged', 'animated', 'clip-hero-walk', 'mid-poly'])
+  assert.equal(derived.semantic?.derivedFrom?.parent.workspacePath, 'Default/hero.glb')
+  assert.equal(derived.semantic?.derivedFrom?.root.workspacePath, 'Default/hero.glb')
 }))
 
 test('reads and opens only safe GLB/GLTF workspace assets', () => withWorkspace(async (workspaceDir) => {
