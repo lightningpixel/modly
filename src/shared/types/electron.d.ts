@@ -49,7 +49,7 @@ export interface ModelExtension {
 export interface ParamSchema {
   id:       string
   label:    string
-  type:     'select' | 'int' | 'float' | 'string' | 'file-select'
+  type:     'select' | 'int' | 'float' | 'string' | 'text' | 'file-select'
   default:  number | string
   options?: { value: number | string; label: string }[]
   min?:     number
