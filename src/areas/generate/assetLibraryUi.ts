@@ -208,6 +208,8 @@ export function createAssetLibraryOpenJob(
       progress: 100,
       outputUrl: target.url,
       originalOutputUrl: target.url,
+      libraryEntryId: entry.id,
+      libraryWorkspacePath: entry.workspacePath,
       createdAt: now,
     },
   }
@@ -271,6 +273,74 @@ export function storeAssetLibraryPanelHeight(height: number): void {
   } catch {
     // The panel still works when storage is unavailable.
   }
+}
+
+export interface AssetLibraryAnchorRect {
+  left: number
+  right: number
+  top: number
+  bottom: number
+}
+
+export interface AssetLibraryViewport {
+  width: number
+  height: number
+}
+
+export interface AssetLibraryPanelLayout {
+  left: number
+  top: number
+  width: number
+  height: number
+  placement: 'above' | 'below'
+}
+
+/**
+ * Fits the popover into the renderer's CSS viewport. Chromium shrinks that
+ * viewport as whole-window zoom increases, so saved pixel preferences remain
+ * preferences rather than unreachable off-screen dimensions.
+ */
+export function getAssetLibraryPanelLayout(
+  anchor: AssetLibraryAnchorRect,
+  viewport: AssetLibraryViewport,
+  preferredWidth: number,
+  preferredHeight: number,
+  margin = 12,
+  gap = 4,
+): AssetLibraryPanelLayout {
+  const availableWidth = Math.max(0, viewport.width - margin * 2)
+  const width = Math.min(preferredWidth, availableWidth)
+  const left = Math.min(
+    Math.max(margin, anchor.left),
+    Math.max(margin, viewport.width - margin - width),
+  )
+
+  const belowSpace = Math.max(0, viewport.height - margin - anchor.bottom - gap)
+  const aboveSpace = Math.max(0, anchor.top - gap - margin)
+  const minimumUsefulHeight = Math.min(preferredHeight, ASSET_LIBRARY_PANEL_MIN_HEIGHT)
+  const placement = belowSpace < minimumUsefulHeight && aboveSpace > belowSpace ? 'above' : 'below'
+  const availableHeight = placement === 'below' ? belowSpace : aboveSpace
+  const height = Math.min(preferredHeight, availableHeight)
+  const top = placement === 'below'
+    ? anchor.bottom + gap
+    : Math.max(margin, anchor.top - gap - height)
+
+  return { left, top, width, height, placement }
+}
+
+function normalizeClipIdentity(name: string): string {
+  return name.trim().toLocaleLowerCase().replace(/[^a-z0-9]+/g, '')
+}
+
+/** Matches preview-manifest clip names to the viewer's glTF animation list. */
+export function findAssetLibraryMotionClipIndex(
+  clips: Array<{ name: string }>,
+  previewClip: string,
+): number {
+  const exact = clips.findIndex((clip) => clip.name === previewClip)
+  if (exact >= 0) return exact
+  const normalized = normalizeClipIdentity(previewClip)
+  return clips.findIndex((clip) => normalizeClipIdentity(clip.name) === normalized)
 }
 
 function compareAssetLibraryProjectGroups(left: AssetLibraryProjectGroup, right: AssetLibraryProjectGroup): number {

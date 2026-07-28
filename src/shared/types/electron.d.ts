@@ -144,10 +144,20 @@ export interface Workflow {
   folder?:     string
   /** Pinned in the workflow browser's Bookmarks section */
   bookmarked?: boolean
+  /** Keeps one operator-facing choice authoritative when multiple nodes need
+   *  the same value (for example generation density and fallback decimation). */
+  paramBindings?: WorkflowParamBinding[]
   nodes:       WFNode[]
   edges:       WFEdge[]
   createdAt:   string
   updatedAt:   string
+}
+
+export interface WorkflowParamBinding {
+  sourceNodeId: string
+  sourceParam:  string
+  targetNodeId: string
+  targetParam:  string
 }
 
 declare global {

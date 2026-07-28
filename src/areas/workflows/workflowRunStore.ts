@@ -5,6 +5,7 @@ import { getWorkflowExtension } from './mockExtensions'
 import type { WorkflowExtension } from './mockExtensions'
 import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
 import { isBranchStarter, isSceneOutput, resolveDataSource, reachesSceneOutput, nearestUpstreamWaits } from './nodeBehaviors'
+import { resolveBoundWorkflowParams } from './workflowParamBindings'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -306,7 +307,13 @@ async function executeExtensionNode(
   const ext = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
   // Freshest params at the moment the node starts (so loop iterations / Retry pick
   // up edits made while paused, not the values captured at run start).
-  const liveParams = _liveParams.current.get(node.id) ?? node.data.params ?? {}
+  const nodeParams = _liveParams.current.get(node.id) ?? node.data.params ?? {}
+  const liveParams = resolveBoundWorkflowParams(
+    workflow,
+    node.id,
+    nodeParams,
+    (sourceNodeId) => _liveParams.current.get(sourceNodeId) ?? nodeMap.get(sourceNodeId)?.data.params,
+  )
 
   const resolveSource = (sourceId: string): NodeOutput | undefined => {
     const realId = resolveDataSource(sourceId, workflow.edges, nodeMap)

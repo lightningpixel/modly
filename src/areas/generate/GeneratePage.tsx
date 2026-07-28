@@ -1,5 +1,5 @@
-import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
-import type { ReactNode } from 'react'
+import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
+import type { ReactNode, RefObject } from 'react'
 import { useAppStore, DEFAULT_LIGHT_SETTINGS } from '@shared/stores/appStore'
 import type { GenerationJob, LightSettings } from '@shared/stores/appStore'
 import { useApi } from '@shared/hooks/useApi'
@@ -21,7 +21,9 @@ import {
   createDefaultAssetLibraryFilters,
   createAssetLibraryOpenJob,
   describeAssetLibraryOpenability,
+  findAssetLibraryMotionClipIndex,
   formatAssetLibraryClipName,
+  getAssetLibraryPanelLayout,
   getDefaultAssetLibraryCollapsedSectionKeys,
   getStoredAssetLibraryPanelHeight,
   getStoredAssetLibraryPanelWidth,
@@ -418,7 +420,11 @@ function AssetLibraryPopover({
   previews,
   panelWidth,
   panelHeight,
+  anchorRef,
+  viewerEntryId,
+  viewerClipName,
   onActivateEntry,
+  onSelectViewerClip,
   onSearchQueryChange,
   onSortModeChange,
   onViewModeChange,
@@ -446,8 +452,12 @@ function AssetLibraryPopover({
   previews: Record<string, AssetLibraryPreviewClip[]>
   panelWidth: number
   panelHeight: number
+  anchorRef: RefObject<HTMLDivElement | null>
+  viewerEntryId: string | null
+  viewerClipName: string | null
   /** A row click both selects and, when the entry is openable, opens it immediately — no second confirming click. */
   onActivateEntry: (entryId: string) => void
+  onSelectViewerClip: (entryId: string, clip: string) => void
   onSearchQueryChange: (value: string) => void
   onSortModeChange: (value: AssetLibrarySortMode) => void
   onViewModeChange: (value: AssetLibraryViewMode) => void
@@ -465,16 +475,44 @@ function AssetLibraryPopover({
   const hasActiveDiscovery = normalizedSearchQuery.length > 0 || hasActiveFilters
   const familyCount = projectGroups.reduce((count, group) => count + group.families.length, 0)
   const versionCount = projectGroups.reduce((count, group) => count + group.entryCount, 0)
+  const [layout, setLayout] = useState<ReturnType<typeof getAssetLibraryPanelLayout> | null>(null)
+
+  const updateLayout = useCallback(() => {
+    const anchor = anchorRef.current?.getBoundingClientRect()
+    if (!anchor) return
+    setLayout(getAssetLibraryPanelLayout(
+      anchor,
+      { width: window.innerWidth, height: window.innerHeight },
+      panelWidth,
+      panelHeight,
+    ))
+  }, [anchorRef, panelHeight, panelWidth])
+
+  useLayoutEffect(() => {
+    updateLayout()
+    window.addEventListener('resize', updateLayout)
+    window.visualViewport?.addEventListener('resize', updateLayout)
+    const observer = new ResizeObserver(updateLayout)
+    observer.observe(document.documentElement)
+    return () => {
+      window.removeEventListener('resize', updateLayout)
+      window.visualViewport?.removeEventListener('resize', updateLayout)
+      observer.disconnect()
+    }
+  }, [updateLayout])
 
   return (
     <div
       role="dialog"
       aria-label="Workspace library"
-      style={{ width: panelWidth, height: panelHeight }}
-      className="absolute top-full left-0 mt-1 z-50 max-w-[calc(100vw-2rem)] max-h-[calc(100vh-4rem)] bg-zinc-900 border border-zinc-700/60 rounded-xl p-3 flex flex-col gap-3 shadow-xl overflow-hidden"
+      style={layout
+        ? { left: layout.left, top: layout.top, width: layout.width, height: layout.height }
+        : { visibility: 'hidden' }
+      }
+      className="fixed z-50 bg-zinc-900 border border-zinc-700/60 rounded-xl p-3 flex flex-col gap-3 shadow-xl overflow-y-auto overflow-x-hidden"
     >
-      <div className="flex items-center justify-between gap-2 shrink-0">
-        <div>
+      <div className="flex flex-wrap items-center justify-between gap-2 shrink-0">
+        <div className="min-w-0">
           <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Asset Library</p>
           <p className="text-xs text-zinc-300">Browse models by project, traits, and version family.</p>
         </div>
@@ -503,7 +541,7 @@ function AssetLibraryPopover({
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize workspace library panel width"
-        className="absolute top-0 right-0 bottom-0 w-1.5 cursor-col-resize hover:bg-violet-400/40 active:bg-violet-400/60 transition-colors rounded-r-xl"
+        className="absolute top-0 right-0 bottom-0 z-20 w-1.5 cursor-col-resize hover:bg-violet-400/40 active:bg-violet-400/60 transition-colors rounded-r-xl"
       />
 
       {/* Resize handle — drag to grow/shrink the library panel; size is persisted. */}
@@ -512,11 +550,11 @@ function AssetLibraryPopover({
         role="separator"
         aria-orientation="horizontal"
         aria-label="Resize workspace library panel height"
-        className="absolute bottom-0 left-0 right-0 h-1.5 cursor-row-resize hover:bg-violet-400/40 active:bg-violet-400/60 transition-colors rounded-b-xl"
+        className="absolute bottom-0 left-0 right-0 z-20 h-1.5 cursor-row-resize hover:bg-violet-400/40 active:bg-violet-400/60 transition-colors rounded-b-xl"
       />
 
-      <div className="flex items-end gap-2 shrink-0">
-        <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+      <div className="flex flex-wrap items-end gap-2 shrink-0">
+        <div className="flex min-w-[min(100%,16rem)] flex-1 flex-col gap-1.5">
           <label htmlFor="asset-library-search" className="text-[11px] text-zinc-300">Search assets</label>
           <input
             id="asset-library-search"
@@ -527,7 +565,7 @@ function AssetLibraryPopover({
             className="appearance-none bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
           />
         </div>
-        <div className="flex w-36 shrink-0 flex-col gap-1.5">
+        <div className="flex w-36 max-w-full shrink-0 flex-col gap-1.5">
           <label htmlFor="asset-library-sort" className="text-[11px] text-zinc-300">Sort</label>
           <select
             id="asset-library-sort"
@@ -615,16 +653,16 @@ function AssetLibraryPopover({
       )}
 
       {loading ? (
-        <p role="status" className="flex-1 min-h-0 flex items-center justify-center text-xs text-zinc-400">Loading workspace assets…</p>
+        <p role="status" className="flex min-h-40 items-center justify-center text-xs text-zinc-400">Loading workspace assets…</p>
       ) : projectGroups.length === 0 && !hasActiveDiscovery ? (
-        <p role="status" className="flex-1 min-h-0 flex items-center justify-center text-xs text-zinc-500">No workspace assets are indexed yet.</p>
+        <p role="status" className="flex min-h-40 items-center justify-center text-xs text-zinc-500">No workspace assets are indexed yet.</p>
       ) : projectGroups.length === 0 ? (
-        <p role="status" className="flex-1 min-h-0 flex items-center justify-center text-center text-xs text-zinc-500">
+        <p role="status" className="flex min-h-40 items-center justify-center text-center text-xs text-zinc-500">
           No assets match these search and filter choices.
         </p>
       ) : (
-        <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden rounded-lg border border-zinc-800 bg-zinc-950/40">
-          <div className="sticky top-0 z-10 flex items-center justify-between border-b border-zinc-800 bg-zinc-950/95 px-3 py-2 backdrop-blur">
+        <div className="shrink-0 rounded-lg border border-zinc-800 bg-zinc-950/40">
+          <div className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-1 border-b border-zinc-800 bg-zinc-950/95 px-3 py-2 backdrop-blur">
             <span className="text-[10px] uppercase tracking-wider text-zinc-500">Grouped by project</span>
             <span className="text-[10px] text-zinc-500">{familyCount} families · {versionCount} versions</span>
           </div>
@@ -639,7 +677,7 @@ function AssetLibraryPopover({
                   aria-controls={projectRegionId}
                   onClick={() => onToggleSection(projectGroup.sectionKey)}
                   disabled={hasActiveDiscovery}
-                  className="flex w-full items-center justify-between gap-3 bg-zinc-900/80 px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 disabled:pointer-events-none"
+                  className="flex w-full flex-wrap items-center justify-between gap-2 bg-zinc-900/80 px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 disabled:pointer-events-none"
                 >
                   <span className="flex items-center gap-2">
                     <span className={`text-xs font-semibold ${projectGroup.projectKey === 'needs-project' ? 'text-amber-200' : 'text-zinc-200'}`}>
@@ -659,7 +697,7 @@ function AssetLibraryPopover({
                     role="list"
                     aria-label={`${projectGroup.projectLabel} asset families`}
                     className={viewMode === 'gallery'
-                      ? 'grid grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-3 p-3'
+                      ? 'grid grid-cols-[repeat(auto-fill,minmax(min(100%,13rem),1fr))] gap-3 p-3'
                       : 'divide-y divide-zinc-800'
                     }
                   >
@@ -672,7 +710,10 @@ function AssetLibraryPopover({
                         disabled={opening}
                         thumbnails={thumbnails}
                         previews={previews}
+                        viewerEntryId={viewerEntryId}
+                        viewerClipName={viewerClipName}
                         onActivateEntry={onActivateEntry}
+                        onSelectViewerClip={onSelectViewerClip}
                         onFetchPreviewFrame={onFetchPreviewFrame}
                       />
                     ))}
@@ -699,7 +740,10 @@ function AssetLibraryFamilyCard({
   disabled,
   thumbnails,
   previews,
+  viewerEntryId,
+  viewerClipName,
   onActivateEntry,
+  onSelectViewerClip,
   onFetchPreviewFrame,
 }: {
   family: AssetLibraryLineageFamily
@@ -708,7 +752,10 @@ function AssetLibraryFamilyCard({
   disabled: boolean
   thumbnails: Record<string, string>
   previews: Record<string, AssetLibraryPreviewClip[]>
+  viewerEntryId: string | null
+  viewerClipName: string | null
   onActivateEntry: (entryId: string) => void
+  onSelectViewerClip: (entryId: string, clip: string) => void
   onFetchPreviewFrame: (workspacePath: string, clip: string) => Promise<string | null>
 }) {
   const entry = family.primaryEntry
@@ -716,13 +763,19 @@ function AssetLibraryFamilyCard({
   const previewClips = previews[entry.workspacePath] ?? EMPTY_PREVIEW_CLIPS
   const selected = family.entries.some((candidate) => candidate.id === selectedEntryId)
   const [hovered, setHovered] = useState(false)
-  const [clipIndex, setClipIndex] = useState(0)
+  const [localClipIndex, setLocalClipIndex] = useState(0)
   const [previewFrames, setPreviewFrames] = useState<Record<string, string>>({})
   const [versionsExpanded, setVersionsExpanded] = useState(false)
   const mountedRef = useRef(true)
   useEffect(() => () => { mountedRef.current = false }, [])
 
-  const activeClip = previewClips.length > 0 ? previewClips[clipIndex % previewClips.length] : undefined
+  const viewerPreviewClipIndex = viewerClipName
+    ? findAssetLibraryMotionClipIndex(previewClips.map((clip) => ({ name: clip.clip })), viewerClipName)
+    : -1
+  const clipIndex = viewerEntryId === entry.id && viewerPreviewClipIndex >= 0
+    ? viewerPreviewClipIndex
+    : localClipIndex % Math.max(1, previewClips.length)
+  const activeClip = previewClips[clipIndex]
   const activeFrameUrl = activeClip ? previewFrames[activeClip.clip] : undefined
 
   // Gallery motion is the feature, so it begins without requiring a hover.
@@ -739,7 +792,10 @@ function AssetLibraryFamilyCard({
   function cycleClip(step: 1 | -1, event: React.MouseEvent | React.KeyboardEvent) {
     event.preventDefault()
     event.stopPropagation()
-    setClipIndex((current) => (current + step + previewClips.length) % previewClips.length)
+    if (previewClips.length === 0) return
+    const nextIndex = (clipIndex + step + previewClips.length) % previewClips.length
+    setLocalClipIndex(nextIndex)
+    onSelectViewerClip(entry.id, previewClips[nextIndex].clip)
   }
 
   function handleCycleKeyDown(step: 1 | -1, event: React.KeyboardEvent) {
@@ -819,7 +875,7 @@ function AssetLibraryFamilyCard({
           selected ? 'bg-violet-500/10' : 'hover:bg-zinc-800/70'
         } ${disabled ? 'pointer-events-none opacity-50' : ''}`}
       >
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-lg border border-zinc-700 bg-zinc-950">
             {displayedThumbnailUrl ? (
               <img src={displayedThumbnailUrl} alt="" className="h-full w-full object-contain" />
@@ -827,7 +883,7 @@ function AssetLibraryFamilyCard({
               <AssetLibraryPreviewPlaceholder />
             )}
           </div>
-          <div className="min-w-0 flex-1">
+          <div className="min-w-[12rem] flex-1">
             <div className="flex items-center gap-2">
               <span className="truncate text-xs font-medium text-zinc-200">{family.name}</span>
               {family.entries.length > 1 && (
@@ -843,7 +899,7 @@ function AssetLibraryFamilyCard({
             </div>
             <p className="mt-1 truncate text-[9px] text-zinc-500" title={entry.workspacePath}>{entry.workspacePath}</p>
           </div>
-          <div className="w-40 shrink-0">{clipControls}</div>
+          <div className="w-40 max-w-full shrink-0">{clipControls}</div>
           <span className="w-16 shrink-0 text-right text-[9px] text-zinc-500">{dateLabel}</span>
           {family.entries.length > 1 && (
             <button
@@ -1016,6 +1072,7 @@ export default function GeneratePage(): JSX.Element {
   const dragging = useRef(false)
   const libraryPanelDragging = useRef(false)
   const libraryPanelHeightDragging = useRef(false)
+  const libraryAnchorRef = useRef<HTMLDivElement | null>(null)
   // Populated by Viewer3D — undoes the latest live gizmo transform, if any.
   const gizmoUndoRef = useRef<(() => boolean) | null>(null)
 
@@ -1031,6 +1088,9 @@ export default function GeneratePage(): JSX.Element {
   const setCurrentJob = useAppStore((s) => s.setCurrentJob)
   const meshStats = useAppStore((s) => s.meshStats)
   const meshSelected = useAppStore((s) => s.meshSelected)
+  const motionClips = useAppStore((s) => s.motionClips)
+  const activeClipIndex = useAppStore((s) => s.activeClipIndex)
+  const setActiveClipIndex = useAppStore((s) => s.setActiveClipIndex)
   const pushMeshUrl = useAppStore((s) => s.pushMeshUrl)
   const undoMesh = useAppStore((s) => s.undoMesh)
   const redoMesh = useAppStore((s) => s.redoMesh)
@@ -1038,6 +1098,7 @@ export default function GeneratePage(): JSX.Element {
   const canRedo = useAppStore((s) => s.historyIndex < s.meshHistory.length - 1)
   const { optimizeMesh, smoothMesh, importMesh } = useApi()
   const assetLibraryService = useMemo(() => getDefaultAssetLibraryService(), [])
+  const viewerClipName = motionClips[activeClipIndex]?.name ?? null
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -1268,6 +1329,12 @@ export default function GeneratePage(): JSX.Element {
     await openLibraryEntry(entry)
   }
 
+  function handleSelectLibraryViewerClip(entryId: string, clip: string) {
+    if (currentJob?.libraryEntryId !== entryId) return
+    const viewerIndex = findAssetLibraryMotionClipIndex(motionClips, clip)
+    if (viewerIndex >= 0) setActiveClipIndex(viewerIndex)
+  }
+
   async function handleSmooth(iterations: number) {
     if (!currentJob?.outputUrl) return
     setSmoothing(true)
@@ -1459,7 +1526,7 @@ export default function GeneratePage(): JSX.Element {
             )}
           </div>
 
-          <div className="relative">
+          <div ref={libraryAnchorRef} className="relative">
             <AssetLibraryToggleButton
               open={openPanel === 'library'}
               disabled={importing || libraryOpening}
@@ -1484,7 +1551,11 @@ export default function GeneratePage(): JSX.Element {
                 previews={libraryPreviews}
                 panelWidth={libraryPanelWidth}
                 panelHeight={libraryPanelHeight}
+                anchorRef={libraryAnchorRef}
+                viewerEntryId={currentJob?.libraryEntryId ?? null}
+                viewerClipName={viewerClipName}
                 onActivateEntry={(entryId) => { void handleActivateLibraryEntry(entryId) }}
+                onSelectViewerClip={handleSelectLibraryViewerClip}
                 onSearchQueryChange={setLibrarySearchQuery}
                 onSortModeChange={setLibrarySortMode}
                 onViewModeChange={setLibraryViewMode}

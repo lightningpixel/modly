@@ -867,19 +867,18 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
 
   const [viewMode, setViewMode] = useState<ViewMode>('solid')
   const [autoRotate, setAutoRotate] = useState(false)
-  const [clips, setClipsState] = useState<MotionClip[]>([])
-  const [activeClipIndex, setActiveClipIndexState] = useState(0)
+  const clips = useAppStore((s) => s.motionClips)
+  const activeClipIndex = useAppStore((s) => s.activeClipIndex)
   const setStoreMotionClips = useAppStore((s) => s.setMotionClips)
   const setStoreActiveClipIndex = useAppStore((s) => s.setActiveClipIndex)
-  // Mirror into appStore alongside the local state that actually drives
-  // playback, so sibling panels (e.g. ChatPanel) can read the current clip
-  // without this component handing over playback control.
+  // Playback and every selector share appStore. Keeping a local mirror here
+  // made the Library tile and motion bar disagree about the active clip.
   const setClips = useCallback((c: MotionClip[]) => {
-    setClipsState(c)
     setStoreMotionClips(c)
-  }, [setStoreMotionClips])
+    const currentIndex = useAppStore.getState().activeClipIndex
+    if (currentIndex >= c.length) setStoreActiveClipIndex(0)
+  }, [setStoreActiveClipIndex, setStoreMotionClips])
   const setActiveClipIndex = useCallback((i: number) => {
-    setActiveClipIndexState(i)
     setStoreActiveClipIndex(i)
   }, [setStoreActiveClipIndex])
   const selected = useAppStore((s) => s.meshSelected)

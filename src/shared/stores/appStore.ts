@@ -25,6 +25,9 @@ export interface GenerationJob {
   modelId?: string             // model used for this generation
   originalTriangles?: number   // polygon count of the original mesh
   generationOptions?: GenerationOptions
+  /** Stable Library identity for the asset currently loaded in the viewer. */
+  libraryEntryId?: string
+  libraryWorkspacePath?: string
   error?: string
   createdAt: number
 }
@@ -294,7 +297,15 @@ export const useAppStore = create<AppState>()(
         }
       },
 
-      setCurrentJob: (job) => set({ currentJob: job, meshStats: job === null ? null : get().meshStats }),
+      setCurrentJob: (job) => {
+        const changed = job?.id !== get().currentJob?.id
+        set({
+          currentJob: job,
+          meshStats: job === null ? null : get().meshStats,
+          motionClips: changed ? [] : get().motionClips,
+          activeClipIndex: changed ? 0 : get().activeClipIndex,
+        })
+      },
 
       updateCurrentJob: (patch) => {
         const current = get().currentJob

@@ -9,7 +9,9 @@ import {
   createAssetLibraryOpenJob,
   createDefaultAssetLibraryFilters,
   describeAssetLibraryOpenability,
+  findAssetLibraryMotionClipIndex,
   formatAssetLibraryClipName,
+  getAssetLibraryPanelLayout,
   getDefaultAssetLibraryCollapsedSectionKeys,
   getStoredAssetLibraryPanelHeight,
   getStoredAssetLibraryPanelWidth,
@@ -158,6 +160,8 @@ test('opens safe Default, Workflows, and Exports models through existing Generat
   const selection = createAssetLibraryOpenJob(glb, target, 1718546400000)
   assert.equal(selection.historyUrl, '/workspace/Default/hero.glb')
   assert.equal(selection.job.status, 'done')
+  assert.equal(selection.job.libraryEntryId, glb.id)
+  assert.equal(selection.job.libraryWorkspacePath, glb.workspacePath)
   assert.equal(resolveOpenPanelAfterLibrarySelection('library' satisfies GenerateOpenPanel), 'library')
 })
 
@@ -194,6 +198,39 @@ test('Library panel clamps to gallery-safe bounds and degrades silently without 
   assert.doesNotThrow(() => storeAssetLibraryPanelHeight(500))
 })
 
+test('Library panel shifts, shrinks, and flips to stay inside zoomed viewports', () => {
+  const zoomed = getAssetLibraryPanelLayout(
+    { left: 420, right: 500, top: 40, bottom: 70 },
+    { width: 640, height: 430 },
+    880,
+    900,
+  )
+  assert.deepEqual(zoomed, {
+    left: 12,
+    top: 74,
+    width: 616,
+    height: 344,
+    placement: 'below',
+  })
+  assert.ok(zoomed.left >= 0)
+  assert.ok(zoomed.left + zoomed.width <= 640)
+  assert.ok(zoomed.top + zoomed.height <= 430)
+
+  const flipped = getAssetLibraryPanelLayout(
+    { left: 700, right: 780, top: 700, bottom: 730 },
+    { width: 1000, height: 800 },
+    560,
+    600,
+  )
+  assert.deepEqual(flipped, {
+    left: 428,
+    top: 96,
+    width: 560,
+    height: 600,
+    placement: 'above',
+  })
+})
+
 test('live discovery expands matching projects without overwriting collapse state', () => {
   const collapsed = ['project:adventure']
   assert.equal(isAssetLibrarySectionExpanded(collapsed, 'project:adventure', false), false)
@@ -204,4 +241,6 @@ test('live discovery expands matching projects without overwriting collapse stat
 test('formats machine clip names as legible animation names', () => {
   assert.equal(formatAssetLibraryClipName('slow_turn_glance'), 'Slow Turn Glance')
   assert.equal(formatAssetLibraryClipName('RigAction'), 'Rig Action')
+  assert.equal(findAssetLibraryMotionClipIndex([{ name: 'Idle' }, { name: 'slow-turn_glance' }], 'slow_turn_glance'), 1)
+  assert.equal(findAssetLibraryMotionClipIndex([{ name: 'Idle' }], 'Walk'), -1)
 })

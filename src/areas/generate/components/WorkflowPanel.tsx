@@ -13,6 +13,7 @@ import { useWorkflowRunStore } from '@areas/workflows/workflowRunStore'
 import { useWaitButton } from '@areas/workflows/useWaitButton'
 import { buildAllWorkflowExtensions, getWorkflowExtension } from '@areas/workflows/mockExtensions'
 import { validateWorkflowPreflight } from '@areas/workflows/preflight'
+import { areAllWorkflowNodeParamsBound } from '@areas/workflows/workflowParamBindings'
 import type { WorkflowExtension } from '@areas/workflows/mockExtensions'
 import type { Workflow, WFNode, WFEdge, ParamSchema } from '@shared/types/electron.d'
 import ChatPanel from './ChatPanel'
@@ -591,10 +592,15 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
     [nodes, edges],
   )
 
-  const paramNodes = sortedNodes.filter((n) =>
-    (n.type === 'imageNode' || n.type === 'textNode' || n.type === 'meshNode' || n.type === 'extensionNode' || n.type === 'waitNode')
-    && (n.data as { showInGenerate?: boolean }).showInGenerate === true,
-  )
+  const paramNodes = sortedNodes.filter((n) => {
+    if (
+      (n.type !== 'imageNode' && n.type !== 'textNode' && n.type !== 'meshNode' && n.type !== 'extensionNode' && n.type !== 'waitNode')
+      || (n.data as { showInGenerate?: boolean }).showInGenerate !== true
+    ) return false
+    if (n.type !== 'extensionNode') return true
+    const ext = getWorkflowExtension(n.data.extensionId ?? '', allExtensions)
+    return !ext || !areAllWorkflowNodeParamsBound(workflow, n.id, ext.params.map((param) => param.id))
+  })
 
   const handleGenerate = useCallback(() => {
     if (firstPreflightIssue) {
