@@ -179,6 +179,8 @@ declare global {
       }
       ui: {
         setZoomFactor: (factor: number) => void
+        onZoomStep: (cb: (step: number) => void) => void
+        offZoomStep: () => void
       }
       python: {
         start:     () => Promise<{ success: boolean; port?: number; error?: string }>

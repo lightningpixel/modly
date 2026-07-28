@@ -34,7 +34,16 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
     },
 
     // Renderer UI (zoom whole page — scales every px/rem consistently)
-    ui: { setZoomFactor: (factor: number) => webFrame.setZoomFactor(factor) },
+    ui: {
+      setZoomFactor: (factor: number) => webFrame.setZoomFactor(factor),
+      // Chromium eats Ctrl/Cmd +/- before the page sees them, so the main
+      // process catches the chord and forwards only the direction. The size
+      // itself is the renderer's, so there is exactly one copy of it.
+      onZoomStep: (cb: (step: number) => void) => {
+        ipcRenderer.on('ui:zoomStep', (_event, step) => cb(step as number))
+      },
+      offZoomStep: () => ipcRenderer.removeAllListeners('ui:zoomStep'),
+    },
 
     // Shell utilities
     shell: { openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url) },
