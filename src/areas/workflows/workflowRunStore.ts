@@ -6,6 +6,7 @@ import type { WorkflowExtension } from './mockExtensions'
 import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
 import { isBranchStarter, isSceneOutput, resolveDataSource, reachesSceneOutput, nearestUpstreamWaits } from './nodeBehaviors'
 import { resolveBoundWorkflowParams } from './workflowParamBindings'
+import { mergeNodeText } from './mergeNodeText'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -520,15 +521,19 @@ async function executeExtensionNode(
         ? norm.slice(workspaceDir.length).replace(/^\//, '')
         : norm
     }
-    if (nodeInputText !== undefined && nodeInputText.trim().length > 0) {
-      extraParams.prompt = nodeInputText
-      extraParams.text   = nodeInputText
-    }
 
     const schemaDefaults = Object.fromEntries(
       (ext.params ?? []).map((p) => [p.id, p.default]),
     )
     const effectiveParams = { ...schemaDefaults, ...liveParams }
+
+    // The artist's "Extra details" ADD to the step's own direction rather than
+    // replacing it — see mergeNodeText for what replacing it used to cost.
+    if (nodeInputText !== undefined && nodeInputText.trim().length > 0) {
+      for (const key of ['prompt', 'text'] as const) {
+        extraParams[key] = mergeNodeText(effectiveParams[key], nodeInputText)
+      }
+    }
 
     const fd = new FormData()
     fd.append('image', blob, fname)
