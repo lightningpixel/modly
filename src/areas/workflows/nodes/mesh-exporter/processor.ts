@@ -17,9 +17,40 @@ interface ProcessContext {
 
 interface DerivedRef  { path: string; name: string | null }
 interface DerivedFrom { parent: DerivedRef; root: DerivedRef }
+type Sidecar = Record<string, unknown>
 
 function sidecarPathFor(assetPath: string): string {
   return assetPath.replace(/\.[^./\\]+$/, '') + '.tags.json'
+}
+
+function readSidecar(assetPath: string): Sidecar {
+  const sidecarPath = sidecarPathFor(assetPath)
+  if (!fs.existsSync(sidecarPath)) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(fs.readFileSync(sidecarPath, 'utf-8'))
+  } catch (error) {
+    throw new Error(`mesh-exporter: cannot read metadata sidecar ${sidecarPath}: ${String(error)}`)
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`mesh-exporter: metadata sidecar is not a JSON object: ${sidecarPath}`)
+  }
+  return parsed as Sidecar
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+function writeSidecarAtomic(assetPath: string, sidecar: Sidecar): void {
+  const destination = sidecarPathFor(assetPath)
+  const temporary = `${destination}.${process.pid}.${Date.now()}.tmp`
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(sidecar, null, 2) + '\n', 'utf-8')
+    fs.renameSync(temporary, destination)
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary)
+  }
 }
 
 /** Workspace-relative form of an absolute path, or null if it's outside the workspace. */
@@ -326,20 +357,35 @@ const processor = async (
   } catch (e) {
     context.log(`tagging skipped: ${e}`)
   }
-  const tags = Array.from(new Set([...typedTags, ...suggested]))
+  const sourceSidecar = readSidecar(input.filePath)
+  const tags = Array.from(new Set([
+    ...stringArray(sourceSidecar.tags),
+    ...typedTags,
+    ...suggested,
+  ]))
 
   // Lineage: only recorded when the input actually traces back to an existing
   // workspace asset — a fresh generation has nothing to chain to.
   const derivedFrom = resolveDerivedFrom(input.sourceAssetPath, context.workspaceDir)
-
-  fs.mkdirSync(path.dirname(outPath), { recursive: true })
-  fs.writeFileSync(outPath.replace(/\.[^.]+$/, '') + '.tags.json', JSON.stringify({
-    name:    typed || null,
-    project: params['project'] || null,
-    tags,
-    ...(derivedFrom ? { derived_from: derivedFrom } : {}),
-    created: new Date().toISOString(),
-  }, null, 2))
+  const existingOutputSidecar = readSidecar(outPath)
+  const outputSidecar: Sidecar = {
+    // Preserve the complete traveling record and any future metadata fields.
+    // The exporter owns only the catalog fields below.
+    ...sourceSidecar,
+    ...existingOutputSidecar,
+    name:    typed || existingOutputSidecar.name || sourceSidecar.name || null,
+    project: params['project'] || existingOutputSidecar.project || sourceSidecar.project || null,
+    tags: Array.from(new Set([
+      ...stringArray(existingOutputSidecar.tags),
+      ...tags,
+    ])),
+    ...(derivedFrom
+      ? { derived_from: derivedFrom }
+      : (existingOutputSidecar.derived_from ?? sourceSidecar.derived_from)
+        ? { derived_from: existingOutputSidecar.derived_from ?? sourceSidecar.derived_from }
+        : {}),
+    created: existingOutputSidecar.created || new Date().toISOString(),
+  }
 
   try {
     const asset = doc.getRoot().getAsset()
@@ -361,6 +407,10 @@ const processor = async (
     else if (format === 'obj') writeOBJ(prims, outPath)
     else if (format === 'ply') writePLY(prims, outPath)
   }
+
+  // Publish metadata only after the asset exists. This also prevents a failed
+  // conversion from leaving a catalog entry that points at no model.
+  writeSidecarAtomic(outPath, outputSidecar)
 
   context.progress(100, 'Done')
   context.log(`Output: ${outPath}`)

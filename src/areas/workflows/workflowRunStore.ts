@@ -55,6 +55,134 @@ interface NodeOutput {
   sourceAssetPath?: string
 }
 
+interface ArtistIntentContext {
+  sourceImage:  string | null
+  project:      string | null
+  extraDetails: string | null
+  movement:     string | null
+  styleName:    string | null
+  stylePrompt:  string | null
+  workflowId:   string
+  workflowName: string
+}
+
+const INTENT_EXTENSION_ID = 'intent-travel'
+
+function textValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value : null
+}
+
+function buildArtistIntentContext(
+  workflow: Workflow,
+  allExtensions: WorkflowExtension[],
+  sourceImage: string | undefined,
+): ArtistIntentContext {
+  const paramsFor = (node: WFNode): Record<string, unknown> =>
+    _liveParams.current.get(node.id) ?? node.data.params ?? {}
+
+  const extraNode = workflow.nodes.find((node) =>
+    node.type === 'textNode'
+    && String(node.data.label ?? '').toLowerCase().includes('extra detail'),
+  )
+  const movementNode = workflow.nodes.find((node) =>
+    node.type === 'extensionNode'
+    && (
+      String(node.data.extensionId ?? '').startsWith('rig-and-animate/')
+      || Object.prototype.hasOwnProperty.call(paramsFor(node), 'describe')
+    ),
+  )
+  const styleNode = workflow.nodes.find((node) => {
+    if (node.type !== 'extensionNode') return false
+    const ext = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
+    return ext?.params.some((param) => param.id === 'prompt' && param.type === 'select') ?? false
+  })
+  const exportNode = workflow.nodes.find((node) =>
+    node.type === 'extensionNode'
+    && String(node.data.extensionId ?? '').startsWith('mesh-exporter/'),
+  )
+
+  const styleParams = styleNode ? paramsFor(styleNode) : {}
+  const stylePrompt = textValue(styleParams.prompt)
+  const styleExt = styleNode
+    ? getWorkflowExtension(styleNode.data.extensionId ?? '', allExtensions)
+    : undefined
+  const styleOption = styleExt?.params
+    .find((param) => param.id === 'prompt')
+    ?.options?.find((option) => String(option.value) === String(styleParams.prompt ?? ''))
+  const styleName = textValue(styleOption?.label)
+
+  let project = textValue(exportNode ? paramsFor(exportNode).project : null)
+  if (!project && styleName?.includes(' · ')) {
+    const candidate = styleName.split(' · ', 1)[0].trim()
+    if (candidate && candidate.toLowerCase() !== 'universal') project = candidate
+  }
+
+  return {
+    sourceImage: sourceImage ?? null,
+    project,
+    extraDetails: textValue(extraNode ? paramsFor(extraNode).text : null),
+    movement: textValue(movementNode ? paramsFor(movementNode).describe : null),
+    styleName,
+    stylePrompt,
+    workflowId: workflow.id,
+    workflowName: workflow.name,
+  }
+}
+
+async function startArtistIntent(
+  workflow: Workflow,
+  allExtensions: WorkflowExtension[],
+  sourcePath: string | undefined,
+  sourceData: string | undefined,
+): Promise<string | undefined> {
+  if (!sourcePath && !sourceData) return undefined
+  const available = allExtensions.some((ext) =>
+    ext.extensionId === INTENT_EXTENSION_ID && ext.nodeId === 'start',
+  )
+  if (!available) {
+    throw new Error('Artist context support is not installed. No generation was started.')
+  }
+  const result = await window.electron.extensions.runProcess(
+    INTENT_EXTENSION_ID,
+    {
+      filePath: sourcePath,
+      text: sourcePath ? undefined : sourceData,
+      nodeId: 'start',
+    },
+    {
+      context: buildArtistIntentContext(workflow, allExtensions, sourcePath),
+    },
+  )
+  if (!result.success || !result.result?.filePath) {
+    throw new Error(result.error ?? 'The artist request could not be recorded. No generation was started.')
+  }
+  return result.result.filePath
+}
+
+async function carryArtistIntent(
+  sourcePath: string,
+  destinationPath: string,
+  node: WFNode,
+  ext: WorkflowExtension,
+): Promise<void> {
+  const result = await window.electron.extensions.runProcess(
+    INTENT_EXTENSION_ID,
+    { filePath: sourcePath, nodeId: 'carry' },
+    {
+      destinationPath,
+      stage: node.data.label ?? ext.name,
+      details: {
+        node_id: node.id,
+        extension_id: node.data.extensionId ?? null,
+        output_type: ext.output ?? null,
+      },
+    },
+  )
+  if (!result.success) {
+    throw new Error(result.error ?? `${ext.name} finished, but the artist context could not be carried`)
+  }
+}
+
 function isSceneMeshOutput(output: NodeOutput | undefined): output is NodeOutput & { filePath: string } {
   return output?.outputType === 'mesh' && typeof output.filePath === 'string'
 }
@@ -146,6 +274,8 @@ interface RunContext {
   iteratorFiles:      Map<string, string[]>
   /** workspace URL of the most recently pushed scene mesh (last branch the user ran wins) */
   lastSceneMesh?:     string
+  /** A run-specific source sidecar was created before the first executable stage. */
+  carriesArtistIntent: boolean
 }
 const _ctx = { current: null as RunContext | null }
 
@@ -328,6 +458,7 @@ async function executeExtensionNode(
   // by every node in between, so mesh-exporter can record lineage even at the
   // end of a multi-step chain.
   let nodeInputSourceAssetPath: string | undefined
+  let intentSourcePath: string | undefined
   // Per-slot texts for multi-text-input nodes (e.g. positive/negative prompts).
   // Indexed by target handle: input-0 → texts[0], input-1 → texts[1].
   const nodeInputTexts: (string | undefined)[] = []
@@ -362,6 +493,7 @@ async function executeExtensionNode(
   if (isModelNode) {
     const isTextInput = ext?.inputs ? ext.inputs.every((i) => i === 'text') : ext?.input === 'text'
     const activeImagePath = isTextInput ? undefined : (nodeInputPath ?? selectedImagePath)
+    intentSourcePath = nodeInputMeshPath ?? activeImagePath
     if (!isTextInput && !selectedImageData && (!activeImagePath || activeImagePath.trim().length === 0)) {
       throw new Error('No input image selected for model node')
     }
@@ -440,6 +572,7 @@ async function executeExtensionNode(
       useAppStore.getState().updateCurrentJob({ status: 'generating', progress: st.progress, step: st.step })
     }
   } else {
+    intentSourcePath = nodeInputMeshPath ?? nodeInputPath
     if (ext?.input === 'mesh'  && !nodeInputPath) throw new Error(`${ext.name} needs an incoming mesh connection`)
     if (ext?.input === 'image' && !nodeInputPath) throw new Error(`${ext.name} needs an incoming image connection`)
     if (ext?.input === 'audio' && !nodeInputPath) throw new Error(`${ext.name} needs an incoming audio connection`)
@@ -466,6 +599,14 @@ async function executeExtensionNode(
   }
 
   const outputType = ext?.output ?? (nodeInputPath ? 'mesh' : undefined)
+  if (
+    ctx.carriesArtistIntent
+    && intentSourcePath
+    && nodeInputPath
+    && (outputType === 'image' || outputType === 'mesh')
+  ) {
+    await carryArtistIntent(intentSourcePath, nodeInputPath, node, ext!)
+  }
   nodeOutputs.set(node.id, { filePath: nodeInputPath, text: nodeInputText, outputType, sourceAssetPath: nodeInputSourceAssetPath })
 
   const output = nodeOutputs.get(node.id)
@@ -791,9 +932,32 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
           }
         }
 
+        // Stage a run-specific copy and create its immutable request record
+        // before the first Style/model step. Reusing the artist's original file
+        // directly would make a second run overwrite the first run's request.
+        const primaryImageNode = ordered.find((node) => node.type === 'imageNode')
+        let carriesArtistIntent = false
+        if (primaryImageNode) {
+          const originalSource = nodeOutputs.get(primaryImageNode.id)?.filePath
+          const stagedSource = await startArtistIntent(
+            workflow,
+            allExtensions,
+            originalSource,
+            originalSource ? undefined : selectedImageData,
+          )
+          if (stagedSource) {
+            nodeOutputs.set(primaryImageNode.id, {
+              filePath: stagedSource,
+              outputType: 'image',
+            })
+            carriesArtistIntent = true
+          }
+        }
+
         const ctx: RunContext = {
           workflow, allExtensions, client, workspaceDir, selectedImagePath, selectedImageData,
           overrideImageData, nodeOutputs, nodeMap, ordered, branches, waitIds, parentWait, iteratorFiles,
+          carriesArtistIntent,
         }
         _ctx.current = ctx
 
