@@ -183,9 +183,14 @@ export function resolveOpenPanelAfterLibrarySelection(currentPanel: GenerateOpen
   return currentPanel === 'library' ? 'library' : currentPanel
 }
 
-export const ASSET_LIBRARY_PANEL_MIN_WIDTH = 260
-export const ASSET_LIBRARY_PANEL_MAX_WIDTH = 560
-export const ASSET_LIBRARY_PANEL_DEFAULT_WIDTH = 320
+// Wide enough that a 40px thumbnail, a readable name, its full workspace path,
+// and its type badge all sit on one row without truncating for typical asset
+// names — narrow (~280px) made the panel unusable even at full height. Raising
+// the minimum (not just the default) also repairs the shape for anyone who
+// already dragged a prior session's panel down toward the old, cramped floor.
+export const ASSET_LIBRARY_PANEL_MIN_WIDTH = 380
+export const ASSET_LIBRARY_PANEL_MAX_WIDTH = 960
+export const ASSET_LIBRARY_PANEL_DEFAULT_WIDTH = 640
 
 const ASSET_LIBRARY_PANEL_WIDTH_STORAGE_KEY = 'modly-library-panel-width'
 

@@ -77,3 +77,20 @@ test('renderer service validates thumbnail requests before IPC and never surface
   assert.deepEqual(safe, { success: true, dataUrl: 'data:image/png;base64,ok' })
   assert.equal(invoked, true)
 })
+
+test('renderer service forwards previewClip through to the thumbnail IPC call unchanged', async () => {
+  let receivedRequest: unknown = null
+  const service = createAssetLibraryService({
+    list: async () => ({ success: true, entries: [] }),
+    read: async () => ({ success: false, error: { code: 'read-failed', message: 'should not run' } }),
+    open: async () => ({ success: false, error: { code: 'read-failed', message: 'should not run' } }),
+    thumbnail: async (request) => {
+      receivedRequest = request
+      return { success: true, dataUrl: 'data:image/webp;base64,ok', previews: [{ clip: 'walk', duration: 0.8 }] }
+    },
+  })
+
+  const result = await service.thumbnail({ workspacePath: 'Exports/hero.glb', previewClip: 'walk' })
+  assert.deepEqual(receivedRequest, { workspacePath: 'Exports/hero.glb', previewClip: 'walk' })
+  assert.deepEqual(result, { success: true, dataUrl: 'data:image/webp;base64,ok', previews: [{ clip: 'walk', duration: 0.8 }] })
+})

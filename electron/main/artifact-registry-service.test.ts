@@ -220,6 +220,95 @@ test('reads a sibling .thumb.png for GLB assets and stays silent when one is mis
   assert.equal(unsafe.success, false)
 }))
 
+test('attaches preview clip metadata to the thumbnail response when a manifest exists', () => withWorkspace(async (workspaceDir) => {
+  await mkdir(path.join(workspaceDir, 'Exports/props'), { recursive: true })
+  await writeFile(path.join(workspaceDir, 'Exports/props/hero.glb'), 'glb')
+  await writeFile(path.join(workspaceDir, 'Exports/props/hero.thumb.png'), 'fake-png-bytes')
+  await writeFile(path.join(workspaceDir, 'Exports/props/hero.preview-idle.webp'), 'fake-idle-webp')
+  await writeFile(path.join(workspaceDir, 'Exports/props/hero.preview-walk.webp'), 'fake-walk-webp')
+  await writeFile(path.join(workspaceDir, 'Exports/props/hero.previews.json'), JSON.stringify([
+    { clip: 'idle', file: 'hero.preview-idle.webp', duration: 1.5 },
+    { clip: 'walk', file: 'hero.preview-walk.webp', duration: 0.8 },
+  ]))
+
+  const withThumb = await readWorkspaceAssetLibraryThumbnail({ workspaceDir, workspacePath: 'Exports/props/hero.glb' })
+  assert.equal(withThumb.success, true)
+  assert.deepEqual(withThumb.success && withThumb.previews, [
+    { clip: 'idle', duration: 1.5 },
+    { clip: 'walk', duration: 0.8 },
+  ])
+}))
+
+test('fetches a specific preview clip WebP by name over the same thumbnail request', () => withWorkspace(async (workspaceDir) => {
+  await mkdir(path.join(workspaceDir, 'Exports/props'), { recursive: true })
+  await writeFile(path.join(workspaceDir, 'Exports/props/hero.glb'), 'glb')
+  await writeFile(path.join(workspaceDir, 'Exports/props/hero.preview-walk.webp'), 'fake-walk-webp')
+  await writeFile(path.join(workspaceDir, 'Exports/props/hero.previews.json'), JSON.stringify([
+    { clip: 'walk', file: 'hero.preview-walk.webp', duration: 0.8 },
+  ]))
+
+  const clip = await readWorkspaceAssetLibraryThumbnail({ workspaceDir, workspacePath: 'Exports/props/hero.glb', previewClip: 'walk' })
+  assert.equal(clip.success, true)
+  assert.equal(clip.success && clip.dataUrl, `data:image/webp;base64,${Buffer.from('fake-walk-webp').toString('base64')}`)
+
+  const unknownClip = await readWorkspaceAssetLibraryThumbnail({ workspaceDir, workspacePath: 'Exports/props/hero.glb', previewClip: 'sprint' })
+  assert.equal(unknownClip.success, false)
+}))
+
+test('thumbnail response carries no previews field when no manifest exists, and stays silent on a malformed one', () => withWorkspace(async (workspaceDir) => {
+  await mkdir(path.join(workspaceDir, 'Exports/props'), { recursive: true })
+  await writeFile(path.join(workspaceDir, 'Exports/props/hero.glb'), 'glb')
+  await writeFile(path.join(workspaceDir, 'Exports/props/hero.thumb.png'), 'fake-png-bytes')
+  await writeFile(path.join(workspaceDir, 'Exports/props/broken.glb'), 'glb')
+  await writeFile(path.join(workspaceDir, 'Exports/props/broken.thumb.png'), 'fake-png-bytes')
+  await writeFile(path.join(workspaceDir, 'Exports/props/broken.previews.json'), 'not valid json{')
+
+  const noManifest = await readWorkspaceAssetLibraryThumbnail({ workspaceDir, workspacePath: 'Exports/props/hero.glb' })
+  assert.equal(noManifest.success, true)
+  assert.equal(noManifest.success && noManifest.previews, undefined)
+
+  const malformedManifest = await readWorkspaceAssetLibraryThumbnail({ workspaceDir, workspacePath: 'Exports/props/broken.glb' })
+  assert.equal(malformedManifest.success, true)
+  assert.equal(malformedManifest.success && malformedManifest.previews, undefined)
+}))
+
+test('rejects a preview manifest entry that tries to escape the asset directory via its file field', () => withWorkspace(async (workspaceDir) => {
+  await mkdir(path.join(workspaceDir, 'Exports/props'), { recursive: true })
+  await writeFile(path.join(workspaceDir, 'Exports/props/hero.glb'), 'glb')
+  await writeFile(path.join(workspaceDir, 'Exports/props/hero.thumb.png'), 'fake-png-bytes')
+  await writeFile(path.join(workspaceDir, 'secret.webp'), 'top-secret-bytes')
+  await writeFile(path.join(workspaceDir, 'Exports/props/hero.previews.json'), JSON.stringify([
+    { clip: 'escape-relative', file: '../../secret.webp', duration: 1 },
+    { clip: 'escape-absolute', file: '/etc/passwd', duration: 1 },
+    { clip: 'wrong-extension', file: 'hero.glb', duration: 1 },
+  ]))
+
+  // The manifest lists the clip in its metadata (harmless — it's just a name),
+  // but every attempt to actually fetch the referenced file must fail closed.
+  const listed = await readWorkspaceAssetLibraryThumbnail({ workspaceDir, workspacePath: 'Exports/props/hero.glb' })
+  assert.equal(listed.success, true)
+  assert.equal(listed.success && listed.previews?.length, 3)
+
+  const relative = await readWorkspaceAssetLibraryThumbnail({ workspaceDir, workspacePath: 'Exports/props/hero.glb', previewClip: 'escape-relative' })
+  assert.equal(relative.success, false)
+  const absolute = await readWorkspaceAssetLibraryThumbnail({ workspaceDir, workspacePath: 'Exports/props/hero.glb', previewClip: 'escape-absolute' })
+  assert.equal(absolute.success, false)
+  const wrongExtension = await readWorkspaceAssetLibraryThumbnail({ workspaceDir, workspacePath: 'Exports/props/hero.glb', previewClip: 'wrong-extension' })
+  assert.equal(wrongExtension.success, false)
+}))
+
+test('IPC thumbnail handler forwards previewClip from payload', async () => {
+  const handlers = new Map<string, (event: unknown, payload: unknown) => Promise<unknown>>()
+  registerWorkspaceAssetLibraryIpcHandlers({
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    getWorkspaceDir: () => '/tmp/modly-workspace',
+  })
+
+  const result = await handlers.get('workspace:library:thumbnail')?.({}, { workspacePath: 'Exports/hero.glb', previewClip: 'walk' })
+  // No such workspace/file in this test, so it must fail closed rather than throw.
+  assert.equal((result as { success: boolean }).success, false)
+})
+
 test('IPC read and open handlers forward sourceWorkspacePath without trusting malformed payloads', async () => {
   const handlers = new Map<string, (event: unknown, payload: unknown) => Promise<unknown>>()
   registerWorkspaceAssetLibraryIpcHandlers({

@@ -25,6 +25,7 @@ test('preload exposes scoped workspace library list/read/open methods', async ()
     sourceWorkspacePath: 'Workflows/checkpoints/hero.glb',
   })
   await api.workspace.library.thumbnail({ workspacePath: 'Exports/hero.glb' })
+  await api.workspace.library.thumbnail({ workspacePath: 'Exports/hero.glb', previewClip: 'walk' })
 
   assert.deepEqual(calls, [
     { channel: 'workspace:library:list', payload: undefined },
@@ -43,5 +44,6 @@ test('preload exposes scoped workspace library list/read/open methods', async ()
       },
     },
     { channel: 'workspace:library:thumbnail', payload: { workspacePath: 'Exports/hero.glb' } },
+    { channel: 'workspace:library:thumbnail', payload: { workspacePath: 'Exports/hero.glb', previewClip: 'walk' } },
   ])
 })

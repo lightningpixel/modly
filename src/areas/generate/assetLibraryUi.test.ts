@@ -132,12 +132,14 @@ test('builds linked-source open requests and import jobs for safe sidecars', () 
 })
 
 test('Library panel width clamps to sane bounds and degrades silently without a localStorage', () => {
-  assert.equal(clampAssetLibraryPanelWidth(0), 260)
-  assert.equal(clampAssetLibraryPanelWidth(999), 560)
-  assert.equal(clampAssetLibraryPanelWidth(400), 400)
+  assert.equal(clampAssetLibraryPanelWidth(0), 380)
+  assert.equal(clampAssetLibraryPanelWidth(9999), 960)
+  assert.equal(clampAssetLibraryPanelWidth(700), 700)
+  // A prior session's narrow, dragged-down width must clamp back up to the new floor.
+  assert.equal(clampAssetLibraryPanelWidth(280), 380)
   // node --test has no `localStorage` global — both helpers must fall back rather than throw.
-  assert.equal(getStoredAssetLibraryPanelWidth(), 320)
-  assert.doesNotThrow(() => storeAssetLibraryPanelWidth(400))
+  assert.equal(getStoredAssetLibraryPanelWidth(), 640)
+  assert.doesNotThrow(() => storeAssetLibraryPanelWidth(700))
 })
 
 test('Library panel height clamps to sane bounds and degrades silently without a localStorage', () => {

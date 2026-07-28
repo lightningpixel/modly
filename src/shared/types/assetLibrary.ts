@@ -82,12 +82,26 @@ export type AssetLibraryOpenResult =
   | { success: true, entry: AssetLibraryEntry }
   | { success: false, error: AssetLibraryError }
 
+export interface AssetLibraryPreviewClip {
+  /** Animation clip name, matched against the manifest and echoed back on request. */
+  clip: string
+  /** Loop duration in seconds, as reported by the manifest. */
+  duration: number
+}
+
 export interface AssetLibraryThumbnailRequest {
   workspacePath: string
+  /**
+   * When set, request the looping preview WebP for this clip instead of the
+   * static thumbnail. Omit to fetch the static thumbnail (default), which also
+   * carries the `previews` clip list when one exists so the UI can decide
+   * whether hover-to-animate is available at all.
+   */
+  previewClip?: string
 }
 
 // Missing thumbnails are an expected, silent condition (not every asset has
 // a rendered preview), so failure carries no error payload for the UI to show.
 export type AssetLibraryThumbnailResult =
-  | { success: true, dataUrl: string }
+  | { success: true, dataUrl: string, previews?: AssetLibraryPreviewClip[] }
   | { success: false }

@@ -9,6 +9,7 @@ import Viewer3D from './components/Viewer3D'
 import WorkflowPanel from './components/WorkflowPanel'
 import { getDefaultAssetLibraryService } from './assetLibraryService'
 import { resolveAssetLibraryOpenTarget, type ProjectedAssetLibraryEntry } from './assetLibraryProjection'
+import type { AssetLibraryPreviewClip } from '../../shared/types/assetLibrary'
 import {
   ASSET_LIBRARY_SORT_OPTIONS,
   buildAssetLibraryOpenRequest,
@@ -391,6 +392,10 @@ function AssetLibraryToggleButton({
   )
 }
 
+// A stable empty-array reference for entries with no preview manifest yet, so
+// rows don't see a fresh `[]` identity on every parent re-render.
+const EMPTY_PREVIEW_CLIPS: AssetLibraryPreviewClip[] = []
+
 function AssetLibraryPopover({
   entries,
   selectedEntryId,
@@ -401,13 +406,15 @@ function AssetLibraryPopover({
   sortMode,
   collapsedSectionKeys,
   thumbnails,
+  previews,
   panelWidth,
   panelHeight,
-  onSelectEntry,
+  onActivateEntry,
   onSearchQueryChange,
   onSortModeChange,
   onToggleSection,
   onOpenSelected,
+  onFetchPreviewFrame,
   onRefresh,
   onClose,
   onResizeMouseDown,
@@ -423,13 +430,17 @@ function AssetLibraryPopover({
   collapsedSectionKeys: string[]
   /** Data URLs keyed by workspacePath, populated lazily as thumbnails load. */
   thumbnails: Record<string, string>
+  /** Preview clip metadata keyed by workspacePath; empty until a preview manifest exists for that asset. */
+  previews: Record<string, AssetLibraryPreviewClip[]>
   panelWidth: number
   panelHeight: number
-  onSelectEntry: (entryId: string) => void
+  /** A row click both selects and, when the entry is openable, opens it immediately — no second confirming click. */
+  onActivateEntry: (entryId: string) => void
   onSearchQueryChange: (value: string) => void
   onSortModeChange: (value: AssetLibrarySortMode) => void
   onToggleSection: (sectionKey: string) => void
   onOpenSelected: () => void
+  onFetchPreviewFrame: (workspacePath: string, clip: string) => Promise<string | null>
   onRefresh: () => void
   onClose: () => void
   onResizeMouseDown: (event: React.MouseEvent) => void
@@ -568,37 +579,18 @@ function AssetLibraryPopover({
                           </button>
                           {capabilityExpanded && (
                             <div id={capabilityRegionId}>
-                              {group.entries.map((entry) => {
-                                const selected = entry.id === selectedEntryId
-                                const thumbnailDataUrl = thumbnails[entry.workspacePath]
-                                return (
-                                  <button
-                                    key={entry.id}
-                                    type="button"
-                                    role="listitem"
-                                    aria-pressed={selected}
-                                    aria-label={`Select library asset ${entry.displayName}`}
-                                    onClick={() => onSelectEntry(entry.id)}
-                                    className={`flex w-full items-center gap-3 text-left px-4 py-1.5 border-t border-zinc-800 first:border-t-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400
-                                      ${selected ? 'bg-violet-500/10 text-zinc-100' : 'text-zinc-300 hover:bg-zinc-800/80'}`}
-                                  >
-                                    {thumbnailDataUrl && (
-                                      <img
-                                        src={thumbnailDataUrl}
-                                        alt=""
-                                        className="h-10 w-10 shrink-0 rounded-lg border border-zinc-800 bg-zinc-950 object-contain"
-                                      />
-                                    )}
-                                    <div className="min-w-0 flex-1">
-                                      <div className="flex items-center justify-between gap-2">
-                                        <span className="truncate text-xs font-medium">{entry.displayName}</span>
-                                        <span className="shrink-0 text-[10px] uppercase tracking-wider text-zinc-500">{entry.capability ?? entry.state.replace(/-/g, ' ')}</span>
-                                      </div>
-                                      <p className="mt-1 truncate text-[10px] text-zinc-500">{entry.workspacePath}</p>
-                                    </div>
-                                  </button>
-                                )
-                              })}
+                              {group.entries.map((entry) => (
+                                <AssetLibraryEntryRow
+                                  key={entry.id}
+                                  entry={entry}
+                                  selected={entry.id === selectedEntryId}
+                                  disabled={opening}
+                                  thumbnailDataUrl={thumbnails[entry.workspacePath]}
+                                  previewClips={previews[entry.workspacePath] ?? EMPTY_PREVIEW_CLIPS}
+                                  onActivate={() => onActivateEntry(entry.id)}
+                                  onFetchPreviewFrame={onFetchPreviewFrame}
+                                />
+                              ))}
                             </div>
                           )}
                         </section>
@@ -630,6 +622,122 @@ function AssetLibraryPopover({
   )
 }
 
+/**
+ * One Library row. A click both selects and (when openable) opens the asset —
+ * the "Open selected asset" button stays as a secondary affordance, not the
+ * only path. Hovering swaps the static thumbnail for a looping preview clip,
+ * lazily fetched over the same thumbnail IPC call, when one exists; with no
+ * preview manifest yet, `previewClips` is empty and the row behaves exactly
+ * as it did before — no extra fetches, no hover swap, no cycle control.
+ */
+function AssetLibraryEntryRow({
+  entry,
+  selected,
+  disabled,
+  thumbnailDataUrl,
+  previewClips,
+  onActivate,
+  onFetchPreviewFrame,
+}: {
+  entry: ProjectedAssetLibraryEntry
+  selected: boolean
+  disabled: boolean
+  thumbnailDataUrl: string | undefined
+  previewClips: AssetLibraryPreviewClip[]
+  onActivate: () => void
+  onFetchPreviewFrame: (workspacePath: string, clip: string) => Promise<string | null>
+}) {
+  const [hovered, setHovered] = useState(false)
+  const [clipIndex, setClipIndex] = useState(0)
+  const [previewFrames, setPreviewFrames] = useState<Record<string, string>>({})
+  const mountedRef = useRef(true)
+  useEffect(() => () => { mountedRef.current = false }, [])
+
+  const activeClip = previewClips.length > 0 ? previewClips[clipIndex % previewClips.length] : undefined
+  const activeFrameUrl = activeClip ? previewFrames[activeClip.clip] : undefined
+
+  // Lazy, hover-triggered, and cached per clip for this row's lifetime — a
+  // second hover (or cycling back to a clip already seen) never re-fetches.
+  useEffect(() => {
+    if (!hovered || !activeClip || previewFrames[activeClip.clip]) return
+    void onFetchPreviewFrame(entry.workspacePath, activeClip.clip).then((dataUrl) => {
+      if (mountedRef.current && dataUrl) {
+        setPreviewFrames((current) => ({ ...current, [activeClip.clip]: dataUrl }))
+      }
+    })
+  }, [hovered, activeClip, entry.workspacePath, previewFrames, onFetchPreviewFrame])
+
+  function cycleClip(step: 1 | -1, event: React.MouseEvent | React.KeyboardEvent) {
+    event.preventDefault()
+    event.stopPropagation()
+    setClipIndex((current) => (current + step + previewClips.length) % previewClips.length)
+  }
+
+  function handleCycleKeyDown(step: 1 | -1, event: React.KeyboardEvent) {
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    cycleClip(step, event)
+  }
+
+  const displayedThumbnailUrl = hovered && activeFrameUrl ? activeFrameUrl : thumbnailDataUrl
+
+  return (
+    <button
+      type="button"
+      role="listitem"
+      aria-pressed={selected}
+      aria-label={`Open library asset ${entry.displayName}`}
+      onClick={onActivate}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      disabled={disabled}
+      className={`flex w-full items-center gap-3 text-left px-4 py-1.5 border-t border-zinc-800 first:border-t-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 disabled:opacity-50 disabled:pointer-events-none
+        ${selected ? 'bg-violet-500/10 text-zinc-100' : 'text-zinc-300 hover:bg-zinc-800/80'}`}
+    >
+      {thumbnailDataUrl && (
+        <div className="relative h-10 w-10 shrink-0">
+          <img
+            src={displayedThumbnailUrl}
+            alt=""
+            className="h-10 w-10 rounded-lg border border-zinc-800 bg-zinc-950 object-contain"
+          />
+          {/* Mini clip selector — only once a hover has fetched more than one clip; never rendered otherwise. */}
+          {hovered && previewClips.length > 1 && (
+            <>
+              <span
+                role="button"
+                tabIndex={0}
+                aria-label={`Show previous preview clip for ${entry.displayName}`}
+                onClick={(event) => cycleClip(-1, event)}
+                onKeyDown={(event) => handleCycleKeyDown(-1, event)}
+                className="absolute inset-y-0 left-0 flex w-3.5 cursor-pointer items-center justify-center rounded-l-lg bg-black/60 text-[10px] leading-none text-zinc-100 hover:bg-black/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-400"
+              >
+                ‹
+              </span>
+              <span
+                role="button"
+                tabIndex={0}
+                aria-label={`Show next preview clip for ${entry.displayName}`}
+                onClick={(event) => cycleClip(1, event)}
+                onKeyDown={(event) => handleCycleKeyDown(1, event)}
+                className="absolute inset-y-0 right-0 flex w-3.5 cursor-pointer items-center justify-center rounded-r-lg bg-black/60 text-[10px] leading-none text-zinc-100 hover:bg-black/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-400"
+              >
+                ›
+              </span>
+            </>
+          )}
+        </div>
+      )}
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center justify-between gap-2">
+          <span className="truncate text-xs font-medium">{entry.displayName}</span>
+          <span className="shrink-0 text-[10px] uppercase tracking-wider text-zinc-500">{entry.capability ?? entry.state.replace(/-/g, ' ')}</span>
+        </div>
+        <p className="mt-1 truncate text-[10px] text-zinc-500">{entry.workspacePath}</p>
+      </div>
+    </button>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // GeneratePage
 // ---------------------------------------------------------------------------
@@ -651,6 +759,7 @@ export default function GeneratePage(): JSX.Element {
   const [librarySortMode, setLibrarySortMode] = useState<AssetLibrarySortMode>('type')
   const [libraryCollapsedSectionKeys, setLibraryCollapsedSectionKeys] = useState<string[]>(() => getDefaultAssetLibraryCollapsedSectionKeys())
   const [libraryThumbnails, setLibraryThumbnails] = useState<Record<string, string>>({})
+  const [libraryPreviews, setLibraryPreviews] = useState<Record<string, AssetLibraryPreviewClip[]>>({})
   const [libraryPanelWidth, setLibraryPanelWidth] = useState<number>(() => getStoredAssetLibraryPanelWidth())
   const [libraryPanelHeight, setLibraryPanelHeight] = useState<number>(() => getStoredAssetLibraryPanelHeight())
   const [gizmoMode, setGizmoMode] = useState<'translate' | 'rotate' | 'scale' | null>(null)
@@ -818,30 +927,59 @@ export default function GeneratePage(): JSX.Element {
 
   // Thumbnails are best-effort: only .glb/.gltf entries can have a rendered
   // .thumb.png, and a missing one is silently skipped rather than surfaced.
+  // The same request also carries preview clip metadata when a preview
+  // manifest exists for that asset — most entries won't have one yet, and
+  // those are simply absent from libraryPreviews.
   async function loadLibraryThumbnails(entries: ProjectedAssetLibraryEntry[]) {
+    type ThumbnailFetchResult = { workspacePath: string, dataUrl: string | null, previews: AssetLibraryPreviewClip[] }
     const candidates = entries.filter((entry) => entry.previewKind === '3d-model')
-    const results = await Promise.all(candidates.map(async (entry) => {
+    const results: ThumbnailFetchResult[] = await Promise.all(candidates.map(async (entry) => {
       const result = await assetLibraryService.thumbnail({ workspacePath: entry.workspacePath })
-      return [entry.workspacePath, result.success ? result.dataUrl : null] as const
+      return {
+        workspacePath: entry.workspacePath,
+        dataUrl: result.success ? result.dataUrl : null,
+        previews: result.success ? result.previews ?? [] : [],
+      }
     }))
-    setLibraryThumbnails(Object.fromEntries(results.filter((pair): pair is [string, string] => pair[1] !== null)))
+    setLibraryThumbnails(Object.fromEntries(
+      results
+        .filter((result): result is ThumbnailFetchResult & { dataUrl: string } => result.dataUrl !== null)
+        .map((result) => [result.workspacePath, result.dataUrl]),
+    ))
+    setLibraryPreviews(Object.fromEntries(
+      results.filter((result) => result.previews.length > 0).map((result) => [result.workspacePath, result.previews]),
+    ))
   }
 
-  async function handleOpenSelectedLibraryEntry() {
-    const selectedEntry = libraryEntries.find((entry) => entry.id === librarySelectedEntryId) ?? null
-    if (!selectedEntry) {
+  // Fetches one looping preview clip's WebP, lazily, over the same thumbnail
+  // IPC call the static thumbnails use. A miss (clip removed, file unreadable)
+  // resolves to null rather than throwing, so a row can just keep its static
+  // thumbnail.
+  const fetchLibraryPreviewFrame = useCallback(async (workspacePath: string, clip: string): Promise<string | null> => {
+    try {
+      const result = await assetLibraryService.thumbnail({ workspacePath, previewClip: clip })
+      return result.success ? result.dataUrl : null
+    } catch {
+      return null
+    }
+  }, [assetLibraryService])
+
+  // Shared by both the "Open selected asset" button and a direct row click —
+  // a row activation selects first, then opens through this same path.
+  async function openLibraryEntry(entry: ProjectedAssetLibraryEntry | null) {
+    if (!entry) {
       setLibraryError('Select an asset before opening it in Generate.')
       return
     }
-    if (!isAssetLibraryEntryOpenable(selectedEntry)) {
-      setLibraryError(describeAssetLibraryOpenability(selectedEntry))
+    if (!isAssetLibraryEntryOpenable(entry)) {
+      setLibraryError(describeAssetLibraryOpenability(entry))
       return
     }
 
     setLibraryOpening(true)
     setLibraryError(null)
     try {
-      const result = await assetLibraryService.open(buildAssetLibraryOpenRequest(selectedEntry))
+      const result = await assetLibraryService.open(buildAssetLibraryOpenRequest(entry))
       if (!result.success) {
         setLibraryError(result.error.message)
         return
@@ -852,7 +990,7 @@ export default function GeneratePage(): JSX.Element {
         setLibraryError(describeAssetLibraryOpenability(result.entry))
         return
       }
-      setLibraryEntries((currentEntries) => currentEntries.map((entry) => entry.id === result.entry.id ? result.entry : entry))
+      setLibraryEntries((currentEntries) => currentEntries.map((candidate) => candidate.id === result.entry.id ? result.entry : candidate))
       setLibrarySelectedEntryId(result.entry.id)
       setCurrentJob(selection.job)
       pushMeshUrl(selection.historyUrl)
@@ -862,6 +1000,21 @@ export default function GeneratePage(): JSX.Element {
     } finally {
       setLibraryOpening(false)
     }
+  }
+
+  async function handleOpenSelectedLibraryEntry() {
+    const selectedEntry = libraryEntries.find((entry) => entry.id === librarySelectedEntryId) ?? null
+    await openLibraryEntry(selectedEntry)
+  }
+
+  // A single click on a row both selects and opens it — no second click on
+  // "Open selected asset" required. Non-openable entries still get selected,
+  // surfacing the same "why not" message they always have.
+  async function handleActivateLibraryEntry(entryId: string) {
+    setLibraryError(null)
+    setLibrarySelectedEntryId(entryId)
+    const entry = libraryEntries.find((candidate) => candidate.id === entryId) ?? null
+    await openLibraryEntry(entry)
   }
 
   async function handleSmooth(iterations: number) {
@@ -1075,16 +1228,15 @@ export default function GeneratePage(): JSX.Element {
                 sortMode={librarySortMode}
                 collapsedSectionKeys={libraryCollapsedSectionKeys}
                 thumbnails={libraryThumbnails}
+                previews={libraryPreviews}
                 panelWidth={libraryPanelWidth}
                 panelHeight={libraryPanelHeight}
-                onSelectEntry={(entryId) => {
-                  setLibraryError(null)
-                  setLibrarySelectedEntryId(entryId)
-                }}
+                onActivateEntry={(entryId) => { void handleActivateLibraryEntry(entryId) }}
                 onSearchQueryChange={setLibrarySearchQuery}
                 onSortModeChange={setLibrarySortMode}
                 onToggleSection={(sectionKey) => setLibraryCollapsedSectionKeys((current) => toggleAssetLibrarySectionKey(current, sectionKey))}
                 onOpenSelected={() => { void handleOpenSelectedLibraryEntry() }}
+                onFetchPreviewFrame={fetchLibraryPreviewFrame}
                 onRefresh={() => { void loadLibraryEntries() }}
                 onClose={() => setOpenPanel(null)}
                 onResizeMouseDown={onLibraryPanelResizeMouseDown}
