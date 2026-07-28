@@ -27,8 +27,33 @@ import {
 } from './assetLibraryUi'
 
 const MIN_WIDTH = 220
-const MAX_WIDTH = 520
+const MAX_WIDTH = 900
 const DEFAULT_WIDTH = 320
+
+const PANEL_WIDTH_STORAGE_KEY = 'modly-panel-width'
+
+function clampPanelWidth(width: number): number {
+  return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, width))
+}
+
+/** Reads the user's saved Generate panel width, falling back to the default when unset, invalid, or unreadable. */
+function getStoredPanelWidth(): number {
+  try {
+    const raw = Number(localStorage.getItem(PANEL_WIDTH_STORAGE_KEY))
+    return Number.isFinite(raw) && raw > 0 ? clampPanelWidth(raw) : DEFAULT_WIDTH
+  } catch {
+    return DEFAULT_WIDTH
+  }
+}
+
+/** Persists the Generate panel width so it survives app restarts. */
+function storePanelWidth(width: number): void {
+  try {
+    localStorage.setItem(PANEL_WIDTH_STORAGE_KEY, String(width))
+  } catch {
+    // Ignore quota/private-mode failures — the panel just won't remember its size.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Export dropdown
@@ -591,7 +616,7 @@ function AssetLibraryPopover({
 
 export default function GeneratePage(): JSX.Element {
   const [unloadStatus, setUnloadStatus] = useState<'idle' | 'done'>('idle')
-  const [panelWidth, setPanelWidth] = useState(DEFAULT_WIDTH)
+  const [panelWidth, setPanelWidth] = useState<number>(() => getStoredPanelWidth())
   const [openPanel, setOpenPanel] = useState<GenerateOpenPanel>(null)
   const [decimating, setDecimating] = useState(false)
   const [smoothing, setSmoothing] = useState(false)
@@ -677,6 +702,11 @@ export default function GeneratePage(): JSX.Element {
   useEffect(() => {
     storeAssetLibraryPanelWidth(libraryPanelWidth)
   }, [libraryPanelWidth])
+
+  // Persist the generate options panel's width so a manual resize survives app restarts.
+  useEffect(() => {
+    storePanelWidth(panelWidth)
+  }, [panelWidth])
 
   async function handleUnloadAll() {
     await window.electron.model.unloadAll()
@@ -845,7 +875,7 @@ export default function GeneratePage(): JSX.Element {
 
     const onMouseMove = (ev: MouseEvent) => {
       if (!dragging.current) return
-      setPanelWidth((w) => Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, w + ev.movementX)))
+      setPanelWidth((w) => clampPanelWidth(w + ev.movementX))
     }
     const onMouseUp = () => {
       dragging.current = false
@@ -879,10 +909,14 @@ export default function GeneratePage(): JSX.Element {
         <WorkflowPanel />
       </div>
 
-      {/* Resize handle */}
+      {/* Resize handle — drag to widen/narrow the generate options panel; size is persisted. */}
       <div
         onMouseDown={onMouseDown}
-        className="w-1 shrink-0 cursor-col-resize hover:bg-accent/40 active:bg-accent/60 transition-colors"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize the generate options panel"
+        title="Drag to make this panel wider or narrower"
+        className="w-2 shrink-0 cursor-col-resize bg-zinc-600/40 hover:bg-accent/60 active:bg-accent/70 transition-colors"
       />
 
       <div className="flex-1 flex flex-col overflow-hidden">
