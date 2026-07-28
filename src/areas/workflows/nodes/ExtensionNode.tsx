@@ -304,11 +304,16 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
             return ext!.params.filter(isVisible).map((param) => {
               const val = (data.params[param.id] ?? param.default) as number | string
               return (
-                <div key={param.id} className="flex items-center gap-2">
-                  <label className="text-[10px] text-zinc-500 w-24 shrink-0 leading-tight">{param.label}</label>
-                  <div className="flex-1">
-                    <ParamControl param={param} value={val} onChange={(v) => patchParam(param.id, v)} resolvedParams={resolvedParams} />
+                <div key={param.id} className="flex flex-col gap-1">
+                  <div className="flex items-center gap-2">
+                    <label className="text-[10px] text-zinc-500 w-24 shrink-0 leading-tight">{param.label}</label>
+                    <div className="flex-1">
+                      <ParamControl param={param} value={val} onChange={(v) => patchParam(param.id, v)} resolvedParams={resolvedParams} />
+                    </div>
                   </div>
+                  {param.tooltip && (
+                    <p className="pl-[104px] text-[9px] leading-snug text-zinc-600">{param.tooltip}</p>
+                  )}
                 </div>
               )
             })

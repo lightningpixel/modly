@@ -38,7 +38,7 @@ export default function WaitNode({ id, data, selected }: { id: string; data: WFN
     <BaseNode
       id={id}
       selected={selected}
-      title="Wait"
+      title={String(data.label ?? 'Continue this workflow')}
       minWidth={170}
       showInGenerate={data.showInGenerate ?? false}
       icon={

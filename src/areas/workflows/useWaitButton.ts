@@ -37,15 +37,15 @@ export function useWaitButton(nodeId: string): WaitButtonModel {
     : 'bg-amber-500/15 border-amber-500/30 text-amber-400 hover:bg-amber-500/25'
 
   const statusText =
-    waitState === 'blocked' ? 'Waiting for the previous Wait to finish…' :
-    waitState === 'running' ? 'Branch in progress…' :
-    waitState === 'done'    ? 'Branch finished — Retry to re-run.' :
-    waitState === 'error'   ? 'Branch failed — Retry to re-run.' :
-    waitState === 'pending' && runAborted ? 'Run failed upstream — fix the error and run again.' :
-    waitState === 'pending' && inPrePhase ? 'Waiting for upstream nodes…' :
-    waitState === 'pending' && otherBranchRunning ? 'Another branch is running…' :
-    waitState === 'pending' ? 'Workflow paused — click Continue to run this branch.' :
-    'Pauses the workflow until you click Continue.'
+    waitState === 'blocked' ? 'Waiting for the previous step to finish…' :
+    waitState === 'running' ? 'This step is running…' :
+    waitState === 'done'    ? 'This step finished. Retry runs it again without remaking earlier results.' :
+    waitState === 'error'   ? 'This step stopped. Fix the answer or setting, then click Retry.' :
+    waitState === 'pending' && runAborted ? 'An earlier step stopped. Fix that error and start again.' :
+    waitState === 'pending' && inPrePhase ? 'Waiting for earlier steps…' :
+    waitState === 'pending' && otherBranchRunning ? 'Another step is running…' :
+    waitState === 'pending' ? 'Ready. Click Continue to run this step.' :
+    'Click Continue when you are ready for this step.'
 
   return { waitState, canContinue, isRunning, label, buttonClass, statusText, onContinue: () => continueRun(nodeId) }
 }

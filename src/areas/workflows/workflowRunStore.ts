@@ -1091,7 +1091,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
           // Hand off to the user — branches run on demand via continueRun(id).
           set((s) => ({
             activeNodeId: null,
-            runState: { ...s.runState, status: 'paused', blockStep: 'Pick a branch and click Continue' },
+            runState: { ...s.runState, status: 'paused', blockStep: 'Ready for the next step' },
           }))
           return
         }
@@ -1174,7 +1174,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
               ...s.runState,
               status:    allFinished ? 'error' : 'paused',
               error:     anyError ? (err ?? s.runState.error) : undefined,
-              blockStep: err ? `Branch failed: ${err}` : 'Pick a branch and click Continue',
+              blockStep: err ? `This step stopped: ${err}` : 'Ready for the next step',
             },
           }))
         }
