@@ -1395,7 +1395,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   // Run a process extension in an isolated worker thread
-  ipcMain.handle('extensions:runProcess', async (_, extensionId: string, input: { filePath?: string; text?: string; texts?: (string | undefined)[]; nodeId?: string }, params: Record<string, unknown>) => {
+  ipcMain.handle('extensions:runProcess', async (_, extensionId: string, input: { filePath?: string; text?: string; texts?: (string | undefined)[]; nodeId?: string; sourceAssetPath?: string }, params: Record<string, unknown>) => {
     const userData        = app.getPath('userData')
     const { extensionsDir, workspaceDir } = getSettings(userData)
 

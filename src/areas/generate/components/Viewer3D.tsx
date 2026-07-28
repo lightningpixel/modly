@@ -867,8 +867,21 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
 
   const [viewMode, setViewMode] = useState<ViewMode>('solid')
   const [autoRotate, setAutoRotate] = useState(false)
-  const [clips, setClips] = useState<MotionClip[]>([])
-  const [activeClipIndex, setActiveClipIndex] = useState(0)
+  const [clips, setClipsState] = useState<MotionClip[]>([])
+  const [activeClipIndex, setActiveClipIndexState] = useState(0)
+  const setStoreMotionClips = useAppStore((s) => s.setMotionClips)
+  const setStoreActiveClipIndex = useAppStore((s) => s.setActiveClipIndex)
+  // Mirror into appStore alongside the local state that actually drives
+  // playback, so sibling panels (e.g. ChatPanel) can read the current clip
+  // without this component handing over playback control.
+  const setClips = useCallback((c: MotionClip[]) => {
+    setClipsState(c)
+    setStoreMotionClips(c)
+  }, [setStoreMotionClips])
+  const setActiveClipIndex = useCallback((i: number) => {
+    setActiveClipIndexState(i)
+    setStoreActiveClipIndex(i)
+  }, [setStoreActiveClipIndex])
   const selected = useAppStore((s) => s.meshSelected)
   const setSelected = useAppStore((s) => s.setMeshSelected)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)

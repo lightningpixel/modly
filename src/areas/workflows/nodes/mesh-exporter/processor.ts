@@ -1,13 +1,89 @@
 import path = require('path')
 import fs   = require('fs')
 
-interface ProcessInput  { filePath?: string; text?: string }
+interface ProcessInput  { filePath?: string; text?: string; sourceAssetPath?: string }
 interface ProcessResult { filePath?: string; text?: string }
 interface ProcessContext {
   workspaceDir: string
   tempDir:      string
   log:          (msg: string) => void
   progress:     (pct: number, label: string) => void
+}
+
+// ─── Lineage ──────────────────────────────────────────────────────────────────
+// When the input mesh traces back to an existing workspace asset, record where
+// it came from: the immediate parent, plus the root of the chain (so re-exporting
+// an already-derived model doesn't grow an unbounded ancestry list).
+
+interface DerivedRef  { path: string; name: string | null }
+interface DerivedFrom { parent: DerivedRef; root: DerivedRef }
+
+function sidecarPathFor(assetPath: string): string {
+  return assetPath.replace(/\.[^./\\]+$/, '') + '.tags.json'
+}
+
+/** Workspace-relative form of an absolute path, or null if it's outside the workspace. */
+function toWorkspaceRelative(workspaceDir: string, absPath: string): string | null {
+  const norm   = absPath.replace(/\\/g, '/')
+  const wsNorm = workspaceDir.replace(/\\/g, '/').replace(/\/+$/, '')
+  if (norm !== wsNorm && !norm.startsWith(wsNorm + '/')) return null
+  return norm.slice(wsNorm.length + 1)
+}
+
+/** Reads asset.extras.modly straight out of a GLB's leading JSON chunk — used only
+ *  as a name fallback when a source asset predates the .tags.json sidecar. */
+function readGlbModlyExtras(glbPath: string): { name?: string } | null {
+  try {
+    const fd = fs.openSync(glbPath, 'r')
+    try {
+      const header = Buffer.alloc(12)
+      fs.readSync(fd, header, 0, 12, 0)
+      if (header.toString('ascii', 0, 4) !== 'glTF') return null
+      const chunkHeader = Buffer.alloc(8)
+      fs.readSync(fd, chunkHeader, 0, 8, 12)
+      const chunkLength = chunkHeader.readUInt32LE(0)
+      if (chunkHeader.toString('ascii', 4, 8) !== 'JSON') return null
+      const chunkData = Buffer.alloc(chunkLength)
+      fs.readSync(fd, chunkData, 0, chunkLength, 20)
+      const json = JSON.parse(chunkData.toString('utf-8'))
+      return json?.asset?.extras?.modly ?? null
+    } finally {
+      fs.closeSync(fd)
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Resolves the `derived_from` sidecar field for an export whose input traces
+ * back to `sourceAssetPath`. Returns null when there's nothing to record (no
+ * source, or the source isn't a workspace asset).
+ */
+function resolveDerivedFrom(sourceAssetPath: string | undefined, workspaceDir: string): DerivedFrom | null {
+  if (!sourceAssetPath) return null
+  const relPath = toWorkspaceRelative(workspaceDir, sourceAssetPath)
+  if (!relPath) return null
+
+  let name: string | null = null
+  let upstream: DerivedFrom | undefined
+
+  const sidecarPath = sidecarPathFor(sourceAssetPath)
+  if (fs.existsSync(sidecarPath)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(sidecarPath, 'utf-8'))
+      name = data.name ?? null
+      if (data.derived_from) upstream = data.derived_from as DerivedFrom
+    } catch {
+      // Malformed sidecar — treat the source as untagged rather than failing the export.
+    }
+  } else {
+    name = readGlbModlyExtras(sourceAssetPath)?.name ?? null
+  }
+
+  const parent: DerivedRef = { path: relPath, name }
+  const root = upstream?.root ?? parent
+  return { parent, root }
 }
 
 // ─── Geometry extraction ──────────────────────────────────────────────────────
@@ -252,11 +328,16 @@ const processor = async (
   }
   const tags = Array.from(new Set([...typedTags, ...suggested]))
 
+  // Lineage: only recorded when the input actually traces back to an existing
+  // workspace asset — a fresh generation has nothing to chain to.
+  const derivedFrom = resolveDerivedFrom(input.sourceAssetPath, context.workspaceDir)
+
   fs.mkdirSync(path.dirname(outPath), { recursive: true })
   fs.writeFileSync(outPath.replace(/\.[^.]+$/, '') + '.tags.json', JSON.stringify({
     name:    typed || null,
     project: params['project'] || null,
     tags,
+    ...(derivedFrom ? { derived_from: derivedFrom } : {}),
     created: new Date().toISOString(),
   }, null, 2))
 

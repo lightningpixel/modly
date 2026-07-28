@@ -160,6 +160,17 @@ function ParamField({ param, value, onChange }: {
   value:    number | string
   onChange: (v: number | string) => void
 }) {
+  if (param.multiline) {
+    return (
+      <textarea
+        value={value as string}
+        placeholder={param.tooltip ?? ''}
+        onChange={(e) => onChange(e.target.value)}
+        rows={5}
+        className={`${inputCls} resize-y min-h-[6rem] leading-relaxed`}
+      />
+    )
+  }
   if (param.type === 'select') {
     return (
       <select value={value} onChange={(e) => onChange(e.target.value)} className={inputCls}>
