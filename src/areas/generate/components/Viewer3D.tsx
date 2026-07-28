@@ -2,7 +2,7 @@ import { Component, Suspense, useCallback, useEffect, useMemo, useRef, useState 
 import type { ReactNode, ErrorInfo, MutableRefObject } from 'react'
 import { Canvas, useFrame, useLoader, useThree } from '@react-three/fiber'
 import type { ThreeEvent } from '@react-three/fiber'
-import { Environment, GizmoHelper, Html, Lightformer, OrbitControls, useGizmoContext, useGLTF } from '@react-three/drei'
+import { Environment, GizmoHelper, Lightformer, OrbitControls, useGizmoContext, useGLTF } from '@react-three/drei'
 import { EffectComposer, Outline, Select, Selection } from '@react-three/postprocessing'
 import * as THREE from 'three'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
@@ -16,6 +16,7 @@ import SplatViewer, { type SplatViewerHandle } from './SplatViewer'
 import { useGeneration } from '@shared/hooks/useGeneration'
 import { useAppStore } from '@shared/stores/appStore'
 import { ViewerToolbar, type ViewMode } from './ViewerToolbar'
+import { MotionBar, type MotionClip } from './MotionBar'
 import type { LightSettings } from '@shared/stores/appStore'
 import { DEFAULT_LIGHT_SETTINGS } from '@shared/stores/appStore'
 
@@ -142,57 +143,68 @@ interface MeshModelProps {
   onStats: (stats: { vertices: number; triangles: number }) => void
   onSelect: () => void
   onObject: (obj: THREE.Object3D | null) => void
+  onClips: (clips: MotionClip[]) => void
+  clipIndex: number
 }
 
-function MeshModel({ url, jobId, viewMode, selected, onStats, onSelect, onObject }: MeshModelProps): JSX.Element {
+function MeshModel({ url, jobId, viewMode, selected, onStats, onSelect, onObject, onClips, clipIndex }: MeshModelProps): JSX.Element {
   const extension = url.split('?')[0]?.split('.').pop()?.toLowerCase()
-  const common = { url, jobId, viewMode, selected, onStats, onSelect, onObject }
+  const common = { url, jobId, viewMode, selected, onStats, onSelect, onObject, onClips, clipIndex }
   return extension === 'obj' ? <ObjMeshModel {...common} /> : <GltfMeshModel {...common} />
 }
 
 function GltfMeshModel(props: MeshModelProps): JSX.Element {
   const gltf = useGLTF(props.url)
   const { scene, animations } = gltf
-  const mixerRef = useRef<THREE.AnimationMixer | null>(null)
-  const [clipIndex, setClipIndex] = useState(0)
+  const mixerRef  = useRef<THREE.AnimationMixer | null>(null)
+  const actionRef = useRef<THREE.AnimationAction | null>(null)
+  const { onClips, clipIndex } = props
 
   // Rigged models arrive with one or more clips; without a mixer they render
-  // frozen in bind pose, which reads as "the rig failed".
+  // frozen in bind pose, which reads as "the rig failed". The mixer lives for
+  // as long as this model does — clip switches below reuse it.
   useEffect(() => {
     if (!animations?.length) {
       mixerRef.current = null
+      actionRef.current = null
       return
     }
     const mixer = new THREE.AnimationMixer(scene)
-    mixer.clipAction(animations[Math.min(clipIndex, animations.length - 1)]).play()
     mixerRef.current = mixer
     return () => {
       mixer.stopAllAction()
       mixer.uncacheRoot(scene)
       mixerRef.current = null
+      actionRef.current = null
     }
-  }, [scene, animations, clipIndex])
+  }, [scene, animations])
+
+  // Tell the viewer which clips are available so it can render the motion bar.
+  useEffect(() => {
+    onClips(animations?.map((clip) => ({ name: clip.name })) ?? [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- onClips is a stable callback
+  }, [animations])
+
+  // Switch to the selected clip, cross-fading so playback never hard-cuts.
+  useEffect(() => {
+    const mixer = mixerRef.current
+    if (!mixer || !animations?.length) return
+    const clip = animations[Math.min(clipIndex, animations.length - 1)]
+    const next = mixer.clipAction(clip)
+    next.reset().setLoop(THREE.LoopRepeat, Infinity)
+    const prev = actionRef.current
+    if (prev && prev !== next) {
+      prev.fadeOut(0.25)
+      next.fadeIn(0.25).play()
+    } else {
+      next.play()
+    }
+    actionRef.current = next
+  }, [animations, clipIndex])
 
   useFrame((_state, delta) => mixerRef.current?.update(delta))
 
-  return (
-    <>
-      <SceneMeshModel {...props} scene={scene} loaderType="gltf" />
-      {animations && animations.length > 1 && (
-        <Html position={[0, 0, 0]} wrapperClass="clip-picker">
-          <select
-            value={clipIndex}
-            onChange={(e) => setClipIndex(Number(e.target.value))}
-            className="bg-zinc-800 text-zinc-200 border border-zinc-700 rounded px-2 py-1 text-xs"
-          >
-            {animations.map((clip, i) => (
-              <option key={clip.name || i} value={i}>{clip.name || }</option>
-            ))}
-          </select>
-        </Html>
-      )}
-    </>
-  )
+  return <SceneMeshModel {...props} scene={scene} loaderType="gltf" />
 }
 
 function ObjMeshModel(props: MeshModelProps): JSX.Element {
@@ -855,6 +867,8 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
 
   const [viewMode, setViewMode] = useState<ViewMode>('solid')
   const [autoRotate, setAutoRotate] = useState(false)
+  const [clips, setClips] = useState<MotionClip[]>([])
+  const [activeClipIndex, setActiveClipIndex] = useState(0)
   const selected = useAppStore((s) => s.meshSelected)
   const setSelected = useAppStore((s) => s.setMeshSelected)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -888,6 +902,8 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
     setSelected(false)
     setViewMode('solid')
     setStoreMeshStats(null)
+    setClips([])
+    setActiveClipIndex(0)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reset only when the model changes; setters are stable
   }, [modelUrl])
 
@@ -1037,6 +1053,8 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
                   onStats={setStoreMeshStats}
                   onSelect={() => setSelected(true)}
                   onObject={setMeshObject}
+                  onClips={setClips}
+                  clipIndex={activeClipIndex}
                 />
               </Suspense>
             </Selection>
@@ -1083,12 +1101,15 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
           />
         )}
 
-        {/* Bottom-left stats overlay */}
-        {meshStats && (
-          <div className="absolute bottom-4 left-4 pointer-events-none">
-            <p className="text-xs text-zinc-500">
-              {meshStats.triangles.toLocaleString()} tri &bull; {meshStats.vertices.toLocaleString()} verts
-            </p>
+        {/* Bottom-left overlays — mesh stats and the motion bar */}
+        {(meshStats || clips.length > 0) && (
+          <div className="absolute bottom-4 left-4 flex flex-col items-start gap-2">
+            {meshStats && (
+              <p className="text-xs text-zinc-500 pointer-events-none">
+                {meshStats.triangles.toLocaleString()} tri &bull; {meshStats.vertices.toLocaleString()} verts
+              </p>
+            )}
+            <MotionBar clips={clips} activeIndex={activeClipIndex} onChange={setActiveClipIndex} />
           </div>
         )}
 
