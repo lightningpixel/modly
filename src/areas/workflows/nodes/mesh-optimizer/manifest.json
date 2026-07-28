@@ -15,12 +15,14 @@
       "params_schema": [
         {
           "id": "target_faces",
-          "label": "Target Triangles",
-          "type": "int",
-          "default": 10000,
-          "min": 100,
-          "max": 1000000,
-          "tooltip": "Target number of triangles after simplification."
+          "label": "Detail",
+          "type": "select",
+          "default": 1000000,
+          "options": [
+            { "value": 1000000, "label": "Full detail (unchanged)" },
+            { "value": 50000, "label": "Game prop (about 50,000 triangles)" },
+            { "value": 10000, "label": "Background piece (about 10,000 triangles)" }
+          ]
         }
       ]
     }

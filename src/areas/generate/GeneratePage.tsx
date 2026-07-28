@@ -424,7 +424,6 @@ function AssetLibraryPopover({
   onViewModeChange,
   onFiltersChange,
   onToggleSection,
-  onOpenSelected,
   onFetchPreviewFrame,
   onRefresh,
   onClose,
@@ -454,7 +453,6 @@ function AssetLibraryPopover({
   onViewModeChange: (value: AssetLibraryViewMode) => void
   onFiltersChange: (value: AssetLibraryFilters) => void
   onToggleSection: (sectionKey: string) => void
-  onOpenSelected: () => void
   onFetchPreviewFrame: (workspacePath: string, clip: string) => Promise<string | null>
   onRefresh: () => void
   onClose: () => void
@@ -462,21 +460,11 @@ function AssetLibraryPopover({
   onResizeHeightMouseDown: (event: React.MouseEvent) => void
 }) {
   const projectGroups = buildAssetLibraryProjectGroups(entries, searchQuery, sortMode, filters)
-  const visibleEntryIds = new Set(projectGroups.flatMap((group) => group.families.flatMap((family) => family.entries.map((entry) => entry.id))))
-  const selectedEntry = selectedEntryId && visibleEntryIds.has(selectedEntryId)
-    ? entries.find((entry) => entry.id === selectedEntryId) ?? null
-    : null
   const normalizedSearchQuery = searchQuery.trim()
   const hasActiveFilters = filters.kind !== 'all' || filters.poly !== 'all' || filters.needsAttention
   const hasActiveDiscovery = normalizedSearchQuery.length > 0 || hasActiveFilters
   const familyCount = projectGroups.reduce((count, group) => count + group.families.length, 0)
   const versionCount = projectGroups.reduce((count, group) => count + group.entryCount, 0)
-  const openDisabled = !selectedEntry || !isAssetLibraryEntryOpenable(selectedEntry) || loading || opening
-  const selectedMessage = selectedEntry
-    ? describeAssetLibraryOpenability(selectedEntry)
-    : projectGroups.length === 0 && normalizedSearchQuery
-      ? `No workspace assets match “${normalizedSearchQuery}”.`
-      : 'Select an asset to open it in Generate.'
 
   return (
     <div
@@ -620,6 +608,12 @@ function AssetLibraryPopover({
         </div>
       </div>
 
+      {error && (
+        <p role="alert" className="shrink-0 rounded-lg border border-amber-800/50 bg-amber-950/40 px-3 py-2 text-[11px] text-amber-300">
+          {error}
+        </p>
+      )}
+
       {loading ? (
         <p role="status" className="flex-1 min-h-0 flex items-center justify-center text-xs text-zinc-400">Loading workspace assets…</p>
       ) : projectGroups.length === 0 && !hasActiveDiscovery ? (
@@ -689,21 +683,6 @@ function AssetLibraryPopover({
           })}
         </div>
       )}
-
-      <div className="shrink-0 rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2">
-        <p className="text-[11px] text-zinc-400">{selectedMessage}</p>
-        {error && <p role="alert" className="mt-2 text-[11px] text-amber-300">{error}</p>}
-      </div>
-
-      <button
-        type="button"
-        onClick={onOpenSelected}
-        disabled={openDisabled}
-        aria-label="Open selected asset"
-        className="shrink-0 px-3 py-2 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white text-xs rounded-lg transition-colors font-medium"
-      >
-        {opening ? 'Opening…' : 'Open selected asset'}
-      </button>
     </div>
   )
 }
@@ -1243,8 +1222,7 @@ export default function GeneratePage(): JSX.Element {
     }
   }, [assetLibraryService])
 
-  // Shared by both the "Open selected asset" button and a direct row click —
-  // a row activation selects first, then opens through this same path.
+  // A Library row opens through this shared validation and import path.
   async function openLibraryEntry(entry: ProjectedAssetLibraryEntry | null) {
     if (!entry) {
       setLibraryError('Select an asset before opening it in Generate.')
@@ -1281,14 +1259,8 @@ export default function GeneratePage(): JSX.Element {
     }
   }
 
-  async function handleOpenSelectedLibraryEntry() {
-    const selectedEntry = libraryEntries.find((entry) => entry.id === librarySelectedEntryId) ?? null
-    await openLibraryEntry(selectedEntry)
-  }
-
-  // A single click on a row both selects and opens it — no second click on
-  // "Open selected asset" required. Non-openable entries still get selected,
-  // surfacing the same "why not" message they always have.
+  // A single click on a row both selects and opens it. Non-openable entries
+  // stay selected and surface their reason in the conditional message above.
   async function handleActivateLibraryEntry(entryId: string) {
     setLibraryError(null)
     setLibrarySelectedEntryId(entryId)
@@ -1518,7 +1490,6 @@ export default function GeneratePage(): JSX.Element {
                 onViewModeChange={setLibraryViewMode}
                 onFiltersChange={setLibraryFilters}
                 onToggleSection={(sectionKey) => setLibraryCollapsedSectionKeys((current) => toggleAssetLibrarySectionKey(current, sectionKey))}
-                onOpenSelected={() => { void handleOpenSelectedLibraryEntry() }}
                 onFetchPreviewFrame={fetchLibraryPreviewFrame}
                 onRefresh={() => { void loadLibraryEntries() }}
                 onClose={() => setOpenPanel(null)}
