@@ -3,14 +3,18 @@ import test from 'node:test'
 
 import {
   buildAssetLibraryOpenRequest,
+  clampAssetLibraryPanelHeight,
   clampAssetLibraryPanelWidth,
   createAssetLibraryOpenJob,
   describeAssetLibraryOpenability,
   filterAssetLibraryScopeGroups,
   getDefaultAssetLibraryCollapsedSectionKeys,
+  getStoredAssetLibraryPanelHeight,
   getStoredAssetLibraryPanelWidth,
   isAssetLibraryEntryOpenable,
+  isAssetLibrarySectionExpanded,
   resolveOpenPanelAfterLibrarySelection,
+  storeAssetLibraryPanelHeight,
   storeAssetLibraryPanelWidth,
   toggleAssetLibrarySectionKey,
   type AssetLibrarySortMode,
@@ -134,4 +138,30 @@ test('Library panel width clamps to sane bounds and degrades silently without a 
   // node --test has no `localStorage` global — both helpers must fall back rather than throw.
   assert.equal(getStoredAssetLibraryPanelWidth(), 320)
   assert.doesNotThrow(() => storeAssetLibraryPanelWidth(400))
+})
+
+test('Library panel height clamps to sane bounds and degrades silently without a localStorage', () => {
+  assert.equal(clampAssetLibraryPanelHeight(0), 280)
+  assert.equal(clampAssetLibraryPanelHeight(9999), 1000)
+  assert.equal(clampAssetLibraryPanelHeight(500), 500)
+  // node --test has no `localStorage` global — both helpers must fall back rather than throw.
+  assert.equal(getStoredAssetLibraryPanelHeight(), 860)
+  assert.doesNotThrow(() => storeAssetLibraryPanelHeight(500))
+})
+
+test('a live search always shows matched sections, and clearing it falls back to the untouched collapsed-key state', () => {
+  const collapsed = ['scope:workflows', 'capability:workflows:mesh']
+
+  // Nothing typed yet: rendering follows the real collapsed-key list.
+  assert.equal(isAssetLibrarySectionExpanded(collapsed, 'scope:workflows', false), false)
+  assert.equal(isAssetLibrarySectionExpanded(collapsed, 'scope:exports', false), true)
+
+  // A live search forces every visible (already-filtered-to-matches) section open,
+  // regardless of what's actually in collapsedSectionKeys.
+  assert.equal(isAssetLibrarySectionExpanded(collapsed, 'scope:workflows', true), true)
+  assert.equal(isAssetLibrarySectionExpanded(collapsed, 'capability:workflows:mesh', true), true)
+
+  // Clearing the query (hasActiveSearch: false) restores exactly the prior state —
+  // collapsedSectionKeys was never mutated by the search itself.
+  assert.equal(isAssetLibrarySectionExpanded(collapsed, 'scope:workflows', false), false)
 })
