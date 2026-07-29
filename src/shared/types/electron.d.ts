@@ -10,6 +10,7 @@ import type {
   AssetLibraryThumbnailRequest,
   AssetLibraryThumbnailResult,
 } from './assetLibrary'
+import type { TextureWatchChoice, TextureWatchUpdate } from './liveTexture'
 
 // ─── Extension types ──────────────────────────────────────────────────────────
 
@@ -203,6 +204,12 @@ declare global {
         moveDirectory:   (args: { src: string; dest: string }) => Promise<{ success: boolean; error?: string }>
         deleteDirectory: (dirPath: string) => Promise<{ success: boolean; error?: string }>
         readScreenshotDataUrl: (filename: string) => Promise<string>
+      }
+      texture: {
+        chooseAndWatch: () => Promise<TextureWatchChoice>
+        stopWatching:  () => Promise<void>
+        onChange:      (cb: (update: TextureWatchUpdate) => void) => void
+        offChange:     () => void
       }
       settings: {
         get: () => Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string; hfToken?: string }>

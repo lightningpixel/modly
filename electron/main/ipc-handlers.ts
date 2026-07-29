@@ -35,6 +35,8 @@ import {
 import { validateInstallManifest } from './extension-install-utils'
 import { registerWorkspaceAssetLibraryIpcHandlers } from './artifact-registry-service'
 import { updatesSupported } from './updater'
+import { TextureWatchService } from './texture-watch-service'
+import type { TextureWatchChoice } from '../../src/shared/types/liveTexture'
 
 type WindowGetter = () => BrowserWindow | null
 const pExecFile = promisify(execFile)
@@ -276,6 +278,10 @@ const renameWithRetry = (from: string, to: string, label: string): Promise<FsRet
 const activeExtensionInstalls = new Set<string>()
 
 export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGetter): void {
+  const textureWatchService = new TextureWatchService()
+  const textureWatchOwners = new Set<number>()
+  app.once('before-quit', () => textureWatchService.stopAll())
+
   // Reconcile leftovers of interrupted installs. No install can be in flight
   // this early in the app's life, so anything matching is stale:
   //  - staging dirs → discard (never the only copy of anything)
@@ -424,6 +430,36 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     })
 
     return result.canceled ? null : result.filePaths[0]
+  })
+
+  ipcMain.handle('texture:chooseAndWatch', async (event): Promise<TextureWatchChoice> => {
+    const win = getWindow()
+    if (!win) return { cancelled: true }
+
+    const result = await dialog.showOpenDialog(win, {
+      title: 'Choose a texture to watch',
+      filters: [{ name: 'PNG image', extensions: ['png'] }],
+      properties: ['openFile'],
+    })
+    if (result.canceled || !result.filePaths[0]) return { cancelled: true }
+
+    const ownerId = event.sender.id
+    if (!textureWatchOwners.has(ownerId)) {
+      textureWatchOwners.add(ownerId)
+      event.sender.once('destroyed', () => {
+        textureWatchOwners.delete(ownerId)
+        textureWatchService.stop(ownerId)
+      })
+    }
+
+    const update = await textureWatchService.start(ownerId, result.filePaths[0], (next) => {
+      if (!event.sender.isDestroyed()) event.sender.send('texture:changed', next)
+    })
+    return { cancelled: false, update }
+  })
+
+  ipcMain.handle('texture:stopWatching', (event) => {
+    textureWatchService.stop(event.sender.id)
   })
 
   ipcMain.handle('fs:selectMeshFile', async () => {

@@ -7,6 +7,7 @@ import type {
   AssetLibraryThumbnailRequest,
   AssetLibraryThumbnailResult,
 } from '../../src/shared/types/assetLibrary'
+import type { TextureWatchChoice, TextureWatchUpdate } from '../../src/shared/types/liveTexture'
 
 export interface IpcRendererLike {
   invoke(channel: string, ...args: unknown[]): Promise<unknown>
@@ -96,6 +97,17 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         ipcRenderer.invoke('fs:deleteDirectory', dirPath) as Promise<{ success: boolean; error?: string }>,
       readScreenshotDataUrl: (filename: string): Promise<string> =>
         ipcRenderer.invoke('fs:readScreenshotDataUrl', filename) as Promise<string>,
+    },
+
+    texture: {
+      chooseAndWatch: (): Promise<TextureWatchChoice> =>
+        ipcRenderer.invoke('texture:chooseAndWatch') as Promise<TextureWatchChoice>,
+      stopWatching: (): Promise<void> =>
+        ipcRenderer.invoke('texture:stopWatching') as Promise<void>,
+      onChange: (cb: (update: TextureWatchUpdate) => void) => {
+        ipcRenderer.on('texture:changed', (_event, update) => cb(update as TextureWatchUpdate))
+      },
+      offChange: () => ipcRenderer.removeAllListeners('texture:changed'),
     },
 
     // Settings
