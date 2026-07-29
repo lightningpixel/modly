@@ -12,6 +12,7 @@
     "esModuleInterop":   true
   },
   "include": [
+    "src/areas/workflows/nodes/intent-travel/**/*.ts",
     "src/areas/workflows/nodes/mesh-exporter/**/*.ts",
     "src/areas/workflows/nodes/mesh-optimizer/**/*.ts"
   ]

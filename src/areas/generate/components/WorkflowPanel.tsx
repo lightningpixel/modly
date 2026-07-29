@@ -13,9 +13,16 @@ import { useWorkflowRunStore } from '@areas/workflows/workflowRunStore'
 import { useWaitButton } from '@areas/workflows/useWaitButton'
 import { buildAllWorkflowExtensions, getWorkflowExtension } from '@areas/workflows/mockExtensions'
 import { validateWorkflowPreflight } from '@areas/workflows/preflight'
+import { areAllWorkflowNodeParamsBound } from '@areas/workflows/workflowParamBindings'
 import type { WorkflowExtension } from '@areas/workflows/mockExtensions'
 import type { Workflow, WFNode, WFEdge, ParamSchema } from '@shared/types/electron.d'
 import ChatPanel from './ChatPanel'
+import {
+  THIN_PART_SUGGESTION_MESSAGE,
+  applyThinPartSuggestion,
+  getThinPartSuggestion,
+  measureThinPartConfidence,
+} from '../thinPartSuggestion'
 
 type PanelMode = 'basic' | 'chat'
 
@@ -57,6 +64,50 @@ function mimeFromPath(p: string): string {
   if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg'
   if (ext === 'webp') return 'image/webp'
   return 'image/png'
+}
+
+// ─── Tag suggestions ──────────────────────────────────────────────────────────
+
+const TAG_STOPWORDS = new Set([
+  'a', 'an', 'the', 'of', 'for', 'and', 'or', 'to', 'in', 'on', 'my', 'this', 'is', 'with',
+])
+
+const FIXED_TAG_VOCAB = [
+  'prop', 'character', 'creature', 'environment', 'weapon',
+  'furniture', 'hero-asset', 'background', 'low-poly', 'stylized', 'realistic',
+]
+
+const MAX_TAG_SUGGESTIONS = 10
+
+/** Slugified words pulled from the typed name/project, plus a small fixed vocabulary — capped and deduped. */
+function suggestedTags(modelName: string, project: string): string[] {
+  const fromFields = `${modelName} ${project}`
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((word) => word.length > 1 && !TAG_STOPWORDS.has(word))
+
+  const seen = new Set<string>()
+  const suggestions: string[] = []
+  for (const tag of [...fromFields, ...FIXED_TAG_VOCAB]) {
+    if (!tag || seen.has(tag)) continue
+    seen.add(tag)
+    suggestions.push(tag)
+    if (suggestions.length >= MAX_TAG_SUGGESTIONS) break
+  }
+  return suggestions
+}
+
+function parseTags(value: string): string[] {
+  return value.split(',').map((s) => s.trim()).filter(Boolean)
+}
+
+/** Appends a tag to the comma-separated value, or removes it if already present. */
+function toggleTag(value: string, tag: string): string {
+  const tags = parseTags(value)
+  const i = tags.indexOf(tag)
+  if (i >= 0) tags.splice(i, 1)
+  else tags.push(tag)
+  return tags.join(', ')
 }
 
 // ─── Param field ──────────────────────────────────────────────────────────────
@@ -116,6 +167,17 @@ function ParamField({ param, value, onChange }: {
   value:    number | string
   onChange: (v: number | string) => void
 }) {
+  if (param.multiline) {
+    return (
+      <textarea
+        value={value as string}
+        placeholder={param.tooltip ?? ''}
+        onChange={(e) => onChange(e.target.value)}
+        rows={5}
+        className={`${inputCls} resize-y min-h-[6rem] leading-relaxed`}
+      />
+    )
+  }
   if (param.type === 'select') {
     return (
       <select value={value} onChange={(e) => onChange(e.target.value)} className={inputCls}>
@@ -141,11 +203,48 @@ function ParamField({ param, value, onChange }: {
       </div>
     )
   }
+  if (param.type === 'text') {
+    return (
+      <input type="text" value={value as string} placeholder={param.tooltip ?? ''}
+        onChange={(e) => onChange(e.target.value)} className={inputCls} />
+    )
+  }
   if (param.type === 'float') {
     return <FloatInput value={value as number} onChange={(v) => onChange(v)} className={inputCls} />
   }
   // int
   return <IntInput value={value as number} onChange={(v) => onChange(v)} className={inputCls} />
+}
+
+function TagSuggestionPills({ value, onChange, modelName, project }: {
+  value:     string
+  onChange:  (v: string) => void
+  modelName: string
+  project:   string
+}) {
+  const suggestions = useMemo(() => suggestedTags(modelName, project), [modelName, project])
+  if (suggestions.length === 0) return null
+
+  const active = new Set(parseTags(value))
+
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {suggestions.map((tag) => (
+        <button
+          key={tag}
+          type="button"
+          onClick={() => onChange(toggleTag(value, tag))}
+          className={`px-2 py-0.5 rounded-full text-[10px] border transition-colors ${
+            active.has(tag)
+              ? 'bg-accent/20 border-accent/60 text-accent-light'
+              : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'
+          }`}
+        >
+          {tag}
+        </button>
+      ))}
+    </div>
+  )
 }
 
 // ─── Workflow dropdown ────────────────────────────────────────────────────────
@@ -206,10 +305,45 @@ function WorkflowDropdown({ workflows, value, onChange }: {
 
 type PatchFn = (nodeId: string, patch: Record<string, unknown>) => void
 
-function ImageParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: FlowNode[]; onPatch: PatchFn }) {
+type ThinPartUiState =
+  | { kind: 'suggestion'; targetNodeId: string; currentSetting: string }
+  | { kind: 'kept'; settingName: string }
+  | { kind: 'applied' }
+  | { kind: 'error' }
+  | null
+
+const PIPELINE_SETTING_NAMES: Record<string, string> = {
+  '512': 'Quick',
+  '1024': 'Normal',
+  '1024_cascade': 'Careful',
+  '1536_cascade': 'Painstaking',
+}
+
+function reachableNodeIds(sourceNodeId: string, edges: FlowEdge[]): Set<string> {
+  const reachable = new Set<string>()
+  const queue = [sourceNodeId]
+  while (queue.length > 0) {
+    const source = queue.shift()!
+    for (const edge of edges) {
+      if (edge.source !== source || reachable.has(edge.target)) continue
+      reachable.add(edge.target)
+      queue.push(edge.target)
+    }
+  }
+  return reachable
+}
+
+function ImageParamRow({ nodeId, nodes, edges, onPatch }: {
+  nodeId: string
+  nodes: FlowNode[]
+  edges: FlowEdge[]
+  onPatch: PatchFn
+}) {
   const node     = nodes.find((n) => n.id === nodeId)
   const data     = node?.data as { params: Record<string, unknown> } | undefined
   const preview  = data?.params.preview as string | undefined
+  const [thinPartState, setThinPartState] = useState<ThinPartUiState>(null)
+  const checkSequence = useRef(0)
 
   const browse = useCallback(async () => {
     const p = await window.electron.fs.selectImage()
@@ -217,7 +351,53 @@ function ImageParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: Flow
     const base64 = await window.electron.fs.readFileBase64(p)
     const src = `data:${mimeFromPath(p)};base64,${base64}`
     onPatch(nodeId, { params: { ...(data?.params ?? {}), filePath: p, preview: src } })
-  }, [nodeId, data?.params, onPatch])
+    setThinPartState(null)
+
+    const sequence = ++checkSequence.current
+    try {
+      const confidence = await measureThinPartConfidence(src)
+      if (sequence !== checkSequence.current) return
+
+      const reachable = reachableNodeIds(nodeId, edges)
+      const target = nodes.find((candidate) => {
+        if (!reachable.has(candidate.id) || candidate.type !== 'extensionNode') return false
+        const candidateData = candidate.data as { params?: Record<string, unknown> }
+        return typeof candidateData.params?.pipeline_type === 'string'
+      })
+      if (!target) return
+
+      const targetData = target.data as { params: Record<string, unknown> }
+      const currentSetting = String(targetData.params.pipeline_type)
+      if (!getThinPartSuggestion(confidence, currentSetting)) return
+      setThinPartState({
+        kind: 'suggestion',
+        targetNodeId: target.id,
+        currentSetting,
+      })
+    } catch {
+      if (sequence === checkSequence.current) setThinPartState({ kind: 'error' })
+    }
+  }, [nodeId, data?.params, edges, nodes, onPatch])
+
+  const acceptSuggestion = useCallback(() => {
+    if (thinPartState?.kind !== 'suggestion') return
+    const target = nodes.find((candidate) => candidate.id === thinPartState.targetNodeId)
+    const targetData = target?.data as { params?: Record<string, unknown> } | undefined
+    if (!targetData?.params) {
+      setThinPartState({ kind: 'error' })
+      return
+    }
+    onPatch(target.id, { params: applyThinPartSuggestion(targetData.params) })
+    setThinPartState({ kind: 'applied' })
+  }, [nodes, onPatch, thinPartState])
+
+  const declineSuggestion = useCallback(() => {
+    if (thinPartState?.kind !== 'suggestion') return
+    setThinPartState({
+      kind: 'kept',
+      settingName: PIPELINE_SETTING_NAMES[thinPartState.currentSetting] ?? 'current',
+    })
+  }, [thinPartState])
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -226,7 +406,7 @@ function ImageParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: Flow
           <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/>
           <polyline points="21 15 16 10 5 21"/>
         </svg>
-        <span className="text-[11px] font-medium text-zinc-300">Image</span>
+        <span className="text-[11px] font-medium text-zinc-300">Your sketch or photo — required</span>
       </div>
       {preview ? (
         <button onClick={browse} className="relative w-full aspect-square rounded-lg overflow-hidden border border-zinc-700 group">
@@ -245,6 +425,67 @@ function ImageParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: Flow
           <span className="text-[10px] text-zinc-500">Browse image…</span>
         </button>
       )}
+
+      {thinPartState?.kind === 'suggestion' && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="mt-1 flex flex-col gap-2.5 rounded-lg border border-sky-700/60 bg-sky-950/45 px-3 py-2.5"
+        >
+          <p className="text-[11px] leading-relaxed text-sky-100">
+            {THIN_PART_SUGGESTION_MESSAGE}
+          </p>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={acceptSuggestion}
+              className="flex-1 rounded-md bg-sky-600 px-2 py-1.5 text-[10px] font-semibold text-white transition-colors hover:bg-sky-500"
+            >
+              Use Careful
+            </button>
+            <button
+              type="button"
+              onClick={declineSuggestion}
+              className="flex-1 rounded-md border border-zinc-600 bg-zinc-800 px-2 py-1.5 text-[10px] font-medium text-zinc-200 transition-colors hover:bg-zinc-700"
+            >
+              Keep {PIPELINE_SETTING_NAMES[thinPartState.currentSetting] ?? 'current setting'}
+            </button>
+          </div>
+          <p className="text-[10px] text-sky-300/80">
+            Optional — you can generate without choosing either button.
+          </p>
+        </div>
+      )}
+
+      {thinPartState?.kind === 'kept' && (
+        <p
+          role="status"
+          aria-live="polite"
+          className="mt-1 rounded-lg border border-zinc-700 bg-zinc-900/70 px-3 py-2 text-[10px] text-zinc-300"
+        >
+          Kept {thinPartState.settingName}. Nothing was changed, and the run is ready whenever you are.
+        </p>
+      )}
+
+      {thinPartState?.kind === 'applied' && (
+        <p
+          role="status"
+          aria-live="polite"
+          className="mt-1 rounded-lg border border-sky-700/50 bg-sky-950/35 px-3 py-2 text-[10px] text-sky-200"
+        >
+          Using Careful — about 1 minute total. File weight and every other setting stayed the same.
+        </p>
+      )}
+
+      {thinPartState?.kind === 'error' && (
+        <p
+          role="alert"
+          className="mt-1 rounded-lg border border-amber-800/60 bg-amber-950/40 px-3 py-2 text-[10px] text-amber-300"
+        >
+          I couldn&apos;t check this image for thin parts. Nothing was changed, and you can still generate.
+        </p>
+      )}
+
     </div>
   )
 }
@@ -323,20 +564,22 @@ function TextParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: FlowN
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" strokeWidth="2">
           <path d="M17 6.1H3M21 12.1H3M15.1 18H3"/>
         </svg>
-        <span className="text-[11px] font-medium text-zinc-300">Text</span>
+        <span className="text-[11px] font-medium text-zinc-300">Extra details — optional</span>
       </div>
       <textarea
         value={text}
         onChange={(e) => onPatch(nodeId, { params: { ...(data?.params ?? {}), text: e.target.value } })}
-        placeholder="Enter text…" rows={3}
-        className="w-full bg-zinc-800 border border-zinc-700/80 rounded-md px-2.5 py-2 text-[11px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-amber-500/40 resize-none leading-relaxed"
+        placeholder="Enter text…" rows={14}
+        className="w-full bg-zinc-800 border border-zinc-700/80 rounded-md px-2.5 py-2 text-[11px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-amber-500/40 resize-y min-h-[14rem] leading-relaxed"
       />
     </div>
   )
 }
 
-function WaitParamRow({ nodeId }: { nodeId: string }) {
+function WaitParamRow({ nodeId, nodes }: { nodeId: string; nodes: FlowNode[] }) {
   const { waitState, canContinue, isRunning, label, buttonClass, onContinue } = useWaitButton(nodeId)
+  const node = nodes.find((candidate) => candidate.id === nodeId)
+  const stepName = String((node?.data as { label?: string } | undefined)?.label ?? 'Continue this workflow')
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -344,7 +587,7 @@ function WaitParamRow({ nodeId }: { nodeId: string }) {
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#71717a" strokeWidth="2">
           <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
         </svg>
-        <span className="text-[11px] font-medium text-zinc-300">Wait</span>
+        <span className="text-[11px] font-medium text-zinc-300">{stepName}</span>
       </div>
       {waitState ? (
         <button
@@ -424,13 +667,27 @@ function ExtensionParamRow({ nodeId, ext, nodes, onPatch }: { nodeId: string; ex
         <div className="mt-2 flex flex-col gap-2">
           {ext.params.map((param) => {
             const val = ((data?.params[param.id] ?? param.default) as number | string)
+            const setValue = (v: number | string) =>
+              onPatch(nodeId, { params: { ...(data?.params ?? {}), [param.id]: v } })
             return (
-              <div key={param.id} className="flex items-center gap-2">
-                <label className="text-[10px] text-zinc-500 w-20 shrink-0 truncate">{param.label}</label>
-                <div className="flex-1">
-                  <ParamField param={param} value={val}
-                    onChange={(v) => onPatch(nodeId, { params: { ...(data?.params ?? {}), [param.id]: v } })} />
+              <div key={param.id} className="flex flex-col gap-1.5">
+                <div className="flex items-center gap-2">
+                  <label className="text-[10px] text-zinc-500 w-32 shrink-0 leading-tight">{param.label}</label>
+                  <div className="flex-1">
+                    <ParamField param={param} value={val} onChange={setValue} />
+                  </div>
                 </div>
+                {param.tooltip && (
+                  <p className="pl-[136px] text-[9px] leading-snug text-zinc-600">{param.tooltip}</p>
+                )}
+                {param.id === 'tags' && (
+                  <TagSuggestionPills
+                    value={String(val)}
+                    onChange={setValue}
+                    modelName={String(data?.params['model_name'] ?? '')}
+                    project={String(data?.params['project'] ?? '')}
+                  />
+                )}
               </div>
             )
           })}
@@ -488,10 +745,15 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
     [nodes, edges],
   )
 
-  const paramNodes = sortedNodes.filter((n) =>
-    (n.type === 'imageNode' || n.type === 'textNode' || n.type === 'meshNode' || n.type === 'extensionNode' || n.type === 'waitNode')
-    && (n.data as { showInGenerate?: boolean }).showInGenerate === true,
-  )
+  const paramNodes = sortedNodes.filter((n) => {
+    if (
+      (n.type !== 'imageNode' && n.type !== 'textNode' && n.type !== 'meshNode' && n.type !== 'extensionNode' && n.type !== 'waitNode')
+      || (n.data as { showInGenerate?: boolean }).showInGenerate !== true
+    ) return false
+    if (n.type !== 'extensionNode') return true
+    const ext = getWorkflowExtension(n.data.extensionId ?? '', allExtensions)
+    return !ext || !areAllWorkflowNodeParamsBound(workflow, n.id, ext.params.map((param) => param.id))
+  })
 
   const handleGenerate = useCallback(() => {
     if (firstPreflightIssue) {
@@ -518,10 +780,10 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
           const isLast = i === paramNodes.length - 1
           return (
             <div key={node.id}>
-              {node.type === 'imageNode' && <ImageParamRow nodeId={node.id} nodes={nodes} onPatch={patchNode} />}
+              {node.type === 'imageNode' && <ImageParamRow nodeId={node.id} nodes={nodes} edges={edges} onPatch={patchNode} />}
               {node.type === 'textNode'  && <TextParamRow  nodeId={node.id} nodes={nodes} onPatch={patchNode} />}
               {node.type === 'meshNode'  && <MeshParamRow  nodeId={node.id} nodes={nodes} onPatch={patchNode} />}
-              {node.type === 'waitNode'  && <WaitParamRow  nodeId={node.id} />}
+              {node.type === 'waitNode'  && <WaitParamRow  nodeId={node.id} nodes={nodes} />}
               {node.type === 'extensionNode' && (() => {
                 const ext = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
                 return ext ? <ExtensionParamRow nodeId={node.id} ext={ext} nodes={nodes} onPatch={patchNode} /> : null

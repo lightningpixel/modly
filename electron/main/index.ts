@@ -16,6 +16,15 @@ let pythonBridge: PythonBridge | null = null
 process.stdout?.on('error', () => {})
 process.stderr?.on('error', () => {})
 
+// UI zoom: Ctrl/Cmd with + / - / 0 scales the whole window like a browser.
+// Chromium claims those chords before the page can see them, so they are caught
+// here — but the SIZE is not stored here. It lives in the renderer's saved
+// settings, and this only forwards the direction.
+//
+// It used to be stored in both places. The main process restored the saved zoom
+// on load, then the renderer mounted and overwrote it with its own separate
+// "interface scale" setting, so the size was silently lost on every restart.
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -56,6 +65,23 @@ function createWindow(): void {
     if (isMacQuitShortcut) {
       event.preventDefault()
       app.quit()
+    }
+
+    const isZoomChord = input.type === 'keyDown' && (input.control || input.meta) && !input.alt
+    if (!isZoomChord) return
+
+    const wc = mainWindow?.webContents
+    if (!wc) return
+
+    if (input.key === '+' || input.key === '=') {
+      event.preventDefault()
+      wc.send('ui:zoomStep', 1)
+    } else if (input.key === '-' || input.key === '_') {
+      event.preventDefault()
+      wc.send('ui:zoomStep', -1)
+    } else if (input.key === '0') {
+      event.preventDefault()
+      wc.send('ui:zoomStep', 0)
     }
   })
 

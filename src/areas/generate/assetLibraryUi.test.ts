@@ -3,13 +3,25 @@ import test from 'node:test'
 
 import {
   buildAssetLibraryOpenRequest,
+  buildAssetLibraryProjectGroups,
+  clampAssetLibraryPanelHeight,
+  clampAssetLibraryPanelWidth,
   createAssetLibraryOpenJob,
+  createDefaultAssetLibraryFilters,
   describeAssetLibraryOpenability,
-  filterAssetLibraryScopeGroups,
+  findAssetLibraryMotionClipIndex,
+  formatAssetLibraryClipName,
+  getAssetLibraryPanelLayout,
   getDefaultAssetLibraryCollapsedSectionKeys,
+  getStoredAssetLibraryPanelHeight,
+  getStoredAssetLibraryPanelWidth,
   isAssetLibraryEntryOpenable,
+  isAssetLibrarySectionExpanded,
   resolveOpenPanelAfterLibrarySelection,
+  storeAssetLibraryPanelHeight,
+  storeAssetLibraryPanelWidth,
   toggleAssetLibrarySectionKey,
+  type AssetLibraryFilters,
   type AssetLibrarySortMode,
   type GenerateOpenPanel,
 } from './assetLibraryUi.ts'
@@ -18,83 +30,138 @@ import type { AssetLibraryEntry } from '../../shared/types/assetLibrary.ts'
 
 function entry(overrides: Partial<AssetLibraryEntry> = {}): ProjectedAssetLibraryEntry {
   const base: AssetLibraryEntry = {
-    id: 'library:Workflows/hero.glb',
-    workspacePath: 'Workflows/hero.glb',
+    id: 'library:Default/hero.glb',
+    workspacePath: 'Default/hero.glb',
     displayName: 'hero.glb',
-    sourceScope: 'workflows',
+    sourceScope: 'generated',
     capability: 'mesh',
     state: 'ready',
     previewKind: '3d-model',
     warnings: [],
     openable: true,
     createdAt: '2026-06-16T10:00:00.000Z',
+    semantic: { name: 'Hero', tags: ['mid-poly'] },
     ...overrides,
   }
   return projectAssetLibraryEntry(base)
 }
 
-function groupPaths(entries: ProjectedAssetLibraryEntry[], search = '', sortMode: AssetLibrarySortMode = 'type'): string[] {
-  return filterAssetLibraryScopeGroups(entries, search, sortMode).flatMap((scopeGroup) => (
-    scopeGroup.entryGroups.flatMap((group) => group.entries.map((item) => item.workspacePath))
-  ))
+const root = entry({
+  id: 'root',
+  workspacePath: 'Default/hero.glb',
+  displayName: 'Hero',
+  createdAt: '2026-06-15T10:00:00.000Z',
+  semantic: { name: 'Hero', tags: ['mid-poly'] },
+})
+
+const derived = entry({
+  id: 'derived',
+  workspacePath: 'Exports/adventure/hero-rigged.glb',
+  displayName: 'Hero Rigged',
+  sourceScope: 'exports',
+  capability: 'rigged-mesh',
+  createdAt: '2026-06-18T10:00:00.000Z',
+  semantic: {
+    name: 'Hero Rigged',
+    project: 'Adventure',
+    tags: ['rigged', 'animated', 'character', 'mid-poly', 'clip-hero-walk'],
+    derivedFrom: {
+      parent: { workspacePath: 'Default/hero.glb', displayName: 'Hero' },
+      root: { workspacePath: 'Default/hero.glb', displayName: 'Hero' },
+    },
+  },
+})
+
+const prop = entry({
+  id: 'prop',
+  workspacePath: 'Exports/props/chair.glb',
+  displayName: 'Chair',
+  sourceScope: 'exports',
+  createdAt: '2026-06-17T10:00:00.000Z',
+  semantic: { name: 'Chair', project: 'Props', tags: ['prop', 'low-poly', 'textured'] },
+})
+
+const unnamed = entry({
+  id: 'unnamed',
+  workspacePath: 'Workflows/run/1785_abcd.glb',
+  displayName: '1785_abcd.glb',
+  sourceScope: 'workflows',
+  createdAt: '2026-06-19T10:00:00.000Z',
+  semantic: { tags: ['unnamed', 'high-poly'] },
+})
+
+function groups(
+  entries: ProjectedAssetLibraryEntry[],
+  search = '',
+  sortMode: AssetLibrarySortMode = 'date',
+  filters: AssetLibraryFilters = createDefaultAssetLibraryFilters(),
+) {
+  return buildAssetLibraryProjectGroups(entries, search, sortMode, filters)
 }
 
-test('organizes visible library assets by scope and capability with collapsible section keys', () => {
-  const entries = [
-    entry({ id: 'workflow-mesh', workspacePath: 'Workflows/run/hero.glb', displayName: 'hero.glb', sourceScope: 'workflows', capability: 'mesh' }),
-    entry({ id: 'export-rig', workspacePath: 'Exports/rig/hero-rig.gltf', displayName: 'hero-rig.gltf', sourceScope: 'exports', capability: 'rigged-mesh' }),
-    entry({ id: 'hidden-cache', workspacePath: 'Workflows/run/cache/internal.glb', displayName: 'internal.glb', sourceScope: 'workflows' }),
-    entry({ id: 'unsupported', workspacePath: 'Exports/readme.txt', displayName: 'readme.txt', sourceScope: 'exports', state: 'unsupported', openable: false }),
-  ]
+test('groups by project and collapses every version that shares a lineage root', () => {
+  const result = groups([root, derived, prop, unnamed])
 
-  const groups = filterAssetLibraryScopeGroups(entries, '', 'type')
-  assert.deepEqual(groups.map((group) => [group.sourceScope, group.entryGroups.map((entryGroup) => entryGroup.capability)]), [
-    ['workflows', ['mesh']],
-    ['exports', ['rigged-mesh']],
-  ])
-  assert.deepEqual(groupPaths(entries), ['Workflows/run/hero.glb', 'Exports/rig/hero-rig.gltf'])
-  assert.equal(getDefaultAssetLibraryCollapsedSectionKeys().includes('scope:workflows'), true)
-  assert.deepEqual(toggleAssetLibrarySectionKey(['scope:workflows'], 'scope:workflows'), [])
-  assert.deepEqual(toggleAssetLibrarySectionKey([], 'scope:exports'), ['scope:exports'])
+  assert.deepEqual(result.map((group) => group.projectLabel), ['Adventure', 'Props', 'Needs project'])
+  const heroFamily = result[0].families[0]
+  assert.equal(heroFamily.rootWorkspacePath, 'Default/hero.glb')
+  assert.equal(heroFamily.primaryEntry.id, 'derived')
+  assert.deepEqual(heroFamily.entries.map((item) => item.id), ['derived', 'root'])
+  assert.equal(result.reduce((count, group) => count + group.families.length, 0), 3)
+  assert.equal(result.reduce((count, group) => count + group.entryCount, 0), 4)
+  assert.deepEqual(getDefaultAssetLibraryCollapsedSectionKeys(), [])
+  assert.deepEqual(toggleAssetLibrarySectionKey([], 'project:adventure'), ['project:adventure'])
 })
 
-test('searches workspace assets by name path capability scope source and manifest while supporting name/date sorting', () => {
-  const entries = [
-    entry({ id: 'b', workspacePath: 'Workflows/run/zebra.glb', displayName: 'zebra.glb', sourceScope: 'workflows', capability: 'mesh', createdAt: '2026-06-15T10:00:00.000Z' }),
-    entry({ id: 'a', workspacePath: 'Exports/rig/alpha.gltf', displayName: 'alpha.gltf', sourceScope: 'exports', capability: 'rigged-mesh', createdAt: '2026-06-16T10:00:00.000Z' }),
-    entry({
-      id: 'c', workspacePath: 'Exports/motion/walk.json', displayName: 'walk.json', sourceScope: 'exports', capability: 'animation-motion', openable: false, previewKind: 'text',
-      source: { workspacePath: 'Workflows/run/zebra.glb', displayName: 'zebra.glb' },
-      manifest: { workspacePath: 'Exports/motion/walk.scene.json', capability: 'scene-manifest' },
-    }),
-  ]
+test('searches semantic metadata and lineage while filters answer real asset questions', () => {
+  const entries = [root, derived, prop, unnamed]
 
-  assert.deepEqual(groupPaths(entries, 'rigged'), ['Exports/rig/alpha.gltf'])
-  assert.deepEqual(groupPaths(entries, 'walk.scene'), ['Exports/motion/walk.json'])
-  assert.deepEqual(groupPaths(entries, 'zebra.glb'), ['Workflows/run/zebra.glb', 'Exports/motion/walk.json'])
-  assert.deepEqual(groupPaths(entries, 'exports', 'name'), ['Exports/rig/alpha.gltf', 'Exports/motion/walk.json'])
-  assert.deepEqual(groupPaths(entries, '', 'date'), ['Workflows/run/zebra.glb', 'Exports/rig/alpha.gltf', 'Exports/motion/walk.json'])
+  assert.deepEqual(groups(entries, 'clip-hero-walk').map((group) => group.projectLabel), ['Adventure'])
+  assert.deepEqual(groups(entries, 'Default/hero.glb')[0].families[0].entries.map((item) => item.id), ['derived', 'root'])
+  assert.deepEqual(groups(entries, 'props').map((group) => group.projectLabel), ['Props'])
+
+  assert.deepEqual(groups(entries, '', 'date', { kind: 'rigged', poly: 'all', needsAttention: false }).map((group) => group.projectLabel), ['Adventure'])
+  assert.deepEqual(groups(entries, '', 'date', { kind: 'animated', poly: 'all', needsAttention: false }).map((group) => group.projectLabel), ['Adventure'])
+  assert.deepEqual(groups(entries, '', 'date', { kind: 'character', poly: 'all', needsAttention: false }).map((group) => group.projectLabel), ['Adventure'])
+  assert.deepEqual(groups(entries, '', 'date', { kind: 'prop', poly: 'all', needsAttention: false }).map((group) => group.projectLabel), ['Props'])
+  assert.deepEqual(groups(entries, '', 'date', { kind: 'all', poly: 'high-poly', needsAttention: false }).map((group) => group.projectLabel), ['Needs project'])
+  assert.deepEqual(groups(entries, '', 'date', { kind: 'all', poly: 'all', needsAttention: true }).map((group) => group.projectLabel), ['Needs project'])
 })
 
-test('opens only safe glb and gltf entries through existing Generate job and history state', () => {
-  const glb = entry({ workspacePath: 'Workflows/run/hero.glb', displayName: 'hero.glb' })
-  const ply = entry({ workspacePath: 'Exports/scan.ply', displayName: 'scan.ply', openable: false, nonOpenableReason: 'Only .glb/.gltf workspace assets are openable in this release.' })
+test('defaults to newest-first families and retains name and type sorting', () => {
+  const olderProp = entry({
+    id: 'older-prop',
+    workspacePath: 'Exports/props/table.glb',
+    displayName: 'Table',
+    sourceScope: 'exports',
+    createdAt: '2026-06-14T10:00:00.000Z',
+    semantic: { name: 'Table', project: 'Props', tags: ['prop', 'high-poly'] },
+  })
+
+  assert.deepEqual(groups([olderProp, prop])[0].families.map((family) => family.name), ['Chair', 'Table'])
+  assert.deepEqual(groups([olderProp, prop], '', 'name')[0].families.map((family) => family.name), ['Chair', 'Table'])
+  assert.deepEqual(groups([root, derived, prop], '', 'type').flatMap((group) => group.families.map((family) => family.name)), ['Hero Rigged', 'Chair'])
+})
+
+test('opens safe Default, Workflows, and Exports models through existing Generate job state', () => {
+  const glb = entry({ workspacePath: 'Default/hero.glb', displayName: 'Hero' })
+  const ply = entry({ workspacePath: 'Exports/scan.ply', displayName: 'scan.ply', sourceScope: 'exports', openable: false, nonOpenableReason: 'Only .glb/.gltf workspace assets are openable in this release.' })
 
   assert.equal(isAssetLibraryEntryOpenable(glb), true)
   assert.equal(isAssetLibraryEntryOpenable(ply), false)
   assert.equal(describeAssetLibraryOpenability(glb), 'Ready to open this asset directly in Generate.')
   assert.equal(describeAssetLibraryOpenability(ply), 'Only .glb/.gltf workspace assets are openable in this release.')
-  assert.deepEqual(buildAssetLibraryOpenRequest(glb), { workspacePath: 'Workflows/run/hero.glb' })
+  assert.deepEqual(buildAssetLibraryOpenRequest(glb), { workspacePath: 'Default/hero.glb' })
 
   const target = resolveAssetLibraryOpenTarget(glb)
   assert.equal(target.kind, 'self')
   if (target.kind !== 'self') throw new Error('expected self target')
 
   const selection = createAssetLibraryOpenJob(glb, target, 1718546400000)
-  assert.equal(selection.historyUrl, '/workspace/Workflows/run/hero.glb')
+  assert.equal(selection.historyUrl, '/workspace/Default/hero.glb')
   assert.equal(selection.job.status, 'done')
-  assert.equal(selection.job.outputUrl, '/workspace/Workflows/run/hero.glb')
-  assert.equal(selection.job.originalOutputUrl, '/workspace/Workflows/run/hero.glb')
+  assert.equal(selection.job.libraryEntryId, glb.id)
+  assert.equal(selection.job.libraryWorkspacePath, glb.workspacePath)
   assert.equal(resolveOpenPanelAfterLibrarySelection('library' satisfies GenerateOpenPanel), 'library')
 })
 
@@ -103,23 +170,77 @@ test('builds linked-source open requests and import jobs for safe sidecars', () 
     id: 'sidecar',
     workspacePath: 'Workflows/run/hero.landmarks.v1.json',
     displayName: 'hero.landmarks.v1.json',
+    sourceScope: 'workflows',
     capability: 'landmarks-sidecar',
     previewKind: 'text',
     openable: false,
-    source: { workspacePath: 'Workflows/run/hero.glb', displayName: 'hero.glb' },
+    source: { workspacePath: 'Default/hero.glb', displayName: 'hero.glb' },
   })
 
   assert.equal(isAssetLibraryEntryOpenable(sidecar), true)
-  assert.equal(describeAssetLibraryOpenability(sidecar), 'Ready to open linked source hero.glb in Generate.')
   assert.deepEqual(buildAssetLibraryOpenRequest(sidecar), {
     workspacePath: 'Workflows/run/hero.landmarks.v1.json',
-    sourceWorkspacePath: 'Workflows/run/hero.glb',
+    sourceWorkspacePath: 'Default/hero.glb',
   })
+})
 
-  const target = resolveAssetLibraryOpenTarget(sidecar)
-  assert.equal(target.kind, 'linked-source')
-  if (target.kind !== 'linked-source') throw new Error('expected linked source target')
-  const selection = createAssetLibraryOpenJob(sidecar, target, 1718546400001)
-  assert.equal(selection?.historyUrl, '/workspace/Workflows/run/hero.glb')
-  assert.equal(selection?.job.outputUrl, '/workspace/Workflows/run/hero.glb')
+test('Library panel clamps to gallery-safe bounds and degrades silently without localStorage', () => {
+  assert.equal(clampAssetLibraryPanelWidth(0), 560)
+  assert.equal(clampAssetLibraryPanelWidth(9999), 1200)
+  assert.equal(clampAssetLibraryPanelWidth(700), 700)
+  assert.equal(getStoredAssetLibraryPanelWidth(), 880)
+  assert.doesNotThrow(() => storeAssetLibraryPanelWidth(700))
+
+  assert.equal(clampAssetLibraryPanelHeight(0), 420)
+  assert.equal(clampAssetLibraryPanelHeight(9999), 1200)
+  assert.equal(clampAssetLibraryPanelHeight(500), 500)
+  assert.equal(getStoredAssetLibraryPanelHeight(), 900)
+  assert.doesNotThrow(() => storeAssetLibraryPanelHeight(500))
+})
+
+test('Library panel shifts, shrinks, and flips to stay inside zoomed viewports', () => {
+  const zoomed = getAssetLibraryPanelLayout(
+    { left: 420, right: 500, top: 40, bottom: 70 },
+    { width: 640, height: 430 },
+    880,
+    900,
+  )
+  assert.deepEqual(zoomed, {
+    left: 12,
+    top: 74,
+    width: 616,
+    height: 344,
+    placement: 'below',
+  })
+  assert.ok(zoomed.left >= 0)
+  assert.ok(zoomed.left + zoomed.width <= 640)
+  assert.ok(zoomed.top + zoomed.height <= 430)
+
+  const flipped = getAssetLibraryPanelLayout(
+    { left: 700, right: 780, top: 700, bottom: 730 },
+    { width: 1000, height: 800 },
+    560,
+    600,
+  )
+  assert.deepEqual(flipped, {
+    left: 428,
+    top: 96,
+    width: 560,
+    height: 600,
+    placement: 'above',
+  })
+})
+
+test('live discovery expands matching projects without overwriting collapse state', () => {
+  const collapsed = ['project:adventure']
+  assert.equal(isAssetLibrarySectionExpanded(collapsed, 'project:adventure', false), false)
+  assert.equal(isAssetLibrarySectionExpanded(collapsed, 'project:props', false), true)
+  assert.equal(isAssetLibrarySectionExpanded(collapsed, 'project:adventure', true), true)
+})
+
+test('formats machine clip names as legible animation names', () => {
+  assert.equal(formatAssetLibraryClipName('slow_turn_glance'), 'Slow Turn Glance')
+  assert.equal(formatAssetLibraryClipName('RigAction'), 'Rig Action')
+  assert.equal(findAssetLibraryMotionClipIndex([{ name: 'Idle' }, { name: 'slow-turn_glance' }], 'slow_turn_glance'), 1)
+  assert.equal(findAssetLibraryMotionClipIndex([{ name: 'Idle' }], 'Walk'), -1)
 })

@@ -1,13 +1,120 @@
 import path = require('path')
 import fs   = require('fs')
 
-interface ProcessInput  { filePath?: string; text?: string }
+interface ProcessInput  { filePath?: string; text?: string; sourceAssetPath?: string }
 interface ProcessResult { filePath?: string; text?: string }
 interface ProcessContext {
   workspaceDir: string
   tempDir:      string
   log:          (msg: string) => void
   progress:     (pct: number, label: string) => void
+}
+
+// ─── Lineage ──────────────────────────────────────────────────────────────────
+// When the input mesh traces back to an existing workspace asset, record where
+// it came from: the immediate parent, plus the root of the chain (so re-exporting
+// an already-derived model doesn't grow an unbounded ancestry list).
+
+interface DerivedRef  { path: string; name: string | null }
+interface DerivedFrom { parent: DerivedRef; root: DerivedRef }
+type Sidecar = Record<string, unknown>
+
+function sidecarPathFor(assetPath: string): string {
+  return assetPath.replace(/\.[^./\\]+$/, '') + '.tags.json'
+}
+
+function readSidecar(assetPath: string): Sidecar {
+  const sidecarPath = sidecarPathFor(assetPath)
+  if (!fs.existsSync(sidecarPath)) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(fs.readFileSync(sidecarPath, 'utf-8'))
+  } catch (error) {
+    throw new Error(`mesh-exporter: cannot read metadata sidecar ${sidecarPath}: ${String(error)}`)
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`mesh-exporter: metadata sidecar is not a JSON object: ${sidecarPath}`)
+  }
+  return parsed as Sidecar
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+function writeSidecarAtomic(assetPath: string, sidecar: Sidecar): void {
+  const destination = sidecarPathFor(assetPath)
+  const temporary = `${destination}.${process.pid}.${Date.now()}.tmp`
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(sidecar, null, 2) + '\n', 'utf-8')
+    fs.renameSync(temporary, destination)
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary)
+  }
+}
+
+/** Workspace-relative form of an absolute path, or null if it's outside the workspace. */
+function toWorkspaceRelative(workspaceDir: string, absPath: string): string | null {
+  const norm   = absPath.replace(/\\/g, '/')
+  const wsNorm = workspaceDir.replace(/\\/g, '/').replace(/\/+$/, '')
+  if (norm !== wsNorm && !norm.startsWith(wsNorm + '/')) return null
+  return norm.slice(wsNorm.length + 1)
+}
+
+/** Reads asset.extras.modly straight out of a GLB's leading JSON chunk — used only
+ *  as a name fallback when a source asset predates the .tags.json sidecar. */
+function readGlbModlyExtras(glbPath: string): { name?: string } | null {
+  try {
+    const fd = fs.openSync(glbPath, 'r')
+    try {
+      const header = Buffer.alloc(12)
+      fs.readSync(fd, header, 0, 12, 0)
+      if (header.toString('ascii', 0, 4) !== 'glTF') return null
+      const chunkHeader = Buffer.alloc(8)
+      fs.readSync(fd, chunkHeader, 0, 8, 12)
+      const chunkLength = chunkHeader.readUInt32LE(0)
+      if (chunkHeader.toString('ascii', 4, 8) !== 'JSON') return null
+      const chunkData = Buffer.alloc(chunkLength)
+      fs.readSync(fd, chunkData, 0, chunkLength, 20)
+      const json = JSON.parse(chunkData.toString('utf-8'))
+      return json?.asset?.extras?.modly ?? null
+    } finally {
+      fs.closeSync(fd)
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Resolves the `derived_from` sidecar field for an export whose input traces
+ * back to `sourceAssetPath`. Returns null when there's nothing to record (no
+ * source, or the source isn't a workspace asset).
+ */
+function resolveDerivedFrom(sourceAssetPath: string | undefined, workspaceDir: string): DerivedFrom | null {
+  if (!sourceAssetPath) return null
+  const relPath = toWorkspaceRelative(workspaceDir, sourceAssetPath)
+  if (!relPath) return null
+
+  let name: string | null = null
+  let upstream: DerivedFrom | undefined
+
+  const sidecarPath = sidecarPathFor(sourceAssetPath)
+  if (fs.existsSync(sidecarPath)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(sidecarPath, 'utf-8'))
+      name = data.name ?? null
+      if (data.derived_from) upstream = data.derived_from as DerivedFrom
+    } catch {
+      // Malformed sidecar — treat the source as untagged rather than failing the export.
+    }
+  } else {
+    name = readGlbModlyExtras(sourceAssetPath)?.name ?? null
+  }
+
+  const parent: DerivedRef = { path: relPath, name }
+  const root = upstream?.root ?? parent
+  return { parent, root }
 }
 
 // ─── Geometry extraction ──────────────────────────────────────────────────────
@@ -200,16 +307,94 @@ const processor = async (
   context.progress(20, 'Loading mesh…')
   const doc = await io.read(input.filePath)
 
-  let outPath: string
-  if (outputPath) {
-    fs.mkdirSync(outputPath, { recursive: true })
-    outPath = path.join(outputPath, `export-${Date.now()}${ext}`)
-  } else {
-    const exportsDir = path.join(context.workspaceDir, 'Exports')
-    fs.mkdirSync(exportsDir, { recursive: true })
-    outPath = path.join(exportsDir, `export-${Date.now()}${ext}`)
+  // modly-friendly-names: a folder of export-1785194887022.glb tells you nothing.
+  const stamp  = new Date()
+  const pad    = (n: number): string => String(n).padStart(2, '0')
+  const unique = Date.now().toString(36).slice(-4)
+  const typed  = String(params['model_name'] ?? '').trim()
+  const slug   = typed
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+  const dated = `model-${stamp.getFullYear()}-${pad(stamp.getMonth() + 1)}-${pad(stamp.getDate())}`
+    + `-${pad(stamp.getHours())}${pad(stamp.getMinutes())}`
+  const baseName = `${slug || dated}-${unique}${ext}`
+
+  const slugify = (s: unknown): string => String(s ?? '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40)
+  const project = slugify(params['project'])
+
+  const root = outputPath || path.join(context.workspaceDir, 'Exports')
+  const dir  = project ? path.join(root, project) : root
+  fs.mkdirSync(dir, { recursive: true })
+  const outPath = path.join(dir, baseName)
+
+  // Tags: what the operator typed, plus what the file itself can tell us.
+  const typedTags = String(params['tags'] ?? '').split(',').map(slugify).filter(Boolean)
+  const suggested: string[] = []
+  try {
+    const r = doc.getRoot()
+    if (r.listSkins().length) suggested.push('rigged')
+    if (r.listAnimations().length) {
+      suggested.push('animated')
+      for (const a of r.listAnimations()) {
+        const n = slugify(a.getName())
+        if (n) suggested.push(`clip-${n}`)
+      }
+    }
+    if (r.listTextures().length) suggested.push('textured')
+    let tris = 0
+    for (const m of r.listMeshes())
+      for (const prim of m.listPrimitives()) {
+        const idx = prim.getIndices()
+        tris += idx ? idx.getCount() / 3
+                    : (prim.getAttribute('POSITION')?.getCount() ?? 0) / 3
+      }
+    tris = Math.round(tris)
+    suggested.push(tris < 5000 ? 'low-poly' : tris > 100000 ? 'high-poly' : 'mid-poly')
+    if (project) suggested.push(project)
+  } catch (e) {
+    context.log(`tagging skipped: ${e}`)
   }
-  fs.mkdirSync(path.dirname(outPath), { recursive: true })
+  const sourceSidecar = readSidecar(input.filePath)
+  const tags = Array.from(new Set([
+    ...stringArray(sourceSidecar.tags),
+    ...typedTags,
+    ...suggested,
+  ]))
+
+  // Lineage: only recorded when the input actually traces back to an existing
+  // workspace asset — a fresh generation has nothing to chain to.
+  const derivedFrom = resolveDerivedFrom(input.sourceAssetPath, context.workspaceDir)
+  const existingOutputSidecar = readSidecar(outPath)
+  const outputSidecar: Sidecar = {
+    // Preserve the complete traveling record and any future metadata fields.
+    // The exporter owns only the catalog fields below.
+    ...sourceSidecar,
+    ...existingOutputSidecar,
+    name:    typed || existingOutputSidecar.name || sourceSidecar.name || null,
+    project: params['project'] || existingOutputSidecar.project || sourceSidecar.project || null,
+    tags: Array.from(new Set([
+      ...stringArray(existingOutputSidecar.tags),
+      ...tags,
+    ])),
+    ...(derivedFrom
+      ? { derived_from: derivedFrom }
+      : (existingOutputSidecar.derived_from ?? sourceSidecar.derived_from)
+        ? { derived_from: existingOutputSidecar.derived_from ?? sourceSidecar.derived_from }
+        : {}),
+    created: existingOutputSidecar.created || new Date().toISOString(),
+  }
+
+  try {
+    const asset = doc.getRoot().getAsset()
+    asset.extras = Object.assign({}, asset.extras, {
+      modly: { name: typed || null, project: params['project'] || null, tags },
+    })
+  } catch (e) {
+    context.log(`could not embed tags: ${e}`)
+  }
 
   context.progress(50, `Exporting as ${format.toUpperCase()}…`)
 
@@ -222,6 +407,10 @@ const processor = async (
     else if (format === 'obj') writeOBJ(prims, outPath)
     else if (format === 'ply') writePLY(prims, outPath)
   }
+
+  // Publish metadata only after the asset exists. This also prevents a failed
+  // conversion from leaving a catalog entry that points at no model.
+  writeSidecarAtomic(outPath, outputSidecar)
 
   context.progress(100, 'Done')
   context.log(`Output: ${outPath}`)

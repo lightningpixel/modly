@@ -4,7 +4,10 @@ import type {
   AssetLibraryOpenResult,
   AssetLibraryReadRequest,
   AssetLibraryReadResult,
+  AssetLibraryThumbnailRequest,
+  AssetLibraryThumbnailResult,
 } from '../../src/shared/types/assetLibrary'
+import type { TextureWatchChoice, TextureWatchUpdate } from '../../src/shared/types/liveTexture'
 
 export interface IpcRendererLike {
   invoke(channel: string, ...args: unknown[]): Promise<unknown>
@@ -32,7 +35,16 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
     },
 
     // Renderer UI (zoom whole page — scales every px/rem consistently)
-    ui: { setZoomFactor: (factor: number) => webFrame.setZoomFactor(factor) },
+    ui: {
+      setZoomFactor: (factor: number) => webFrame.setZoomFactor(factor),
+      // Chromium eats Ctrl/Cmd +/- before the page sees them, so the main
+      // process catches the chord and forwards only the direction. The size
+      // itself is the renderer's, so there is exactly one copy of it.
+      onZoomStep: (cb: (step: number) => void) => {
+        ipcRenderer.on('ui:zoomStep', (_event, step) => cb(step as number))
+      },
+      offZoomStep: () => ipcRenderer.removeAllListeners('ui:zoomStep'),
+    },
 
     // Shell utilities
     shell: { openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url) },
@@ -85,6 +97,17 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         ipcRenderer.invoke('fs:deleteDirectory', dirPath) as Promise<{ success: boolean; error?: string }>,
       readScreenshotDataUrl: (filename: string): Promise<string> =>
         ipcRenderer.invoke('fs:readScreenshotDataUrl', filename) as Promise<string>,
+    },
+
+    texture: {
+      chooseAndWatch: (): Promise<TextureWatchChoice> =>
+        ipcRenderer.invoke('texture:chooseAndWatch') as Promise<TextureWatchChoice>,
+      stopWatching: (): Promise<void> =>
+        ipcRenderer.invoke('texture:stopWatching') as Promise<void>,
+      onChange: (cb: (update: TextureWatchUpdate) => void) => {
+        ipcRenderer.on('texture:changed', (_event, update) => cb(update as TextureWatchUpdate))
+      },
+      offChange: () => ipcRenderer.removeAllListeners('texture:changed'),
     },
 
     // Settings
@@ -189,6 +212,7 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         list: (): Promise<AssetLibraryListResult> => ipcRenderer.invoke('workspace:library:list') as Promise<AssetLibraryListResult>,
         read: (request: AssetLibraryReadRequest): Promise<AssetLibraryReadResult> => ipcRenderer.invoke('workspace:library:read', request) as Promise<AssetLibraryReadResult>,
         open: (request: AssetLibraryOpenRequest): Promise<AssetLibraryOpenResult> => ipcRenderer.invoke('workspace:library:open', request) as Promise<AssetLibraryOpenResult>,
+        thumbnail: (request: AssetLibraryThumbnailRequest): Promise<AssetLibraryThumbnailResult> => ipcRenderer.invoke('workspace:library:thumbnail', request) as Promise<AssetLibraryThumbnailResult>,
       },
     },
 
@@ -230,7 +254,7 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
 
       runProcess: (
         extensionId: string,
-        input:       { filePath?: string; text?: string; texts?: (string | undefined)[]; nodeId?: string },
+        input:       { filePath?: string; text?: string; texts?: (string | undefined)[]; nodeId?: string; sourceAssetPath?: string },
         params:      Record<string, unknown>,
       ): Promise<{ success: boolean; result?: { filePath?: string; text?: string }; error?: string }> =>
         ipcRenderer.invoke('extensions:runProcess', extensionId, input, params) as Promise<{ success: boolean; result?: { filePath?: string; text?: string }; error?: string }>,

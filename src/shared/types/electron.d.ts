@@ -7,7 +7,10 @@ import type {
   AssetLibraryOpenResult,
   AssetLibraryReadRequest,
   AssetLibraryReadResult,
+  AssetLibraryThumbnailRequest,
+  AssetLibraryThumbnailResult,
 } from './assetLibrary'
+import type { TextureWatchChoice, TextureWatchUpdate } from './liveTexture'
 
 // ─── Extension types ──────────────────────────────────────────────────────────
 
@@ -47,7 +50,7 @@ export interface ModelExtension {
 export interface ParamSchema {
   id:       string
   label:    string
-  type:     'select' | 'int' | 'float' | 'string' | 'file-select'
+  type:     'select' | 'int' | 'float' | 'string' | 'text' | 'file-select'
   default:  number | string
   options?: { value: number | string; label: string }[]
   min?:     number
@@ -58,6 +61,9 @@ export interface ParamSchema {
   // file-select: dropdown of the files inside the folder held by another param
   dir_from?:   string     // id of the (string) param holding the folder path
   extensions?: string[]   // file extensions to list (e.g. ["json"])
+  // Renders a tall, resizable textarea instead of a single-line input,
+  // regardless of the base type (e.g. a "string" param with a long description).
+  multiline?: boolean
 }
 
 export interface ProcessExtension {
@@ -89,6 +95,9 @@ export interface ProcessInput {
   /** Per-slot texts for multi-text-input nodes (index = target handle slot). */
   texts?:    (string | undefined)[]
   nodeId?:   string
+  /** Absolute path of the existing workspace asset this input was sourced from
+   *  (if any) — threaded through the run so mesh-exporter can record lineage. */
+  sourceAssetPath?: string
 }
 
 export interface ProcessResult {
@@ -136,10 +145,20 @@ export interface Workflow {
   folder?:     string
   /** Pinned in the workflow browser's Bookmarks section */
   bookmarked?: boolean
+  /** Keeps one operator-facing choice authoritative when multiple nodes need
+   *  the same value (for example generation density and fallback decimation). */
+  paramBindings?: WorkflowParamBinding[]
   nodes:       WFNode[]
   edges:       WFEdge[]
   createdAt:   string
   updatedAt:   string
+}
+
+export interface WorkflowParamBinding {
+  sourceNodeId: string
+  sourceParam:  string
+  targetNodeId: string
+  targetParam:  string
 }
 
 declare global {
@@ -161,6 +180,8 @@ declare global {
       }
       ui: {
         setZoomFactor: (factor: number) => void
+        onZoomStep: (cb: (step: number) => void) => void
+        offZoomStep: () => void
       }
       python: {
         start:     () => Promise<{ success: boolean; port?: number; error?: string }>
@@ -183,6 +204,12 @@ declare global {
         moveDirectory:   (args: { src: string; dest: string }) => Promise<{ success: boolean; error?: string }>
         deleteDirectory: (dirPath: string) => Promise<{ success: boolean; error?: string }>
         readScreenshotDataUrl: (filename: string) => Promise<string>
+      }
+      texture: {
+        chooseAndWatch: () => Promise<TextureWatchChoice>
+        stopWatching:  () => Promise<void>
+        onChange:      (cb: (update: TextureWatchUpdate) => void) => void
+        offChange:     () => void
       }
       settings: {
         get: () => Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string; hfToken?: string }>
@@ -250,6 +277,7 @@ declare global {
           list: () => Promise<AssetLibraryListResult>
           read: (request: AssetLibraryReadRequest) => Promise<AssetLibraryReadResult>
           open: (request: AssetLibraryOpenRequest) => Promise<AssetLibraryOpenResult>
+          thumbnail: (request: AssetLibraryThumbnailRequest) => Promise<AssetLibraryThumbnailResult>
         }
       }
       setup: {

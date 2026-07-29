@@ -1,7 +1,17 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
-export type UiScale = 'small' | 'medium' | 'large' | 'very-large'
+/** How much bigger or smaller the whole interface is drawn. 1 is unscaled.
+ *  A number, not a preset name, because Ctrl/Cmd +/- moves it in small steps
+ *  and a four-name list cannot describe where it lands. */
+export const UI_ZOOM_MIN = 0.6
+export const UI_ZOOM_MAX = 2.0
+export const UI_ZOOM_PRESETS = [
+  { label: 'Small',      factor: 0.875 },
+  { label: 'Default',    factor: 1     },
+  { label: 'Large',      factor: 1.25  },
+  { label: 'Very Large', factor: 1.5   },
+]
 export type BackendStatus = 'not_started' | 'starting' | 'ready' | 'error'
 export type SetupStatus = 'idle' | 'checking' | 'needed' | 'installing' | 'done' | 'error'
 export interface SetupProgress { step: string; percent: number; currentPackage?: string }
@@ -25,6 +35,9 @@ export interface GenerationJob {
   modelId?: string             // model used for this generation
   originalTriangles?: number   // polygon count of the original mesh
   generationOptions?: GenerationOptions
+  /** Stable Library identity for the asset currently loaded in the viewer. */
+  libraryEntryId?: string
+  libraryWorkspacePath?: string
   error?: string
   createdAt: number
 }
@@ -101,6 +114,12 @@ interface AppState {
   meshSelected: boolean
   setMeshSelected: (selected: boolean) => void
 
+  // Animation clips (set by Viewer3D, read by ChatPanel for agent context)
+  motionClips: { name: string }[]
+  setMotionClips: (clips: { name: string }[]) => void
+  activeClipIndex: number
+  setActiveClipIndex: (index: number) => void
+
   // Setup
   setupStatus:    SetupStatus
   setupProgress:  SetupProgress | null
@@ -141,8 +160,8 @@ interface AppState {
   // Accessibility
   useAtkinsonFont: boolean
   setUseAtkinsonFont: (v: boolean) => void
-  uiScale: UiScale
-  setUiScale: (v: UiScale) => void
+  uiZoomFactor: number
+  setUiZoomFactor: (v: number) => void
 
   // 3D viewer lighting
   lightSettings: LightSettings
@@ -244,8 +263,9 @@ export const useAppStore = create<AppState>()(
 
       useAtkinsonFont: false,
       setUseAtkinsonFont: (v) => set({ useAtkinsonFont: v }),
-      uiScale: 'medium',
-      setUiScale: (v) => set({ uiScale: v }),
+      uiZoomFactor: 1,
+      setUiZoomFactor: (v) =>
+        set({ uiZoomFactor: Math.min(UI_ZOOM_MAX, Math.max(UI_ZOOM_MIN, v)) }),
 
       lightSettings: DEFAULT_LIGHT_SETTINGS,
       setLightSettings: (settings) => set({ lightSettings: settings }),
@@ -262,6 +282,10 @@ export const useAppStore = create<AppState>()(
       setMeshStats: (stats) => set({ meshStats: stats }),
       meshSelected: false,
       setMeshSelected: (selected) => set({ meshSelected: selected }),
+      motionClips: [],
+      setMotionClips: (clips) => set({ motionClips: clips }),
+      activeClipIndex: 0,
+      setActiveClipIndex: (index) => set({ activeClipIndex: index }),
       initApp: async () => {
         set({ backendStatus: 'starting', backendError: null })
 
@@ -284,7 +308,15 @@ export const useAppStore = create<AppState>()(
         }
       },
 
-      setCurrentJob: (job) => set({ currentJob: job, meshStats: job === null ? null : get().meshStats }),
+      setCurrentJob: (job) => {
+        const changed = job?.id !== get().currentJob?.id
+        set({
+          currentJob: job,
+          meshStats: job === null ? null : get().meshStats,
+          motionClips: changed ? [] : get().motionClips,
+          activeClipIndex: changed ? 0 : get().activeClipIndex,
+        })
+      },
 
       updateCurrentJob: (patch) => {
         const current = get().currentJob
@@ -302,7 +334,7 @@ export const useAppStore = create<AppState>()(
         generationOptions: state.generationOptions,
         showRamIndicator: state.showRamIndicator,
         useAtkinsonFont: state.useAtkinsonFont,
-        uiScale: state.uiScale,
+        uiZoomFactor: state.uiZoomFactor,
         lightSettings: state.lightSettings,
       }),
     }
