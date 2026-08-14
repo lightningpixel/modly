@@ -142,5 +142,50 @@ class RecvTests(unittest.TestCase):
             proc._recv(timeout=0.05)
 
 
+class GenerateErrorLoadedFlagTests(unittest.TestCase):
+    """
+    Issue #239: a generation that fails during lazy texture setup leaves the
+    worker without a model. If _loaded stays True, GeneratorRegistry.get_active()
+    skips load() forever and every later run reuses the broken worker.
+    """
+
+    def _failing_generate(self, error_msg: dict) -> ExtensionProcess:
+        proc = _make_proc()
+        proc._loaded = True
+        proc._send = lambda msg: None  # type: ignore[assignment]
+        proc._queue.put(error_msg)
+        with self.assertRaises(RuntimeError):
+            proc.generate(b"", {})
+        return proc
+
+    def test_clears_loaded_when_worker_reports_model_lost(self) -> None:
+        proc = self._failing_generate(
+            {"type": "error", "message": "No module named 'xatlas'", "loaded": False}
+        )
+        self.assertFalse(proc._loaded)
+
+    def test_keeps_loaded_when_worker_still_has_its_model(self) -> None:
+        proc = self._failing_generate(
+            {"type": "error", "message": "bad input image", "loaded": True}
+        )
+        self.assertTrue(proc._loaded)
+
+    def test_keeps_loaded_when_worker_reports_no_state(self) -> None:
+        proc = self._failing_generate({"type": "error", "message": "boom"})
+        self.assertTrue(proc._loaded)
+
+    def test_error_still_propagates_the_original_cause(self) -> None:
+        proc = _make_proc()
+        proc._loaded = True
+        proc._send = lambda msg: None  # type: ignore[assignment]
+        proc._queue.put(
+            {"type": "error", "message": "short", "traceback": "full traceback here",
+             "loaded": False}
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            proc.generate(b"", {})
+        self.assertIn("full traceback here", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

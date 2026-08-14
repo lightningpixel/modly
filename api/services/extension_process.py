@@ -351,6 +351,13 @@ class ExtensionProcess:
                 return Path(msg["output_path"])
 
             elif t == "error":
+                # A failed generation can leave the worker without a model: a
+                # lazy texture-setup failure frees the shape pipeline and then
+                # raises. The worker reports its post-failure state, so drop
+                # our cached flag and let GeneratorRegistry.get_active() reload
+                # before the next run rather than reusing a broken worker.
+                if msg.get("loaded") is False:
+                    self._loaded = False
                 raise RuntimeError(msg.get("traceback") or msg.get("message", "Unknown error"))
 
             elif t == "cancelled":

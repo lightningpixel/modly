@@ -154,5 +154,209 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(json.loads(written), {"type": "ready", "params_schema": []})
 
 
+_FAKE_TEXGEN_GENERATOR = '''
+from pathlib import Path
+
+INSTANCES = []
+
+
+class FakeTexGen:
+    """
+    Mimics an extension whose texture pipeline is built lazily on first use and
+    frees the shape pipeline first to make room for it.
+
+    The first texture setup fails (missing `xatlas`), which is what issue #239
+    reports; a later attempt succeeds once the dependency is available.
+    """
+
+    def __init__(self, model_dir, outputs_dir):
+        self.model_dir = model_dir
+        self.outputs_dir = outputs_dir
+        self._model = None
+        self.load_calls = 0
+        self.texgen_attempts = 0
+        INSTANCES.append(self)
+
+    def is_loaded(self):
+        return self._model is not None
+
+    def load(self):
+        self.load_calls += 1
+        self._model = lambda image: "mesh"
+
+    def unload(self):
+        self._model = None
+
+    def _setup_texgen(self):
+        # Free the shape pipeline before building the texture pipeline.
+        self._model = None
+        self.texgen_attempts += 1
+        if self.texgen_attempts == 1:
+            raise RuntimeError("No module named 'xatlas'")
+        # Texture setup succeeded: shape pipeline comes back.
+        self.load()
+
+    def generate(self, image_bytes, params, progress_cb=None, cancel_event=None):
+        # Stands in for `self._model(image)` on a generator whose model is gone.
+        if self._model is None:
+            raise TypeError("'NoneType' object is not callable")
+        self._model(image_bytes)
+        if params.get("enable_texture"):
+            self._setup_texgen()
+        return Path("out.glb")
+'''
+
+
+class _RunnerDriver:
+    """Runs runner.main() against a throwaway extension dir."""
+
+    def __init__(self, generator_src: str, generator_class: str) -> None:
+        self.ext_dir = Path(tempfile.mkdtemp(prefix="modly-texgen-test-"))
+        (self.ext_dir / "generator.py").write_text(generator_src, encoding="utf-8")
+        (self.ext_dir / "manifest.json").write_text(
+            json.dumps({"id": "demo-ext", "generator_class": generator_class}),
+            encoding="utf-8",
+        )
+
+    def run(self, actions: list) -> list:
+        """Feeds actions on stdin, returns the parsed messages runner emitted."""
+        original_ext_dir = runner.EXT_DIR
+        original_stdin = sys.stdin
+        original_module = sys.modules.pop("generator", None)
+        runner.EXT_DIR = self.ext_dir
+        sys.stdin = io.StringIO("".join(json.dumps(a) + "\n" for a in actions))
+        out = io.StringIO()
+        try:
+            with redirect_stdout(out):
+                runner.main()
+            self.generator_module = sys.modules["generator"]
+        finally:
+            runner.EXT_DIR = original_ext_dir
+            sys.stdin = original_stdin
+            sys.modules.pop("generator", None)
+            if original_module is not None:
+                sys.modules["generator"] = original_module
+        return [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+
+
+class GeneratorLoadedStateTests(unittest.TestCase):
+    def test_reports_loaded_state(self) -> None:
+        gen = type("Gen", (), {"is_loaded": lambda self: True})()
+        self.assertTrue(runner._generator_is_loaded(gen))
+
+    def test_treats_raising_is_loaded_as_not_loaded(self) -> None:
+        class Gen:
+            def is_loaded(self):
+                raise RuntimeError("half-initialised")
+
+        self.assertFalse(runner._generator_is_loaded(Gen()))
+
+    def test_ensure_model_loaded_is_a_noop_when_already_loaded(self) -> None:
+        class Gen:
+            load_calls = 0
+
+            def is_loaded(self):
+                return True
+
+            def load(self):
+                self.load_calls += 1
+
+        gen = Gen()
+        self.assertFalse(runner._ensure_model_loaded(gen))
+        self.assertEqual(gen.load_calls, 0)
+
+    def test_ensure_model_loaded_reloads_when_model_is_gone(self) -> None:
+        class Gen:
+            def __init__(self):
+                self._model = None
+                self.load_calls = 0
+
+            def is_loaded(self):
+                return self._model is not None
+
+            def load(self):
+                self.load_calls += 1
+                self._model = object()
+
+        gen = Gen()
+        self.assertTrue(runner._ensure_model_loaded(gen))
+        self.assertEqual(gen.load_calls, 1)
+        self.assertIsNotNone(gen._model)
+
+
+class TextureSetupRecoveryTests(unittest.TestCase):
+    """
+    Regression tests for issue #239: a failed lazy texture setup left the worker
+    with _model = None and no recovery path, so every later generation raised
+    "TypeError: 'NoneType' object is not callable" until the process was killed.
+    """
+
+    def setUp(self) -> None:
+        self.driver = _RunnerDriver(_FAKE_TEXGEN_GENERATOR, "FakeTexGen")
+        self.texture_run = {
+            "action": "generate",
+            "image_b64": "",
+            "params": {"enable_texture": True},
+        }
+
+    def test_worker_recovers_after_failed_texture_setup(self) -> None:
+        messages = self.driver.run([
+            {"action": "load"},
+            dict(self.texture_run, id="run-1"),
+            dict(self.texture_run, id="run-2"),
+        ])
+
+        by_id = {m.get("id"): m for m in messages if m.get("type") in ("done", "error")}
+
+        # First run fails during texture setup and surfaces the real cause.
+        self.assertEqual(by_id["run-1"]["type"], "error")
+        self.assertIn("xatlas", by_id["run-1"]["message"])
+
+        # The retry must succeed instead of dying on a None model.
+        self.assertEqual(
+            by_id["run-2"]["type"], "done",
+            msg=f"retry did not recover: {by_id['run-2']}",
+        )
+        self.assertNotIn("NoneType", json.dumps(by_id["run-2"]))
+
+        # …and the worker's model is genuinely back.
+        gen = self.driver.generator_module.INSTANCES[0]
+        self.assertIsNotNone(gen._model)
+        self.assertTrue(gen.is_loaded())
+
+    def test_failed_run_reports_that_the_model_was_lost(self) -> None:
+        messages = self.driver.run([
+            {"action": "load"},
+            dict(self.texture_run, id="run-1"),
+        ])
+
+        error = next(m for m in messages if m.get("type") == "error")
+        self.assertIs(error["loaded"], False)
+
+    def test_reload_before_generate_is_logged(self) -> None:
+        messages = self.driver.run([
+            {"action": "load"},
+            dict(self.texture_run, id="run-1"),
+            dict(self.texture_run, id="run-2"),
+        ])
+
+        logs = [m for m in messages if m.get("type") == "log"]
+        self.assertTrue(
+            any("reloaded before generating" in m.get("message", "") for m in logs),
+            msg=f"expected a reload log, got {logs}",
+        )
+
+    def test_successful_run_does_not_reload_the_model(self) -> None:
+        messages = self.driver.run([
+            {"action": "load"},
+            {"action": "generate", "id": "run-1", "image_b64": "", "params": {}},
+        ])
+
+        self.assertEqual(
+            [m["type"] for m in messages if m.get("id") == "run-1"], ["done"]
+        )
+        self.assertEqual(self.driver.generator_module.INSTANCES[0].load_calls, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
