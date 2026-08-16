@@ -18,6 +18,7 @@ import { getSettings, setSettings } from './settings-store'
 import { checkSetupNeeded, markSetupDone, runFullSetup, getVenvPythonExe, ensureSslPatch } from './python-setup'
 import { logger } from './logger'
 import { getProcessRunner, getPythonProcessRunner, getExtPythonExe, terminateProcessRunner, terminateAllProcessRunners } from './process-runner'
+import { buildExtensionSetupPayload, cudaVersionForDriverVersion, isSupportedExtensionSetup } from './process-extension-contract'
 import { getBuiltinExtensionsDir } from './builtin-sync'
 import { spawn, execFile } from 'child_process'
 import {
@@ -64,20 +65,10 @@ function detectGpuInfo(): Promise<GpuInfo> {
         const line   = out.trim().split('\n')[0].trim()        // e.g. "8.6, 551.61"
         const parts  = line.split(',').map(s => s.trim())
         const sm     = Math.round(parseFloat(parts[0] ?? '') * 10)  // → 86
-        // Derive max supported CUDA version from driver version
-        // Driver ≥ 520 → CUDA 11.8, ≥ 525 → 12.0, ≥ 530 → 12.1, ≥ 535 → 12.2,
-        // ≥ 545 → 12.3, ≥ 550 → 12.4, ≥ 555 → 12.5, ≥ 560 → 12.6
-        const driverMajor = parseInt((parts[1] ?? '').split('.')[0] ?? '0', 10)
-        let cudaVersion = 118  // safe minimum
-        if      (driverMajor >= 570) cudaVersion = 128  // Blackwell (RTX 50xx, sm_120)
-        else if (driverMajor >= 560) cudaVersion = 126
-        else if (driverMajor >= 555) cudaVersion = 125
-        else if (driverMajor >= 550) cudaVersion = 124
-        else if (driverMajor >= 545) cudaVersion = 123
-        else if (driverMajor >= 535) cudaVersion = 122
-        else if (driverMajor >= 530) cudaVersion = 121
-        else if (driverMajor >= 525) cudaVersion = 120
-        else if (driverMajor >= 520) cudaVersion = 118
+        // Derive the setup compatibility branch from the installed driver.
+        // NVIDIA's minor-version compatibility boundary is R580 for CUDA 13.x;
+        // R570–R579 remains on the CUDA 12.8 setup branch.
+        const cudaVersion = cudaVersionForDriverVersion(parts[1] ?? '')
         resolve({ sm: isNaN(sm) ? 86 : sm, cudaVersion, accelerator: 'cuda' })
       } else {
         resolve({ sm: 0, cudaVersion: 0, accelerator: 'cpu' })
@@ -94,6 +85,7 @@ function runExtensionSetup(
   gpuSm:       number,
   cudaVersion: number,
   onLog?:      (line: string) => void,
+  modelsDir?:  string,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const userData  = app.getPath('userData')
@@ -108,15 +100,16 @@ function runExtensionSetup(
     try { mkdirSync(pipCacheDir, { recursive: true }) } catch { /* pip creates it too */ }
 
     const accelerator = process.platform === 'darwin' && process.arch === 'arm64' ? 'mps' : gpuSm > 0 ? 'cuda' : 'cpu'
-    const args = JSON.stringify({
-      python_exe: pythonExe,
-      ext_dir: extDir,
-      gpu_sm: gpuSm,
-      cuda_version: cudaVersion,
+    const args = JSON.stringify(buildExtensionSetupPayload({
+      pythonExe,
+      extDir,
+      gpuSm,
+      cudaVersion,
       accelerator,
       platform: process.platform,
       arch: process.arch,
-    })
+      modelsDir,
+    }))
     const launcher = `
 import runpy
 import subprocess
@@ -908,7 +901,15 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     }[]
   }
 
-  function parseExtensionManifest(parsed: ParsedManifest, fallbackId: string, trustedRepos: Set<string>, builtin = false) {
+  function parseExtensionManifest(
+    parsed: ParsedManifest,
+    fallbackId: string,
+    trustedRepos: Set<string>,
+    builtin = false,
+    extensionDir?: string,
+  ) {
+    const processEntry = parsed.entry ?? 'processor.js'
+    const hasSetup = extensionDir !== undefined && existsSync(join(extensionDir, 'setup.py'))
     const common = {
       id:          parsed.id          ?? fallbackId,
       name:        parsed.displayName ?? parsed.name ?? fallbackId,
@@ -918,6 +919,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       trusted:     builtin || isTrustedSource(parsed.source, trustedRepos),
       source:      parsed.source,
       builtin,
+      repairable:  isSupportedExtensionSetup(parsed.type, processEntry, hasSetup),
     }
 
     const nodes = (parsed.nodes ?? []).map(n => ({
@@ -936,7 +938,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     }))
 
     if (parsed.type === 'process') {
-      return { ...common, type: 'process' as const, entry: parsed.entry ?? 'processor.js', nodes }
+      return { ...common, type: 'process' as const, entry: processEntry, nodes }
     }
 
     return { ...common, type: 'model' as const, nodes }
@@ -998,7 +1000,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
                 const parsed = JSON.parse(raw) as ParsedManifest
                 // Inject local:// source so the UI shows the Local badge
                 if (localSourcePath) parsed.source = `local://${localSourcePath}`
-                return parseExtensionManifest(parsed, entry.name, trustedRepos, isBuiltin)
+                return parseExtensionManifest(parsed, entry.name, trustedRepos, isBuiltin, entryPath)
               } catch { manifestError = 'invalid' }
             }
           }
@@ -1097,7 +1099,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       //    paths, so the folder must not move after setup. If anything dies
       //    mid-way, the marker + backup let the startup reconciler put the
       //    previous version back.
-      const extensionsDir = getSettings(app.getPath('userData')).extensionsDir
+      const { extensionsDir, modelsDir } = getSettings(app.getPath('userData'))
       await mkdir(extensionsDir, { recursive: true })
       const destDir    = resolveExtensionPathWithinRoot(extensionsDir, extensionId)
       const stagingDir = buildExtensionStagingPath(extensionsDir, extensionId, String(Date.now()))
@@ -1153,7 +1155,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
             await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
               logger.info(`[ext-setup] ${line}`)
               emit({ step: 'setting_up', message: line })
-            })
+            }, modelsDir)
           }
         } else if (isProcess) {
           // 7b. JS process extension: npm install if package.json present
@@ -1218,7 +1220,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       emit({ step: 'done', extensionId })
 
       const trustedRepos = await fetchTrustedRepos()
-      const ext = parseExtensionManifest(manifest, extensionId, trustedRepos)
+      const ext = parseExtensionManifest(manifest, extensionId, trustedRepos, false, destDir)
       return { success: true, extensionId, extension: ext }
 
     } catch (err) {
@@ -1271,16 +1273,23 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     }
   })
 
-  // Re-run setup.py for a model extension (creates the venv if missing)
+  // Re-run setup.py for a Python-backed extension (creates the venv if missing)
   ipcMain.handle('extensions:repair', async (_, extensionId: string) => {
     try {
       const safeExtensionId = assertSafeExtensionId(extensionId)
-      const extDir = resolveExtensionPathWithinRoot(getSettings(app.getPath('userData')).extensionsDir, safeExtensionId)
+      const { extensionsDir, modelsDir } = getSettings(app.getPath('userData'))
+      const extDir = resolveExtensionPathWithinRoot(extensionsDir, safeExtensionId)
       if (!existsSync(join(extDir, 'setup.py'))) {
         return { success: false, error: 'setup.py is missing from the extension folder — the install looks incomplete. Uninstall the extension and install it again.' }
       }
+      let processModelsDir: string | undefined
+      try {
+        const manifest = JSON.parse(await readFile(join(extDir, 'manifest.json'), 'utf-8')) as ParsedManifest
+        const entry = manifest.entry ?? 'processor.js'
+        if (manifest.type === 'process' && entry.endsWith('.py')) processModelsDir = modelsDir
+      } catch { /* Preserve legacy repair behavior for folders without a readable manifest. */ }
       const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
-      await runExtensionSetup(extDir, gpuSm, cudaVersion, (line) => logger.info(`[ext-repair] ${line}`))
+      await runExtensionSetup(extDir, gpuSm, cudaVersion, (line) => logger.info(`[ext-repair] ${line}`), processModelsDir)
       try {
         await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
       } catch { /* ignore if Python is not running yet */ }
@@ -1374,7 +1383,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       const trustedRepos = await fetchTrustedRepos()
       // Build manifest with localPath marker so the UI can identify local extensions
       const annotatedManifest = { ...manifest, source: `local://${localPath}` }
-      const ext = parseExtensionManifest(annotatedManifest, extensionId, trustedRepos)
+      const ext = parseExtensionManifest(annotatedManifest, extensionId, trustedRepos, false, localPath)
       return { success: true, extensionId, extension: ext, localPath }
 
     } catch (err) {
@@ -1397,7 +1406,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   // Run a process extension in an isolated worker thread
   ipcMain.handle('extensions:runProcess', async (_, extensionId: string, input: { filePath?: string; text?: string; texts?: (string | undefined)[]; nodeId?: string }, params: Record<string, unknown>) => {
     const userData        = app.getPath('userData')
-    const { extensionsDir, workspaceDir } = getSettings(userData)
+    const { extensionsDir, modelsDir, workspaceDir } = getSettings(userData)
 
     // Resolve extension directory: check built-ins first, then user extensions
     const builtinExtDir = join(getBuiltinExtensionsDir(), extensionId)
@@ -1418,7 +1427,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       let runner
       if (isPythonEntry) {
         const pythonExe = getExtPythonExe(extDir) ?? getVenvPythonExe(userData)
-        runner = getPythonProcessRunner(extensionId, pythonExe, extDir, entry, workspaceDir, app.getPath('temp'))
+        runner = getPythonProcessRunner(extensionId, pythonExe, extDir, entry, modelsDir, workspaceDir, app.getPath('temp'))
       } else {
         runner = getProcessRunner(extensionId, extDir, entry, workspaceDir, app.getPath('temp'))
       }

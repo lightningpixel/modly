@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { AnyExtension, ExtensionNode } from '@shared/types/electron.d'
 import { useNavStore } from '@shared/stores/navStore'
+import { getLocalSourcePath, localExtensionSetupMessage, supportsExtensionRepair } from '../utils'
 import {
   DownloadMap,
   ICONS,
@@ -41,6 +42,7 @@ export function ExtensionDrawer({
   const [syncError,   setSyncError]   = useState<string | null>(null)
 
   const isModel     = ext.type === 'model'
+  const repairable  = supportsExtensionRepair(ext)
   // Built-ins are corrupted-flagged too (builtin-sync repairs them on restart),
   // but they can't be deleted — show the banner without the delete action.
   const isCorrupted = !!ext.corrupted
@@ -50,8 +52,9 @@ export function ExtensionDrawer({
       : ext.manifestError === 'incomplete'
         ? 'A previous install of this extension never completed. Delete the folder, then install the extension again.'
         : 'This extension folder is incomplete (its manifest is missing) — usually the leftover of an interrupted install. Delete the folder, then install the extension again.'
-  const isLocal = typeof ext.source === 'string' && ext.source.startsWith('local://')
-  const localPath = isLocal ? ext.source!.replace('local://', '') : null
+  const localPath = getLocalSourcePath(ext)
+  const isLocal = localPath !== null
+  const localSetupMessage = localExtensionSetupMessage(ext)
   const { total, done, installing, hasAvailable } = extInstallSummary(ext, installedIds, downloading)
 
   useEffect(() => {
@@ -157,6 +160,12 @@ export function ExtensionDrawer({
                 <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
               </svg>
               <p className="text-[11px] text-red-400 break-all">{error}</p>
+            </div>
+          )}
+
+          {localSetupMessage && (
+            <div className="mb-5 px-3 py-2.5 rounded-lg bg-orange-950/20 border border-orange-800/30">
+              <p className="text-[11px] leading-5 text-orange-300/80">{localSetupMessage}</p>
             </div>
           )}
 
@@ -301,11 +310,11 @@ export function ExtensionDrawer({
             </button>
           )}
 
-          {isModel && !isCorrupted && (
+          {repairable && !isCorrupted && (
             <button
               onClick={handleRepair}
               disabled={repairing || disabled}
-              title="Repair — re-run the extension environment setup"
+              title="Repair — run setup.py for the extension environment"
               className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-[9px] text-xs font-medium border border-zinc-700/60 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {repairing ? (

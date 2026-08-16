@@ -37,6 +37,8 @@ export interface ModelExtension {
   builtin:      boolean
   source?:      string
   localPath?:   string
+  /** Host-confirmed setup.py route supported by the Repair action. */
+  repairable?:  boolean
   nodes:        ExtensionNode[]
   /** Folder exists but is not a loadable extension — see manifestError */
   corrupted?:   boolean
@@ -71,6 +73,8 @@ export interface ProcessExtension {
   builtin:      boolean
   source?:      string
   localPath?:   string
+  /** Host-confirmed setup.py route supported by the Repair action. */
+  repairable?:  boolean
   entry:        string
   nodes:        ExtensionNode[]
   /** Folder exists but is not a loadable extension — see manifestError */

@@ -27,7 +27,7 @@ interface ExtensionsStore {
 
   loadExtensions:    () => Promise<void>
   installFromGitHub: (url: string) => Promise<{ success: boolean; error?: string }>
-  installFromLocal:  () => Promise<{ success: boolean; error?: string; cancelled?: boolean }>
+  installFromLocal:  () => Promise<{ success: boolean; error?: string; cancelled?: boolean; extensionId?: string }>
   uninstall:         (extensionId: string) => Promise<{ success: boolean; error?: string }>
   reload:            () => Promise<void>
   clearInstallState: () => void

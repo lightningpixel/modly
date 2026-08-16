@@ -2,6 +2,7 @@ import { Worker }      from 'worker_threads'
 import { spawn }       from 'child_process'
 import { existsSync }  from 'fs'
 import { join }        from 'path'
+import { buildPythonProcessPayload } from './process-extension-contract'
 
 // ─── Worker code for JS process extensions ────────────────────────────────────
 
@@ -155,18 +156,35 @@ export class ProcessRunner implements IProcessRunner {
 
 // ─── Python ProcessRunner (subprocess, one process per run) ───────────────────
 //
-// Protocol — stdin:  one JSON line  { input, params, workspaceDir, tempDir }
+// Protocol — stdin:  one JSON line  { input, params, modelsDir, workspaceDir, tempDir }
 // Protocol — stdout: JSON lines     { type: 'progress'|'log'|'done'|'error', ... }
 
 export class PythonProcessRunner implements IProcessRunner {
   private pythonExe:    string
   private scriptPath:   string
+  private modelsDir:    string
   private workspaceDir: string
   private tempDir:      string
 
-  constructor(pythonExe: string, extDir: string, entry: string, workspaceDir: string, tempDir: string) {
+  constructor(pythonExe: string, extDir: string, entry: string, modelsDir: string, workspaceDir: string, tempDir: string) {
     this.pythonExe    = pythonExe
     this.scriptPath   = join(extDir, entry)
+    this.modelsDir    = modelsDir
+    this.workspaceDir = workspaceDir
+    this.tempDir      = tempDir
+  }
+
+  updateRuntime(
+    pythonExe: string,
+    extDir: string,
+    entry: string,
+    modelsDir: string,
+    workspaceDir: string,
+    tempDir: string,
+  ): void {
+    this.pythonExe    = pythonExe
+    this.scriptPath   = join(extDir, entry)
+    this.modelsDir    = modelsDir
     this.workspaceDir = workspaceDir
     this.tempDir      = tempDir
   }
@@ -177,19 +195,19 @@ export class PythonProcessRunner implements IProcessRunner {
     onProgress?: (percent: number, label: string) => void,
     onLog?:      (message: string) => void,
   ): Promise<ProcessResult> {
+    const payload = buildPythonProcessPayload(input, params, {
+      modelsDir:    this.modelsDir,
+      workspaceDir: this.workspaceDir,
+      tempDir:      this.tempDir,
+    })
+
     return new Promise((resolve, reject) => {
       const proc = spawn(this.pythonExe, [this.scriptPath], {
         stdio: ['pipe', 'pipe', 'pipe'],
       })
 
       // Send input as a single JSON line on stdin
-      proc.stdin.write(JSON.stringify({
-        input,
-        params,
-        nodeId:       input.nodeId ?? '',
-        workspaceDir: this.workspaceDir,
-        tempDir:      this.tempDir,
-      }) + '\n')
+      proc.stdin.write(JSON.stringify(payload) + '\n')
       proc.stdin.end()
 
       let stdoutBuf = ''
@@ -286,13 +304,21 @@ export function getPythonProcessRunner(
   pythonExe:    string,
   extDir:       string,
   entry:        string,
+  modelsDir:    string,
   workspaceDir: string,
   tempDir:      string,
 ): PythonProcessRunner {
-  if (!registry.has(extensionId)) {
-    registry.set(extensionId, new PythonProcessRunner(pythonExe, extDir, entry, workspaceDir, tempDir))
+  const existing = registry.get(extensionId)
+  if (existing instanceof PythonProcessRunner) {
+    existing.updateRuntime(pythonExe, extDir, entry, modelsDir, workspaceDir, tempDir)
+    return existing
   }
-  return registry.get(extensionId)! as PythonProcessRunner
+  if (!existing) {
+    const runner = new PythonProcessRunner(pythonExe, extDir, entry, modelsDir, workspaceDir, tempDir)
+    registry.set(extensionId, runner)
+    return runner
+  }
+  return existing as PythonProcessRunner
 }
 
 export function terminateProcessRunner(extensionId: string): void {

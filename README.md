@@ -106,6 +106,14 @@ Modly supports external model and process extensions. Each extension is a GitHub
 
 ![Install models](docs/install-models.png)
 
+### Python process storage paths
+
+When a Python process extension is installed from GitHub or repaired, Modly invokes its `setup.py` with the existing single JSON argument. In addition to the legacy fields, that object contains `models_dir`: the normalized, native absolute path configured as Modly's models directory.
+
+For each Python process run, the single JSON line written to standard input contains the normalized native absolute `modelsDir` alongside the existing host-provided `workspaceDir` and `tempDir` paths. The new storage-path fields do not expose the settings object, raw profiles, environment-derived paths, credentials, tokens, or hardware details; setup's existing platform and accelerator fields remain unchanged. JavaScript process extensions keep their existing context unchanged.
+
+A process extension is responsible for selecting its own subdirectory, provisioning and validating its assets, avoiding collisions with other extensions, and removing assets it no longer needs. Uninstalling an extension removes its extension directory only; Modly does not automatically remove process-owned assets from `modelsDir`.
+
 ---
 
 ## Workflows

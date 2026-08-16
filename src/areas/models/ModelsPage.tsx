@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
 import type { AnyExtension, ModelExtension } from '@shared/types/electron.d'
-import { formatModelName } from './utils'
+import { EXTENSION_REPOSITORY_REQUIREMENTS, extensionRemovalCopy, formatModelName } from './utils'
 import { ExtensionCard } from './components/ExtensionCard'
 import type { ExtensionNode } from './components/ExtensionCard'
 import { ExtensionDrawer } from './components/ExtensionDrawer'
@@ -221,6 +221,7 @@ export default function ModelsPage(): JSX.Element {
     const result = await installFromLocal()
     if ('cancelled' in result && result.cancelled) return   // user dismissed dialog
     if (!result.success) setGhErr(result.error ?? 'Installation failed')
+    else if (result.extensionId) setSelectedId(result.extensionId)
   }
 
   // ── Uninstall extension ──────────────────────────────────────────
@@ -354,7 +355,7 @@ export default function ModelsPage(): JSX.Element {
           <button
             onClick={handleLocalInstall}
             disabled={isInstalling}
-            title="Link a local extension folder"
+            title="Link source folder only; setup.py and npm install are not run"
             className="inline-flex items-center gap-2 px-3.5 py-2 rounded-[9px] text-xs font-medium border border-zinc-700/60 bg-white/[0.025] text-zinc-200 hover:bg-white/[0.06] hover:border-zinc-600 transition-colors whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" className="opacity-85">
@@ -364,6 +365,15 @@ export default function ModelsPage(): JSX.Element {
           </button>
         </div>
       </div>
+
+      {!showGHForm && ghErr && (
+        <div className="mx-7 mb-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-red-950/30 border border-red-800/30">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-red-400 shrink-0">
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+          <p className="text-[11px] text-red-400">{ghErr}</p>
+        </div>
+      )}
 
       {/* ── Toolbar ──────────────────────────────────────────────────────── */}
       <div className="flex items-center gap-3 px-7 pb-4 flex-wrap shrink-0">
@@ -537,7 +547,7 @@ export default function ModelsPage(): JSX.Element {
             )}
 
             <p className="text-[10px] text-zinc-600">
-              The repo must contain a <span className="font-mono text-zinc-500">manifest.json</span> and a <span className="font-mono text-zinc-500">generator.py</span> at its root.
+              {EXTENSION_REPOSITORY_REQUIREMENTS}
             </p>
           </div>
         </div>
@@ -638,6 +648,9 @@ export default function ModelsPage(): JSX.Element {
         const installedModels = ext?.type === 'model'
           ? ext.nodes.filter((n) => installedVariantIds.includes(`${uninstallTarget}/${n.id}`))
           : []
+        const removalCopy = ext
+          ? extensionRemovalCopy(ext, modelsToDelete.size)
+          : { title: `Uninstall “${uninstallTarget}”?`, body: 'The extension folder will be permanently deleted.', action: 'Uninstall' }
 
         return createPortal(
           <div
@@ -658,10 +671,10 @@ export default function ModelsPage(): JSX.Element {
                   </div>
                   <div className="flex flex-col gap-1 pt-0.5">
                     <h2 className="text-base font-semibold text-zinc-100 leading-tight">
-                      Uninstall &ldquo;{ext?.name ?? uninstallTarget}&rdquo;?
+                      {removalCopy.title}
                     </h2>
                     <p className="text-xs text-zinc-500 leading-relaxed">
-                      The extension folder will be permanently deleted.
+                      {removalCopy.body}
                     </p>
                   </div>
                 </div>
@@ -719,7 +732,7 @@ export default function ModelsPage(): JSX.Element {
                     onClick={() => handleUninstallExtension(uninstallTarget)}
                     className="flex-1 py-2.5 rounded-xl bg-accent hover:bg-accent-dark text-white text-sm font-semibold transition-colors shadow-lg shadow-accent/20"
                   >
-                    Uninstall
+                    {removalCopy.action}
                   </button>
                 </div>
               </div>
