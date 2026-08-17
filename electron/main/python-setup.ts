@@ -1,10 +1,11 @@
 import { BrowserWindow, app } from 'electron'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
-import { cp, rm, mkdir } from 'fs/promises'
+import { rm, mkdir } from 'fs/promises'
 import { join } from 'path'
 import { spawn, execSync } from 'child_process'
 import { createHash } from 'crypto'
 import { getSettings } from './settings-store'
+import { copyRuntimeTree } from './copy-runtime'
 
 const SETUP_VERSION = 3
 
@@ -176,7 +177,7 @@ async function ensureStableEmbeddedPython(userData: string, win: BrowserWindow):
       await rm(stableDir, { recursive: true, force: true })
     }
     await mkdir(stableDir, { recursive: true })
-    await cp(getEmbeddedPythonDir(), stableDir, { recursive: true, preserveTimestamps: true })
+    await copyRuntimeTree(getEmbeddedPythonDir(), stableDir)
     writeFileSync(versionFile, currentVersion, 'utf-8')
     console.log('[PythonSetup] Python runtime ready at:', stableDir)
   }

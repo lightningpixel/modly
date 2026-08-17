@@ -33,67 +33,20 @@ import {
   resolvePathWithinRoot,
 } from './extension-path-guard'
 import { validateInstallManifest } from './extension-install-utils'
+import { detectGpuInfo, describeGpuInfo, torchFlavorFor, type GpuInfo } from './gpu-detect'
+import { SETUP_LAUNCHER_SOURCE } from './setup-launcher'
 import { registerWorkspaceAssetLibraryIpcHandlers } from './artifact-registry-service'
 import { updatesSupported } from './updater'
 
 type WindowGetter = () => BrowserWindow | null
 const pExecFile = promisify(execFile)
 
-// ─── GPU detect (best-effort, no Python required) ─────────────────────────────
-
-interface GpuInfo {
-  sm: number
-  cudaVersion: number
-  accelerator: 'cuda' | 'mps' | 'cpu'
-}
-
-function detectGpuInfo(): Promise<GpuInfo> {
-  if (process.platform === 'darwin' && process.arch === 'arm64') {
-    return Promise.resolve({ sm: 0, cudaVersion: 0, accelerator: 'mps' })
-  }
-
-  return new Promise((resolve) => {
-    // Query compute cap + driver version in one call
-    const proc = spawn('nvidia-smi', ['--query-gpu=compute_cap,driver_version', '--format=csv,noheader'], {
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-    let out = ''
-    proc.stdout?.on('data', (d: Buffer) => { out += d.toString() })
-    proc.on('close', (code) => {
-      if (code === 0) {
-        const line   = out.trim().split('\n')[0].trim()        // e.g. "8.6, 551.61"
-        const parts  = line.split(',').map(s => s.trim())
-        const sm     = Math.round(parseFloat(parts[0] ?? '') * 10)  // → 86
-        // Derive max supported CUDA version from driver version
-        // Driver ≥ 520 → CUDA 11.8, ≥ 525 → 12.0, ≥ 530 → 12.1, ≥ 535 → 12.2,
-        // ≥ 545 → 12.3, ≥ 550 → 12.4, ≥ 555 → 12.5, ≥ 560 → 12.6
-        const driverMajor = parseInt((parts[1] ?? '').split('.')[0] ?? '0', 10)
-        let cudaVersion = 118  // safe minimum
-        if      (driverMajor >= 570) cudaVersion = 128  // Blackwell (RTX 50xx, sm_120)
-        else if (driverMajor >= 560) cudaVersion = 126
-        else if (driverMajor >= 555) cudaVersion = 125
-        else if (driverMajor >= 550) cudaVersion = 124
-        else if (driverMajor >= 545) cudaVersion = 123
-        else if (driverMajor >= 535) cudaVersion = 122
-        else if (driverMajor >= 530) cudaVersion = 121
-        else if (driverMajor >= 525) cudaVersion = 120
-        else if (driverMajor >= 520) cudaVersion = 118
-        resolve({ sm: isNaN(sm) ? 86 : sm, cudaVersion, accelerator: 'cuda' })
-      } else {
-        resolve({ sm: 0, cudaVersion: 0, accelerator: 'cpu' })
-      }
-    })
-    proc.on('error', () => resolve({ sm: 0, cudaVersion: 0, accelerator: 'cpu' }))
-  })
-}
-
 // ─── Run an extension's setup.py directly (no FastAPI needed) ─────────────────
 
 function runExtensionSetup(
-  extDir:      string,
-  gpuSm:       number,
-  cudaVersion: number,
-  onLog?:      (line: string) => void,
+  extDir: string,
+  gpu:    GpuInfo,
+  onLog?: (line: string) => void,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const userData  = app.getPath('userData')
@@ -107,113 +60,34 @@ function runExtensionSetup(
     const pipCacheDir = join(getSettings(userData).dependenciesDir, 'pip-cache')
     try { mkdirSync(pipCacheDir, { recursive: true }) } catch { /* pip creates it too */ }
 
-    const accelerator = process.platform === 'darwin' && process.arch === 'arm64' ? 'mps' : gpuSm > 0 ? 'cuda' : 'cpu'
+    const torchFlavor = torchFlavorFor(gpu.accelerator)
     const args = JSON.stringify({
       python_exe: pythonExe,
       ext_dir: extDir,
-      gpu_sm: gpuSm,
-      cuda_version: cudaVersion,
-      accelerator,
+      gpu_sm: gpu.sm,
+      cuda_version: gpu.cudaVersion,
+      accelerator: gpu.accelerator,
+      // Extensions that know about AMD branch on torch_flavor (the official
+      // hunyuan3d-mini one does). Those that don't get corrected by the ROCm
+      // shim in setup-launcher.ts instead.
+      torch_flavor: torchFlavor,
+      gfx_target: gpu.gfxTarget ?? '',
+      torch_index_url: gpu.torchIndexUrl ?? '',
       platform: process.platform,
       arch: process.arch,
     })
-    const launcher = `
-import runpy
-import subprocess
-import sys
-
-setup_py = sys.argv[1]
-setup_args = sys.argv[2:]
-
-_original_run = subprocess.run
-_original_check_call = subprocess.check_call
-_original_check_output = subprocess.check_output
-
-def _is_cuda_torch_index(value):
-    return isinstance(value, str) and value.startswith("https://download.pytorch.org/whl/cu")
-
-def _mentions_torch(command):
-    if not isinstance(command, (list, tuple)):
-        return False
-    return any(str(part).startswith(("torch==", "torchvision==", "torchaudio==")) for part in command)
-
-def _rewrite_command(command):
-    if sys.platform != "darwin" or not _mentions_torch(command):
-        return command
-    if not isinstance(command, (list, tuple)):
-        return command
-
-    rewritten = []
-    changed = False
-    i = 0
-    while i < len(command):
-        part = command[i]
-        text = str(part)
-        if text in ("--index-url", "-i", "--extra-index-url") and i + 1 < len(command) and _is_cuda_torch_index(str(command[i + 1])):
-            changed = True
-            i += 2
-            continue
-        if text.startswith("--index-url=") or text.startswith("--extra-index-url="):
-            value = text.split("=", 1)[1]
-            if _is_cuda_torch_index(value):
-                changed = True
-                i += 1
-                continue
-        rewritten.append(part)
-        i += 1
-
-    if changed:
-        print("[Modly setup compat] Removed CUDA-only PyTorch index on macOS; pip will use macOS wheels.", file=sys.stderr)
-        return rewritten
-    return command
-
-def _is_pip_command(command):
-    if not isinstance(command, (list, tuple)):
-        return False
-    return any("pip" in str(part).lower() for part in command[:3])
-
-def _strip_no_cache(command):
-    # Extension setup scripts often hardcode --no-cache-dir, which forces pip to
-    # re-download multi-GB wheels on every retry. Modly provides a shared cache
-    # via PIP_CACHE_DIR, so drop the flag and let pip use it.
-    if not _is_pip_command(command):
-        return command
-    if not any(str(part) == "--no-cache-dir" for part in command):
-        return command
-    print("[Modly setup compat] Removed --no-cache-dir so pip reuses the shared wheel cache.", file=sys.stderr)
-    return [part for part in command if str(part) != "--no-cache-dir"]
-
-def _transform_command(command):
-    return _strip_no_cache(_rewrite_command(command))
-
-def _patched_run(*args, **kwargs):
-    args = list(args)
-    if args:
-        args[0] = _transform_command(args[0])
-    return _original_run(*args, **kwargs)
-
-def _patched_check_call(*args, **kwargs):
-    args = list(args)
-    if args:
-        args[0] = _transform_command(args[0])
-    return _original_check_call(*args, **kwargs)
-
-def _patched_check_output(*args, **kwargs):
-    args = list(args)
-    if args:
-        args[0] = _transform_command(args[0])
-    return _original_check_output(*args, **kwargs)
-
-subprocess.run = _patched_run
-subprocess.check_call = _patched_check_call
-subprocess.check_output = _patched_check_output
-
-sys.argv = [setup_py] + setup_args
-runpy.run_path(setup_py, run_name="__main__")
-`
+    const launcher = SETUP_LAUNCHER_SOURCE
+    // The rewrite decision itself is made in gpu-detect.ts (and unit-tested
+    // there); the launcher above only applies what these carry.
     const proc = spawn(pythonExe, ['-c', launcher, setupPy, args], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env:   { ...process.env, PIP_CACHE_DIR: pipCacheDir },
+      env:   {
+        ...process.env,
+        PIP_CACHE_DIR:         pipCacheDir,
+        MODLY_TORCH_FLAVOR:    torchFlavor,
+        MODLY_TORCH_INDEX_URL: gpu.torchIndexUrl ?? '',
+        MODLY_TORCH_SPECS:     JSON.stringify(gpu.torchSpecs ?? []),
+      },
     })
 
     const handleLine = (line: string) => { if (line) onLog?.(line) }
@@ -1149,8 +1023,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
           // 7a. Python process extension: run setup.py if present (same as model extensions)
           if (existsSync(join(destDir, 'setup.py'))) {
             emit({ step: 'setting_up', message: 'Setting up Python environment…' })
-            const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
-            await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
+            const gpu = await detectGpuInfo({ onLog: (line) => logger.info(line) })
+            logger.info(`[ext-setup] ${describeGpuInfo(gpu)}`)
+            await runExtensionSetup(destDir, gpu, (line) => {
               logger.info(`[ext-setup] ${line}`)
               emit({ step: 'setting_up', message: line })
             })
@@ -1185,8 +1060,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
           // 7c. Model extension: run setup.py directly (no FastAPI required)
           if (existsSync(join(destDir, 'setup.py'))) {
             emit({ step: 'setting_up', message: 'Setting up Python environment…' })
-            const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
-            await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
+            const gpu = await detectGpuInfo({ onLog: (line) => logger.info(line) })
+            logger.info(`[ext-setup] ${describeGpuInfo(gpu)}`)
+            await runExtensionSetup(destDir, gpu, (line) => {
               logger.info(`[ext-setup] ${line}`)
               emit({ step: 'setting_up', message: line })
             })
@@ -1279,8 +1155,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       if (!existsSync(join(extDir, 'setup.py'))) {
         return { success: false, error: 'setup.py is missing from the extension folder — the install looks incomplete. Uninstall the extension and install it again.' }
       }
-      const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
-      await runExtensionSetup(extDir, gpuSm, cudaVersion, (line) => logger.info(`[ext-repair] ${line}`))
+      const gpu = await detectGpuInfo({ onLog: (line) => logger.info(line) })
+      logger.info(`[ext-repair] ${describeGpuInfo(gpu)}`)
+      await runExtensionSetup(extDir, gpu, (line) => logger.info(`[ext-repair] ${line}`))
       try {
         await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
       } catch { /* ignore if Python is not running yet */ }
