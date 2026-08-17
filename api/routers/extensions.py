@@ -3,6 +3,8 @@ import subprocess
 import sys
 from fastapi import APIRouter, HTTPException
 
+from services.local_paths import assert_safe_extension_id
+
 router = APIRouter(tags=["extensions"])
 
 
@@ -32,6 +34,11 @@ async def setup_extension(ext_id: str):
 
     if EXTENSIONS_DIR is None or not EXTENSIONS_DIR.exists():
         raise HTTPException(400, "EXTENSIONS_DIR not configured")
+
+    try:
+        ext_id = assert_safe_extension_id(ext_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
     ext_dir  = EXTENSIONS_DIR / ext_id
     setup_py = ext_dir / "setup.py"

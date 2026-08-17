@@ -2,7 +2,7 @@ import { app, BrowserWindow, shell, session } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { setupIpcHandlers } from './ipc-handlers'
-import { PythonBridge } from './python-bridge'
+import { getApiAuthHeaders, PythonBridge } from './python-bridge'
 import { logger, archiveCurrentSession } from './logger'
 import { initAutoUpdater } from './updater'
 import { syncBuiltinExtensions } from './builtin-sync'
@@ -93,6 +93,16 @@ app.whenReady().then(async () => {
 
   // Clear Chromium disk cache on startup to recover from any corruption
   await session.defaultSession.clearCache()
+
+  // Renderer fetches (useGLTF, splat viewer, <a download>, axios) cannot set
+  // a secret header themselves. Inject the session token for loopback only.
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: ['http://127.0.0.1:8765/*', 'http://localhost:8765/*'] },
+    (details, callback) => {
+      const headers = { ...details.requestHeaders, ...getApiAuthHeaders() }
+      callback({ requestHeaders: headers })
+    },
+  )
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)

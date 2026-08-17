@@ -5,6 +5,7 @@
 import { existsSync, readdirSync, statSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { getSettings } from './settings-store'
+import { getApiAuthHeaders } from './python-bridge'
 import { app } from 'electron'
 
 export interface DownloadProgress {
@@ -129,12 +130,13 @@ export async function downloadModelFromHF(
   if (includePrefixes && includePrefixes.length > 0) {
     url += `&include_prefixes=${encodeURIComponent(JSON.stringify(includePrefixes))}`
   }
+  const headers: Record<string, string> = { ...getApiAuthHeaders() }
   const hfToken = getSettings(app.getPath('userData')).hfToken
   if (hfToken) {
-    url += `&token=${encodeURIComponent(hfToken)}`
+    headers['X-HuggingFace-Token'] = hfToken
   }
 
-  const res = await net.fetch(url)
+  const res = await net.fetch(url, { headers })
   if (!res.ok) throw new Error(`HuggingFace download failed: HTTP ${res.status}`)
   if (!res.body) throw new Error('No response body from HF download stream')
 

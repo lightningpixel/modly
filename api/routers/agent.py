@@ -1,15 +1,25 @@
 """
 Agent chat endpoint — runs an Ollama-powered tool-use loop against Modly's API.
 """
+import os
 import re
 import uuid
 import httpx
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from services.api_guard import TOKEN_ENV
+
 router = APIRouter(prefix="/agent", tags=["agent"])
 
-MODLY_API = "http://localhost:8765"
+MODLY_API = "http://127.0.0.1:8765"
+
+
+def _modly_headers() -> dict[str, str]:
+    token = os.environ.get(TOKEN_ENV, "").strip()
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}", "X-Modly-Token": token}
 
 SYSTEM_PROMPT = """\
 You are Modly's built-in AI assistant, specialized in 3D modeling and workflow automation.
@@ -255,7 +265,8 @@ async def execute_tool(name: str, arguments: dict, context: dict) -> tuple[str, 
     """Execute a tool and return (result_text, action_payload).
     action_payload carries data the frontend needs to react (e.g. new mesh URL).
     """
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    headers = _modly_headers()
+    async with httpx.AsyncClient(timeout=60.0, headers=headers) as client:
         try:
             if name == "list_models":
                 r = await client.get(f"{MODLY_API}/model/all")

@@ -20,12 +20,36 @@ Requires Modly's FastAPI backend to be running on http://localhost:8765.
 
 import asyncio
 import mimetypes
+import os
+from pathlib import Path
+
 import httpx
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-API_BASE = "http://localhost:8765"
+API_BASE = os.environ.get("MODLY_API_URL", "http://127.0.0.1:8765")
+
+
+def _api_headers() -> dict[str, str]:
+    token = os.environ.get("MODLY_API_TOKEN", "").strip()
+    if not token:
+        candidates = [
+            Path.home() / "Library" / "Application Support" / "Modly" / "api-token",
+            Path(os.environ.get("APPDATA", "")) / "Modly" / "api-token",
+            Path.home() / ".config" / "Modly" / "api-token",
+        ]
+        for path in candidates:
+            if path.is_file():
+                try:
+                    token = path.read_text(encoding="utf-8").strip()
+                except OSError:
+                    continue
+                if token:
+                    break
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}", "X-Modly-Token": token}
 
 server = Server("modly")
 
@@ -148,12 +172,12 @@ async def list_tools() -> list[Tool]:
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=60.0, headers=_api_headers()) as client:
         try:
             result = await _dispatch(client, name, arguments)
         except httpx.ConnectError:
             result = (
-                "Cannot connect to Modly API at http://localhost:8765. "
+                f"Cannot connect to Modly API at {API_BASE}. "
                 "Make sure Modly is running."
             )
         except httpx.HTTPStatusError as e:

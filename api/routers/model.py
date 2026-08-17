@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from services.generator_registry import generator_registry, MODELS_DIR
 
@@ -124,6 +124,7 @@ async def cancel_hf_download(model_id: str):
 
 @router.get("/hf-download")
 async def hf_download(
+    request: Request,
     repo_id: str,
     model_id: str,
     skip_prefixes: Optional[str] = None,
@@ -168,8 +169,14 @@ async def hf_download(
         except KeyError:
             include_list = []
 
-    # Token: explicit query param > env var > None
-    hf_token = token or os.environ.get("HUGGING_FACE_HUB_TOKEN") or os.environ.get("HF_TOKEN") or None
+    # Prefer header (Electron) over leftover query param, then process env.
+    hf_token = (
+        request.headers.get("x-huggingface-token")
+        or token
+        or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        or os.environ.get("HF_TOKEN")
+        or None
+    )
     control = _new_download_control(model_id)
 
     async def stream():

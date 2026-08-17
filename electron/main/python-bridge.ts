@@ -1,7 +1,8 @@
 import { ChildProcess, spawn } from 'child_process'
 import { join } from 'path'
 import { app, BrowserWindow } from 'electron'
-import { existsSync, mkdirSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'fs'
+import { randomBytes } from 'crypto'
 import axios from 'axios'
 import { getSettings } from './settings-store'
 import { logger } from './logger'
@@ -10,6 +11,41 @@ import { cleanPythonEnv, getVenvPythonExe } from './python-setup'
 const API_PORT = 8765
 const API_HOST = '127.0.0.1'
 export const API_BASE_URL = `http://${API_HOST}:${API_PORT}`
+export const API_TOKEN_FILENAME = 'api-token'
+
+let apiToken = ''
+
+export function getApiToken(): string {
+  return apiToken
+}
+
+export function getApiAuthHeaders(): Record<string, string> {
+  if (!apiToken) return {}
+  return {
+    Authorization: `Bearer ${apiToken}`,
+    'X-Modly-Token': apiToken,
+  }
+}
+
+export const apiHttp = axios.create({ baseURL: API_BASE_URL })
+apiHttp.interceptors.request.use((config) => {
+  config.headers = { ...config.headers, ...getApiAuthHeaders() }
+  return config
+})
+
+function persistApiToken(userData: string, token: string): void {
+  const tokenPath = join(userData, API_TOKEN_FILENAME)
+  writeFileSync(tokenPath, token, { encoding: 'utf-8', mode: 0o600 })
+  try { chmodSync(tokenPath, 0o600) } catch { /* Windows ignores POSIX modes */ }
+}
+
+function ensureApiToken(userData: string): string {
+  if (!apiToken) {
+    apiToken = randomBytes(32).toString('hex')
+    persistApiToken(userData, apiToken)
+  }
+  return apiToken
+}
 
 export class PythonBridge {
   private process: ChildProcess | null = null
@@ -41,6 +77,8 @@ export class PythonBridge {
 
     const pythonExecutable = this.resolvePythonExecutable()
     const apiDir = this.resolveApiDir()
+    const userData = app.getPath('userData')
+    const token = ensureApiToken(userData)
 
     console.log('[PythonBridge] Starting FastAPI at', apiDir)
     console.log('[PythonBridge] Python executable:', pythonExecutable)
@@ -59,6 +97,7 @@ export class PythonBridge {
         SELECTED_MODEL_ID:      process.env['SELECTED_MODEL_ID'] ?? '',
         HUGGING_FACE_HUB_TOKEN: this.resolveHfToken(),
         HF_TOKEN:               this.resolveHfToken(),
+        MODLY_API_TOKEN:        token,
       },
       // On Unix, put the bridge in its own process group so every subprocess
       // it spawns (extension runners, etc.) inherits that group. On shutdown

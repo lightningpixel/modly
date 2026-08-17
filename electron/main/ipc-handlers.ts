@@ -8,7 +8,7 @@ import axios from 'axios'
 import * as tar from 'tar'
 import * as os from 'os'
 import { promisify } from 'util'
-import { PythonBridge, API_BASE_URL } from './python-bridge'
+import { PythonBridge, API_BASE_URL, apiHttp } from './python-bridge'
 import {
   isModelDownloaded,
   listDownloadedModels,
@@ -469,7 +469,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   ipcMain.handle('model:unloadAll', async (): Promise<{ success: boolean; error?: string }> => {
     try {
-      await axios.post(`${API_BASE_URL}/model/unload-all`, {}, { timeout: 10_000 })
+      await apiHttp.post('/model/unload-all', {}, { timeout: 10_000 })
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -481,7 +481,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
     // Unload the model and wait for confirmation so file handles are released
     try {
-      await axios.post(`${API_BASE_URL}/model/unload/${encodeURIComponent(modelId)}`, {}, { timeout: 10_000 })
+      await apiHttp.post(`/model/unload/${encodeURIComponent(modelId)}`, {}, { timeout: 10_000 })
       // Give the OS a moment to release file locks (Windows holds handles briefly after close)
       await new Promise(resolve => setTimeout(resolve, 1_500))
     } catch {
@@ -570,7 +570,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   ipcMain.handle('model:pauseDownload', async (_, modelId: string): Promise<{ success: boolean; error?: string }> => {
     try {
-      await axios.post(`${API_BASE_URL}/model/hf-download/pause`, null, {
+      await apiHttp.post('/model/hf-download/pause', null, {
         params: { model_id: modelId },
         timeout: 5000,
       })
@@ -582,7 +582,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   ipcMain.handle('model:cancelDownload', async (_, modelId: string): Promise<{ success: boolean; error?: string }> => {
     try {
-      await axios.post(`${API_BASE_URL}/model/hf-download/cancel`, null, {
+      await apiHttp.post('/model/hf-download/cancel', null, {
         params: { model_id: modelId },
         timeout: 5000,
       })
@@ -612,8 +612,8 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     if (result.canceled || !result.filePath) return { success: false }
 
     try {
-      const response = await axios.get(
-        `${API_BASE_URL}/export/${format}?path=${encodeURIComponent(meshPath)}`,
+      const response = await apiHttp.get(
+        `/export/${format}?path=${encodeURIComponent(meshPath)}`,
         { responseType: 'arraybuffer' }
       )
       await writeFile(result.filePath, Buffer.from(response.data as ArrayBuffer))
@@ -692,7 +692,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       // subprocesses spawned by ExtensionProcess._build_env() pick it up
       // without requiring a full app restart.
       try {
-        await axios.post(`${API_BASE_URL}/settings/hf-token`, { token: patch.hfToken }, { timeout: 3000 })
+        await apiHttp.post('/settings/hf-token', { token: patch.hfToken }, { timeout: 3000 })
       } catch { /* FastAPI may not be running yet — ignore */ }
     }
     return updated
@@ -1211,7 +1211,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       // Hot-reload Python so it picks up the new/updated model extension
       if (!isProcess) {
         try {
-          await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
+          await apiHttp.post('/extensions/reload', {}, { timeout: 10_000 })
         } catch { /* Python might not be running yet */ }
       }
 
@@ -1263,7 +1263,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       }
       // Hot-reload Python so it stops using the deleted model extension
       try {
-        await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
+        await apiHttp.post('/extensions/reload', {}, { timeout: 10_000 })
       } catch { /* ignore if Python is not running */ }
       return { success: true }
     } catch (err) {
@@ -1282,7 +1282,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
       await runExtensionSetup(extDir, gpuSm, cudaVersion, (line) => logger.info(`[ext-repair] ${line}`))
       try {
-        await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
+        await apiHttp.post('/extensions/reload', {}, { timeout: 10_000 })
       } catch { /* ignore if Python is not running yet */ }
       return { success: true }
     } catch (err: any) {
@@ -1366,7 +1366,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
       // 4. Hot-reload Python registry so it picks up the new extension
       try {
-        await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
+        await apiHttp.post('/extensions/reload', {}, { timeout: 10_000 })
       } catch { /* Python might not be running yet */ }
 
       emit({ step: 'done', extensionId })
@@ -1387,7 +1387,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   ipcMain.handle('extensions:reload', async () => {
     terminateAllProcessRunners()
     try {
-      const res = await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
+      const res = await apiHttp.post('/extensions/reload', {}, { timeout: 10_000 })
       return { success: true, errors: (res.data as { errors?: Record<string, string> }).errors ?? {} }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -1455,7 +1455,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   // Update FastAPI paths at runtime (without restarting)
   ipcMain.handle('api:updatePaths', async (_event, patch: { modelsDir?: string; workspaceDir?: string; extensionsDir?: string }) => {
     try {
-      await axios.post(`${API_BASE_URL}/settings/paths`, {
+      await apiHttp.post('/settings/paths', {
         models_dir:     patch.modelsDir,
         workspace_dir:  patch.workspaceDir,
         extensions_dir: patch.extensionsDir,
