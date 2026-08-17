@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response, FileResponse
 
 from services.generator_registry import WORKSPACE_DIR
+from services.local_paths import resolve_workspace_file
 
 router = APIRouter(tags=["export"])
 
@@ -16,9 +17,10 @@ def export_mesh(fmt: str, path: str):
     if fmt not in SUPPORTED:
         raise HTTPException(400, f"Unsupported format: {fmt}. Supported: {', '.join(SUPPORTED)}")
 
-    full_path = (WORKSPACE_DIR / path).resolve()
-    if not str(full_path).startswith(str(WORKSPACE_DIR.resolve())):
-        raise HTTPException(400, "Invalid path")
+    try:
+        full_path = resolve_workspace_file(WORKSPACE_DIR, path)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if not full_path.exists():
         raise HTTPException(404, f"File not found: {path}")
 

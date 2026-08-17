@@ -22,6 +22,7 @@ from urllib.parse import quote
 from pydantic import BaseModel
 
 from services.generator_registry import WORKSPACE_DIR
+from services.local_paths import resolve_readable_mesh_path, resolve_workspace_file
 
 router = APIRouter(tags=["optimize"])
 
@@ -47,16 +48,10 @@ def _require_pymeshlab():
 
 
 def _resolve_input_path(raw_path: str) -> Path:
-    candidate = Path(raw_path)
-    if candidate.is_absolute():
-        resolved = candidate.resolve()
-        if not resolved.exists():
-            raise HTTPException(404, f"File not found: {raw_path}")
-        return resolved
-
-    resolved = (WORKSPACE_DIR / raw_path).resolve()
-    if not str(resolved).startswith(str(WORKSPACE_DIR.resolve())):
-        raise HTTPException(400, "Invalid path")
+    try:
+        resolved = resolve_readable_mesh_path(WORKSPACE_DIR, raw_path)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if not resolved.exists():
         raise HTTPException(404, f"File not found: {raw_path}")
     return resolved
@@ -404,10 +399,15 @@ async def import_mesh_by_path(body: ImportByPathRequest):
     if ext not in ("glb", "obj", "stl", "ply", "splat"):
         raise HTTPException(400, f"Unsupported format: {ext}")
 
-    # Gaussian Splat: serve a .splat as-is, convert a GS .ply to .splat.
-    # The viewer detects splats by the .splat/.ply extension in the served URL.
+    def _imported(src: Path, dest_name: str) -> str:
+        tmp_dir = tempfile.mkdtemp(prefix="modly_import_")
+        dest = Path(tmp_dir) / dest_name
+        shutil.copy2(src, dest)
+        return f"/optimize/serve-file?path={quote(str(dest))}"
+
+    # Gaussian Splat: copy into a Modly temp dir so serve-file stays jailed.
     if ext == "splat":
-        return {"url": f"/optimize/serve-file?path={quote(str(file_path))}"}
+        return {"url": _imported(file_path, "splat.splat")}
 
     if ext == "ply" and _is_gaussian_ply(file_path):
         tmp_dir = tempfile.mkdtemp(prefix="modly_import_")
@@ -419,8 +419,7 @@ async def import_mesh_by_path(body: ImportByPathRequest):
         return {"url": f"/optimize/serve-file?path={quote(output_path)}"}
 
     if ext == "glb":
-        # Serve the original file directly — no copy
-        return {"url": f"/optimize/serve-file?path={quote(str(file_path))}"}
+        return {"url": _imported(file_path, "mesh.glb")}
 
     # Mesh ply / obj / stl: convert to GLB in a temp directory (not the workspace)
     tmp_dir = tempfile.mkdtemp(prefix="modly_import_")
@@ -438,7 +437,10 @@ _SERVE_MEDIA_TYPES = {
 
 @router.get("/serve-file")
 def serve_file(path: str):
-    file_path = Path(path)
+    try:
+        file_path = resolve_readable_mesh_path(WORKSPACE_DIR, path)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if not file_path.is_file():
         raise HTTPException(404, "File not found")
     media_type = _SERVE_MEDIA_TYPES.get(file_path.suffix.lower())
@@ -455,10 +457,11 @@ def ply_to_splat(path: str):
     as-is; a GS .ply is normalised + converted (cached by mtime + conv version).
     """
     import services.generator_registry as reg  # dynamic: workspace dir may change at runtime
-    workspace = reg.WORKSPACE_DIR.resolve()
-    src = (workspace / path).resolve()
-    if not str(src).startswith(str(workspace)):
-        raise HTTPException(400, "Invalid path")
+    workspace = reg.WORKSPACE_DIR
+    try:
+        src = resolve_workspace_file(workspace, path)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if not src.is_file():
         raise HTTPException(404, "File not found")
 
@@ -482,9 +485,10 @@ def export_mesh(path: str, format: str):
     if format not in ("obj", "stl", "ply"):
         raise HTTPException(400, "Supported formats: obj, stl, ply")
 
-    input_path = (WORKSPACE_DIR / path).resolve()
-    if not str(input_path).startswith(str(WORKSPACE_DIR.resolve())):
-        raise HTTPException(400, "Invalid path")
+    try:
+        input_path = resolve_workspace_file(WORKSPACE_DIR, path)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if not input_path.exists():
         raise HTTPException(404, f"File not found: {path}")
 

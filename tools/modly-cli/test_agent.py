@@ -537,5 +537,30 @@ class ParserTests(unittest.TestCase):
         self.assertNotIn("\n    batch", help_text)
 
 
+class ApiAuthTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        agent._CLI_TOKEN = ""
+
+    def test_api_headers_include_cli_token(self) -> None:
+        agent._CLI_TOKEN = "abc123"
+        headers = agent._api_headers({"Content-Type": "application/json"})
+        self.assertEqual(headers["Authorization"], "Bearer abc123")
+        self.assertEqual(headers["X-Modly-Token"], "abc123")
+        self.assertEqual(headers["Content-Type"], "application/json")
+
+    def test_reads_token_file_from_user_data(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            token_path = root / "Modly" / "api-token"
+            token_path.parent.mkdir(parents=True)
+            token_path.write_text("from-file\n", encoding="utf-8")
+            with patch.object(agent, "_modly_user_data_dirs", return_value=[token_path.parent]), patch.dict(os.environ, {"MODLY_API_TOKEN": ""}, clear=False):
+                self.assertEqual(agent._resolve_api_token(), "from-file")
+
+    def test_parser_accepts_token_flag(self) -> None:
+        args = agent.build_parser().parse_args(["--token", "s3cret", "health"])
+        self.assertEqual(args.token, "s3cret")
+
+
 if __name__ == "__main__":
     unittest.main()

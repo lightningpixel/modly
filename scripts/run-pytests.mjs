@@ -34,4 +34,8 @@ const result = spawnSync(cmd, [...prefix, '-m', 'unittest', 'discover', '-s', 't
   cwd: apiDir,
   stdio: 'inherit',
 })
-process.exit(result.status ?? 1)
+if ((result.status ?? 1) !== 0) process.exit(result.status ?? 1)
+
+const cliTest = join(dirname(fileURLToPath(import.meta.url)), '..', 'tools', 'modly-cli', 'test_agent.py')
+const cli = spawnSync(cmd, [...prefix, cliTest], { stdio: 'inherit' })
+process.exit(cli.status ?? 1)

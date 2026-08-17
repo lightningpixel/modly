@@ -11,6 +11,7 @@ import argparse
 import json
 import mimetypes
 import os
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -38,6 +39,7 @@ def _float_env(primary: str, fallback: str, default: float) -> float:
 
 
 DEFAULT_BASE_URL = os.environ.get("MODLY_API_URL", "http://127.0.0.1:8765")
+_CLI_TOKEN = ""
 DEFAULT_TIMEOUT_SECONDS = _int_env("MODLY_CLI_TIMEOUT", "MODLY_AGENT_TIMEOUT", 1800)
 DEFAULT_POLL_SECONDS = _float_env("MODLY_CLI_POLL_SECONDS", "MODLY_AGENT_POLL_SECONDS", 2.0)
 EXPORT_FORMATS = ("glb", "stl", "obj", "ply")
@@ -70,7 +72,7 @@ def _request_json(
     data: bytes | None = None,
     headers: dict[str, str] | None = None,
 ) -> Any:
-    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+    req = urllib.request.Request(url, data=data, method=method, headers=_api_headers(headers))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
@@ -88,7 +90,8 @@ def _request_json(
 def _download(url: str, dest: Path, *, timeout: float) -> int:
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp, dest.open("wb") as fh:
+        req = urllib.request.Request(url, headers=_api_headers())
+        with urllib.request.urlopen(req, timeout=timeout) as resp, dest.open("wb") as fh:
             total = 0
             while True:
                 chunk = resp.read(1024 * 1024)
@@ -297,12 +300,17 @@ def _default_python(api_dir: Path) -> Path | None:
     return None
 
 
-def _load_modly_settings() -> dict[str, Any]:
-    candidates: list[Path] = []
+def _modly_user_data_dirs() -> list[Path]:
+    dirs: list[Path] = [Path.home() / "Library" / "Application Support" / "Modly"]
     for appdata in _windows_env_paths("APPDATA"):
-        candidates.append(appdata / "Modly" / "settings.json")
-    candidates.append(Path.home() / ".config" / "Modly" / "settings.json")
-    for path in candidates:
+        dirs.append(appdata / "Modly")
+    dirs.append(Path.home() / ".config" / "Modly")
+    return dirs
+
+
+def _load_modly_settings() -> dict[str, Any]:
+    for directory in _modly_user_data_dirs():
+        path = directory / "settings.json"
         if path.exists():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
@@ -310,6 +318,45 @@ def _load_modly_settings() -> dict[str, Any]:
             except (OSError, json.JSONDecodeError):
                 return {}
     return {}
+
+
+def _read_token_file() -> str:
+    for directory in _modly_user_data_dirs():
+        path = directory / "api-token"
+        if path.is_file():
+            try:
+                token = path.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if token:
+                return token
+    return ""
+
+
+def _resolve_api_token() -> str:
+    if _CLI_TOKEN:
+        return _CLI_TOKEN
+    env = os.environ.get("MODLY_API_TOKEN", "").strip()
+    if env:
+        return env
+    return _read_token_file()
+
+
+def _api_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
+    headers = dict(extra or {})
+    token = _resolve_api_token()
+    if token:
+        headers.setdefault("Authorization", f"Bearer {token}")
+        headers.setdefault("X-Modly-Token", token)
+    return headers
+
+
+def _ensure_serve_token(env: dict[str, str]) -> str:
+    token = (env.get("MODLY_API_TOKEN") or os.environ.get("MODLY_API_TOKEN") or "").strip()
+    if not token:
+        token = secrets.token_hex(32)
+    env["MODLY_API_TOKEN"] = token
+    return token
 
 
 def _resolve_serve_config(args: argparse.Namespace) -> tuple[Path, Path, dict[str, str], list[str], str]:
@@ -333,6 +380,9 @@ def _resolve_serve_config(args: argparse.Namespace) -> tuple[Path, Path, dict[st
         "HUGGING_FACE_HUB_TOKEN": hf_token,
         "HF_TOKEN": hf_token,
     })
+    _ensure_serve_token(env)
+    if getattr(args, "allow_remote", False) or args.host not in {"127.0.0.1", "localhost", "::1"}:
+        env["MODLY_API_ALLOW_REMOTE"] = "1"
     cmd = [str(python), "-m", "uvicorn", "main:app", "--host", args.host, "--port", str(args.port)]
     base_url = f"http://{args.host}:{args.port}"
     return api_dir, python, env, cmd, base_url
@@ -1050,12 +1100,14 @@ def cmd_serve(args: argparse.Namespace) -> int:
     api_dir, _python, env, cmd, base_url = _resolve_serve_config(args)
     public_env = {k: env.get(k, "") for k in ["MODELS_DIR", "WORKSPACE_DIR", "EXTENSIONS_DIR", "SELECTED_MODEL_ID"]}
     meta = {"dev_only": True, "canonical": False}
+    payload = {"ok": True, "cmd": cmd, "cwd": str(api_dir), "base_url": base_url, "env": public_env, "token": env.get("MODLY_API_TOKEN", ""), "meta": meta}
     if args.print_command:
-        _json_print({"ok": True, "cmd": cmd, "cwd": str(api_dir), "base_url": base_url, "env": public_env, "meta": meta}, compact=args.compact)
+        _json_print(payload, compact=args.compact)
         return 0
     proc = _start_backend(cmd, api_dir=api_dir, env=env, detach=args.detach)
     if args.detach:
-        _json_print({"ok": True, "started": True, "pid": proc.pid, "base_url": base_url, "cmd": cmd, "cwd": str(api_dir), "env": public_env, "meta": meta}, compact=args.compact)
+        payload.update({"started": True, "pid": proc.pid})
+        _json_print(payload, compact=args.compact)
         return 0
     return int(proc.wait())
 
@@ -1075,11 +1127,14 @@ def cmd_ensure_server(args: argparse.Namespace) -> int:
         return 0
     api_dir, _python, env, cmd, resolved_url = _resolve_serve_config(args)
     public_env = {k: env.get(k, "") for k in ["MODELS_DIR", "WORKSPACE_DIR", "EXTENSIONS_DIR", "SELECTED_MODEL_ID"]}
+    payload = {"ok": True, "started": False, "base_url": resolved_url, "cmd": cmd, "cwd": str(api_dir), "env": public_env, "token": env.get("MODLY_API_TOKEN", ""), "meta": meta}
     if args.print_command:
-        _json_print({"ok": True, "started": False, "would_start": True, "base_url": resolved_url, "cmd": cmd, "cwd": str(api_dir), "env": public_env, "meta": meta}, compact=args.compact)
+        payload["would_start"] = True
+        _json_print(payload, compact=args.compact)
         return 0
     proc = _start_backend(cmd, api_dir=api_dir, env=env, detach=args.detach)
-    _json_print({"ok": True, "started": True, "pid": proc.pid, "base_url": resolved_url, "cmd": cmd, "cwd": str(api_dir), "env": public_env, "meta": meta}, compact=args.compact)
+    payload.update({"started": True, "pid": proc.pid})
+    _json_print(payload, compact=args.compact)
     if not args.detach:
         return int(proc.wait())
     return 0
@@ -1176,6 +1231,7 @@ def _add_serve_options(parser: argparse.ArgumentParser, *, include_start: bool =
     parser.add_argument("--extensions-dir", help="Extensions directory for the backend")
     parser.add_argument("--model", help="Initial SELECTED_MODEL_ID")
     parser.add_argument("--hf-token", help="Hugging Face token for gated models")
+    parser.add_argument("--allow-remote", action="store_true", help="Allow non-loopback Host/Origin (use with --token)")
     parser.add_argument("--detach", action="store_true", help="Start in background and print pid")
     parser.add_argument("--print-command", action="store_true", help="Print resolved command/env without starting")
 
@@ -1186,6 +1242,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Tiny stdlib-only CLI for agents calling a running Modly desktop API.",
     )
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help=f"Modly API URL (default: {DEFAULT_BASE_URL})")
+    parser.add_argument("--token", default=os.environ.get("MODLY_API_TOKEN", ""), help="API token (default: MODLY_API_TOKEN or Electron userData/api-token)")
     parser.add_argument("--request-timeout", type=float, default=30, help="Per-request timeout in seconds (default: 30)")
     parser.add_argument("--compact", action="store_true", help="Print compact one-line JSON")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress output; final JSON is still printed")
@@ -1332,6 +1389,8 @@ def main(argv: list[str] | None = None) -> int:
     args = None
     try:
         args = parser.parse_args(argv)
+        global _CLI_TOKEN
+        _CLI_TOKEN = str(getattr(args, "token", "") or "").strip()
         return int(args.func(args))
     except ModlyCliError as exc:
         _json_print({"ok": False, "code": exc.code, "message": exc.message, "error": exc.message}, compact=getattr(args, "compact", False) if args else False)

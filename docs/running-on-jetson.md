@@ -245,9 +245,17 @@ WORKSPACE_DIR=$HOME/.modly/workspace \
 Check it (from the Jetson, or from another machine using the Jetson's IP):
 
 ```bash
-curl http://127.0.0.1:8000/health        # {"status":"ok"}
+curl http://127.0.0.1:8000/health        # {"status":"ok","auth":"off"}
 curl http://127.0.0.1:8000/model/all     # lists hunyuan3d-mini/generate
 curl http://127.0.0.1:8000/extensions/errors   # {} == no load errors
+```
+
+If this uvicorn is reachable from other machines, set a token before starting it:
+
+```bash
+export MODLY_API_TOKEN=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+export MODLY_API_ALLOW_REMOTE=1
+# then pass: -H "Authorization: Bearer $MODLY_API_TOKEN"
 ```
 
 ---

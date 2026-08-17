@@ -14,7 +14,9 @@ metadata:
 
 ## Overview
 
-Modly exposes a local API at `http://127.0.0.1:8765` while the official desktop app is running. The stdlib-only CLI at `tools/modly-cli/agent.py` is an agent helper over the canonical automation contract:
+Modly exposes a local API at `http://127.0.0.1:8765` while the official desktop app is running. The desktop process authenticates that API with a per-session bearer token. The CLI sends it automatically from, in order: `--token`, `MODLY_API_TOKEN`, or `api-token` in Electron userData (`~/Library/Application Support/Modly` on macOS, `%APPDATA%/Modly` on Windows, `~/.config/Modly` on Linux). `GET /health` stays unauthenticated so readiness checks still work.
+
+The stdlib-only CLI at `tools/modly-cli/agent.py` is an agent helper over the canonical automation contract:
 
 - `health`
 - `model`
