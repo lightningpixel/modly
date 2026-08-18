@@ -14,6 +14,27 @@
       "output": "mesh",
       "params_schema": [
         {
+          "id": "model_name",
+          "label": "Name this model (optional)",
+          "type": "text",
+          "default": "",
+          "description": "Used for the file name, e.g. 'brass floor lamp' becomes brass-floor-lamp-4f2a.glb. Leave it blank for a dated name."
+        },
+        {
+          "id": "project",
+          "label": "Which game or project is this for? (optional)",
+          "type": "text",
+          "default": "",
+          "description": "Files are filed under a folder of this name, so the Library groups a game's models together instead of one long list."
+        },
+        {
+          "id": "tags",
+          "label": "Tags (optional, comma separated)",
+          "type": "text",
+          "default": "",
+          "description": "Saved with the model. The exporter adds what it can tell on its own — rigged, animated, textured, how heavy it is."
+        },
+        {
           "id": "export_format",
           "label": "Export Format",
           "type": "select",
