@@ -1,37 +1,22 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useOutsideClick } from '@shared/hooks/useOutsideClick'
+import { appliedSomething } from '@shared/services/agentHistory'
 import { useAppStore } from '@shared/stores/appStore'
-import { useAgentStore } from '@shared/stores/agentStore'
+import { useAgentStore, providerBaseUrl } from '@shared/stores/agentStore'
+import { ModelLibraryModal } from '@shared/components/ui/ModelLibraryModal'
 import { useWorkflowsStore } from '@shared/stores/workflowsStore'
-import { useExtensionsStore } from '@shared/stores/extensionsStore'
-import { useWorkflowRunStore } from '@areas/workflows/workflowRunStore'
-import { buildAllWorkflowExtensions } from '@areas/workflows/mockExtensions'
+import { useWorkflowRunStore, pauseKind } from '@areas/workflows/workflowRunStore'
+import {
+  sendUserMessage, stopAgent, clearAgentChat,
+  newConversation, switchConversation, deleteConversation,
+} from '@shared/services/agentChat'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 import type { ThinkingMode } from '@shared/stores/agentStore'
 import type { Workflow } from '@shared/types/electron.d'
-
-interface Message {
-  id: string
-  role: 'user' | 'assistant'
-  content: string
-  thinking?: string
-  imageDataUrls?: string[]
-  actions?: ActionDone[]
-}
-
-interface ActionDone {
-  tool: string
-  result: string
-  payload?: {
-    type: string
-    url?: string
-    face_count?: number
-    workflow_id?: string
-    workflow_name?: string
-    workflow?: Omit<Workflow, 'id' | 'createdAt' | 'updatedAt'>
-  } | null
-}
+import { useChatStore } from '@shared/stores/chatStore'
+import type { ChatMessage as Message, ActionDone } from '@shared/stores/chatStore'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -70,16 +55,28 @@ function ProseMessage({ content }: { content: string }): JSX.Element {
 
 // ─── Actions card ─────────────────────────────────────────────────────────────
 
+// Keep in sync with TOOLS in api/routers/agent.py — an unmapped tool falls back
+// to its raw snake_case name in the actions card.
 const TOOL_LABELS: Record<string, string> = {
-  decimate_mesh:        'Decimated mesh',
-  smooth_mesh:          'Smoothed mesh',
-  list_models:          'Listed models',
-  unload_models:        'Unloaded models',
-  get_mesh_info:        'Inspected mesh',
-  get_generation_status:'Checked generation',
-  list_workflows:       'Listed workflows',
-  run_workflow:         'Ran workflow',
-  create_workflow:      'Created workflow',
+  decimate_mesh:         'Decimated mesh',
+  smooth_mesh:           'Smoothed mesh',
+  scale_mesh:            'Scaled mesh',
+  rotate_mesh:           'Rotated mesh',
+  export_mesh:           'Exported mesh',
+  unload_models:         'Unloaded models',
+  list_workflows:        'Listed workflows',
+  get_workflow_details:  'Inspected workflow',
+  get_extension_params:  'Read extension params',
+  get_extension_errors:  'Checked extension errors',
+  run_workflow:          'Ran workflow',
+  continue_workflow:     'Resumed workflow',
+  create_workflow:       'Created workflow',
+  update_workflow:       'Updated workflow',
+  set_param:             'Set parameter',
+  delete_workflow:       'Deleted workflow',
+  fix_workflow_wiring:   'Connected nodes',
+  remember:              'Saved to memory',
+  recall:                'Read memory',
 }
 
 function ActionsCard({ actions, onUndo }: { actions: ActionDone[]; onUndo?: () => void }): JSX.Element {
@@ -143,13 +140,20 @@ function ActionsCard({ actions, onUndo }: { actions: ActionDone[]; onUndo?: () =
 
 // ─── Feedback row ─────────────────────────────────────────────────────────────
 
-function FeedbackRow({ content }: { content: string }): JSX.Element {
+function FeedbackRow({ content, onRate }: { content: string; onRate?: (rating: 'good' | 'bad') => void }): JSX.Element {
   const [copied, setCopied] = useState(false)
+  const [rated, setRated]   = useState<'good' | 'bad' | null>(null)
 
   function handleCopy() {
     navigator.clipboard.writeText(content)
     setCopied(true)
     setTimeout(() => setCopied(false), 1500)
+  }
+
+  function handleRate(rating: 'good' | 'bad') {
+    if (rated) return
+    setRated(rating)
+    onRate?.(rating)
   }
 
   return (
@@ -169,13 +173,21 @@ function FeedbackRow({ content }: { content: string }): JSX.Element {
           </svg>
         )}
       </button>
-      <button title="Good response" className="text-zinc-600 hover:text-zinc-400 transition-colors">
+      <button
+        title="Good response"
+        onClick={() => handleRate('good')}
+        className={`transition-colors ${rated === 'good' ? 'text-emerald-400' : rated ? 'text-zinc-800' : 'text-zinc-600 hover:text-zinc-400'}`}
+      >
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z" />
           <path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" />
         </svg>
       </button>
-      <button title="Bad response" className="text-zinc-600 hover:text-zinc-400 transition-colors">
+      <button
+        title="Bad response"
+        onClick={() => handleRate('bad')}
+        className={`transition-colors ${rated === 'bad' ? 'text-red-400' : rated ? 'text-zinc-800' : 'text-zinc-600 hover:text-zinc-400'}`}
+      >
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3H10z" />
           <path d="M17 2h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17" />
@@ -218,22 +230,137 @@ function ThinkingBlock({ content }: { content: string }): JSX.Element {
 // ─── Workflow progress card ────────────────────────────────────────────────────
 
 function WorkflowProgressCard({ name }: { name: string }): JSX.Element {
-  const runState = useWorkflowRunStore((s) => s.runState)
+  const runState        = useWorkflowRunStore((s) => s.runState)
+  const waitStates      = useWorkflowRunStore((s) => s.waitStates)
+  const runningBranchId = useWorkflowRunStore((s) => s.runningBranchId)
   const pct = runState.blockProgress
+
+  // A Wait handoff and a loop boundary both report status 'paused'; only
+  // pauseKind tells them apart, and resuming the wrong way is a silent no-op.
+  const pause      = pauseKind({ runState, runningBranchId, waitStates })
+  const loopPaused = pause?.kind === 'loop'
+  const isPaused   = pause !== null
+
+  function handleContinue() {
+    const st = useWorkflowRunStore.getState()
+    if (pause?.kind === 'loop')      st.continueWhile()
+    else if (pause?.kind === 'wait') void st.continueRun(pause.waitId)
+  }
+
   return (
     <div className="rounded-xl border border-zinc-700/50 bg-zinc-800/40 px-3 py-2.5 flex flex-col gap-2">
       <div className="flex items-center justify-between text-[11px]">
         <div className="flex items-center gap-2">
-          <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse shrink-0" />
+          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${isPaused ? 'bg-amber-400' : 'bg-accent animate-pulse'}`} />
           <span className="text-zinc-300 font-medium truncate">{name}</span>
         </div>
-        <span className="text-zinc-500 shrink-0">{pct}%</span>
+        <span className="text-zinc-500 shrink-0">{isPaused ? 'paused' : `${pct}%`}</span>
       </div>
       <div className="h-0.5 bg-zinc-700 rounded-full overflow-hidden">
         <div className="h-full bg-accent rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
       </div>
       {runState.blockStep && (
         <p className="text-[10px] text-zinc-500 truncate">{runState.blockStep}</p>
+      )}
+      {isPaused && (
+        <div className="flex gap-2 pt-0.5">
+          <button
+            onClick={handleContinue}
+            className="px-2.5 py-1 rounded-lg bg-accent/15 border border-accent/40 text-accent text-[10.5px] hover:bg-accent/25 transition-colors"
+          >
+            Continue
+          </button>
+          {loopPaused && (
+            <button
+              onClick={() => useWorkflowRunStore.getState().retryWhile()}
+              className="px-2.5 py-1 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-300 text-[10.5px] hover:bg-zinc-700 transition-colors"
+            >
+              Retry
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Conversations menu ───────────────────────────────────────────────────────
+
+/** Start / switch / delete a thread, and empty the open one. Owns its own
+ *  open-close state: the panel above only needs to know when the visible
+ *  conversation changed (`onLeave`). */
+function ConversationsMenu({ onLeave }: { onLeave: () => void }): JSX.Element {
+  const conversations = useChatStore((s) => s.conversations)
+  const activeId      = useChatStore((s) => s.activeId)
+  const isEmpty       = useChatStore((s) => s.messages.length === 0)
+
+  const [open, setOpen] = useState(false)
+  const ref             = useRef<HTMLDivElement>(null)
+  useOutsideClick(ref, open, () => setOpen(false))
+
+  const leave = (act: () => void) => () => { act(); setOpen(false); onLeave() }
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        title="Conversations"
+        className={`transition-colors ${open ? 'text-zinc-300' : 'text-zinc-600 hover:text-zinc-400'}`}
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="absolute bottom-full mb-2 left-0 z-50 bg-zinc-900 border border-zinc-700/60 rounded-xl shadow-xl overflow-hidden min-w-[220px] max-w-[300px]">
+          <button
+            onClick={leave(newConversation)}
+            className="w-full px-3 py-2 text-left text-[11px] text-accent hover:bg-zinc-800 transition-colors flex items-center gap-2 border-b border-zinc-800"
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            New conversation
+          </button>
+
+          <div className="max-h-56 overflow-y-auto">
+            {conversations.map((c) => (
+              <div
+                key={c.id}
+                className={`group flex items-center gap-2 px-3 py-2 hover:bg-zinc-800 transition-colors ${c.id === activeId ? 'text-zinc-100' : 'text-zinc-400'}`}
+              >
+                <button
+                  onClick={leave(() => switchConversation(c.id))}
+                  className="flex-1 min-w-0 text-left text-[11px] truncate"
+                >
+                  {c.title || 'New conversation'}
+                </button>
+                {c.id === activeId && <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" />}
+                {/* Deleting the open thread falls back to the next one, so this
+                  * is never a dead end — the menu can stay open. */}
+                <button
+                  onClick={() => deleteConversation(c.id)}
+                  title="Delete conversation"
+                  className="shrink-0 text-zinc-700 group-hover:text-zinc-500 hover:!text-red-400 transition-colors"
+                >
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {!isEmpty && (
+            <button
+              onClick={leave(clearAgentChat)}
+              className="w-full px-3 py-2 text-left text-[11px] text-zinc-500 hover:text-red-400 hover:bg-zinc-800 transition-colors border-t border-zinc-800"
+            >
+              Clear this conversation
+            </button>
+          )}
+        </div>
       )}
     </div>
   )
@@ -242,177 +369,127 @@ function WorkflowProgressCard({ name }: { name: string }): JSX.Element {
 // ─── Main component ──────────────────────────────────────────────────────────
 
 export default function ChatPanel(): JSX.Element {
-  const { ollamaUrl, defaultModel, defaultThinking } = useAgentStore()
+  const { provider, localModel, external, defaultThinking } = useAgentStore()
 
-  const [messages, setMessages]               = useState<Message[]>([])
+  const externalCfg   = external[provider]
+  const defaultModel  = provider === 'local' ? localModel : (externalCfg?.model ?? '')
+
+  const messages      = useChatStore((s) => s.messages)
+
+  // Live agent state — owned by the agentChat service so the stream and the
+  // workflow watcher survive page switches; this component only renders it.
+  const isLoading        = useChatStore((s) => s.isLoading)
+  const statusText       = useChatStore((s) => s.statusText)
+  const error            = useChatStore((s) => s.error)
+  const pendingWorkflow  = useChatStore((s) => s.pendingWorkflow)
+  const chatModel        = useChatStore((s) => s.chatModel)
+  const thinkingOverride = useChatStore((s) => s.thinkingOverride)
+  const setChatModel        = useChatStore((s) => s.setChatModel)
+  const setThinkingOverride = useChatStore((s) => s.setThinkingOverride)
+  const setAgentState       = useChatStore((s) => s.setAgentState)
+
+  const model        = chatModel ?? defaultModel
+  const thinkingMode: ThinkingMode = thinkingOverride ?? defaultThinking
+
   const [input, setInput]                     = useState('')
-  const [isLoading, setIsLoading]             = useState(false)
-  const [error, setError]                     = useState<string | null>(null)
   const [showAll, setShowAll]                 = useState(false)
-  const [model, setModel]                     = useState(defaultModel)
   const [showModelPicker, setShowModelPicker] = useState(false)
-  const [ollamaModels, setOllamaModels]       = useState<string[]>([])
-  const [pendingWorkflow, setPendingWorkflow]  = useState<{ id: string; name: string } | null>(null)
+  const [pickerModels, setPickerModels]       = useState<string[]>([])
+  const [showLibrary, setShowLibrary]         = useState(false)
   const [attachments, setAttachments]         = useState<string[]>([]) // data URLs
   const [isDragging, setIsDragging]           = useState(false)
-  const [thinkingMode, setThinkingMode]       = useState<ThinkingMode>(defaultThinking)
+  const [showWfPicker, setShowWfPicker]       = useState(false)
+  const wfPickerRef                           = useRef<HTMLDivElement>(null)
   const endRef                                = useRef<HTMLDivElement>(null)
   const textareaRef                           = useRef<HTMLTextAreaElement>(null)
   const modelPickerRef                        = useRef<HTMLDivElement>(null)
   const fileInputRef                          = useRef<HTMLInputElement>(null)
   const messagesRef                           = useRef<Message[]>([])
   messagesRef.current = messages
+  const lastSentRef                           = useRef<{ text: string; attachments: string[] } | null>(null)
 
-  const apiUrl           = useAppStore((s) => s.apiUrl)
-  const currentJob       = useAppStore((s) => s.currentJob)
-  const meshStats        = useAppStore((s) => s.meshStats)
-  const updateCurrentJob = useAppStore((s) => s.updateCurrentJob)
-  const pushMeshUrl      = useAppStore((s) => s.pushMeshUrl)
-  const undoMesh         = useAppStore((s) => s.undoMesh)
+  const apiUrl   = useAppStore((s) => s.apiUrl)
+  const undoMesh = useAppStore((s) => s.undoMesh)
 
-  const workflows     = useWorkflowsStore((s) => s.workflows)
-  const saveWorkflow  = useWorkflowsStore((s) => s.save)
+  const workflows         = useWorkflowsStore((s) => s.workflows)
   const setActiveWorkflow = useWorkflowsStore((s) => s.setActive)
-  const { modelExtensions, processExtensions } = useExtensionsStore()
-  const runWorkflow   = useWorkflowRunStore((s) => s.run)
-  const runState      = useWorkflowRunStore((s) => s.runState)
-  const allExtensions = useMemo(
-    () => buildAllWorkflowExtensions(modelExtensions, processExtensions),
-    [modelExtensions, processExtensions],
-  )
+  const openIds           = useWorkflowsStore((s) => s.openIds)
+  const activeWorkflowId  = useWorkflowsStore((s) => s.activeId)
+  const openWorkflows = openIds
+    .map((id) => workflows.find((w) => w.id === id))
+    .filter((w): w is Workflow => !!w)
+  const activeWorkflow = workflows.find((w) => w.id === activeWorkflowId)
 
-  // Close model picker on outside click
+  // A picked chat model belongs to one provider — drop the override when the
+  // provider changes in Settings (skip mount so vision auto-switch stays sticky).
+  const providerRef = useRef(provider)
   useEffect(() => {
-    if (!showModelPicker) return
-    const handler = (e: MouseEvent) => {
-      if (modelPickerRef.current && !modelPickerRef.current.contains(e.target as Node))
-        setShowModelPicker(false)
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [showModelPicker])
+    if (providerRef.current !== provider) { providerRef.current = provider; setChatModel(null) }
+  }, [provider, setChatModel])
 
-  // Watch workflow completion → send follow-up to agent
-  useEffect(() => {
-    if (!pendingWorkflow) return
-    if (runState.status !== 'done' && runState.status !== 'error') return
-
-    const wf = pendingWorkflow
-    setPendingWorkflow(null)
-
-    if (runState.status === 'error') {
-      setMessages((prev) => [...prev, {
-        id: `sys-${Date.now()}`,
-        role: 'assistant',
-        content: `The workflow '${wf.name}' failed: ${runState.error ?? 'Unknown error'}`,
-      }])
-      return
-    }
-
-    // Update viewer with the generated mesh
-    if (runState.outputUrl) {
-      updateCurrentJob({ outputUrl: runState.outputUrl, status: 'done', progress: 100 })
-      pushMeshUrl(runState.outputUrl)
-    }
-
-    // Send automatic follow-up to agent
-    const completionCtx = `Workflow '${wf.name}' just completed.${runState.outputUrl ? ` Output mesh: ${runState.outputUrl}` : ''} Ask the user what they'd like to do next.`
-    callAgent(messagesRef.current, { workflowCompletion: completionCtx })
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- fire on run-status transition; error/outputUrl read atomically
-  }, [runState.status, pendingWorkflow])
+  useOutsideClick(modelPickerRef, showModelPicker, () => setShowModelPicker(false))
+  useOutsideClick(wfPickerRef, showWfPicker, () => setShowWfPicker(false))
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, isLoading, pendingWorkflow])
 
-  function buildContext(): Record<string, unknown> {
-    const ctx: Record<string, unknown> = {}
-    if (currentJob?.outputUrl) ctx.currentMeshPath = currentJob.outputUrl.replace('/workspace/', '')
-    if (meshStats?.triangles)  ctx.meshTriangles   = meshStats.triangles
-    if (workflows.length > 0)  ctx.workflows       = workflows.map((w) => ({ id: w.id, name: w.name }))
-    if (allExtensions.length > 0) ctx.extensions   = allExtensions.map((e) => ({
-      id: e.id, name: e.name, input: e.input, output: e.output,
-    }))
-    return ctx
+  function sendFeedback(msg: Message, rating: 'good' | 'bad') {
+    const all = messagesRef.current
+    const idx = all.findIndex((m) => m.id === msg.id)
+    const lastUser = all.slice(0, idx === -1 ? all.length : idx).reverse().find((m) => m.role === 'user')
+    void fetch(`${apiUrl}/agent/feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rating,
+        message: msg.content,
+        user_message: lastUser?.content ?? '',
+        model,
+        provider,
+        tools_used: msg.actions?.map((a) => a.tool) ?? [],
+      }),
+    }).catch(() => {})
   }
 
-  async function callAgent(msgs: Message[], extraContext: Record<string, unknown> = {}) {
-    setIsLoading(true)
-    setError(null)
-    try {
-      const context = { ...buildContext(), ...extraContext }
-
-      // Inject workflow completion as a system hint if present
-      const apiMessages = msgs.map((m) => {
-        const entry: { role: string; content: string; images?: string[] } = {
-          role: m.role,
-          content: m.content,
-        }
-        if (m.imageDataUrls?.length) {
-          entry.images = m.imageDataUrls.map((url) => url.split(',')[1])
-        }
-        return entry
-      })
-      if (extraContext.workflowCompletion) {
-        apiMessages.push({ role: 'user', content: `[System] ${extraContext.workflowCompletion}` })
-        delete context.workflowCompletion
-      }
-
-      const res = await fetch(`${apiUrl}/agent/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: apiMessages, ollama_url: ollamaUrl, model, context, thinking: thinkingMode }),
-      })
-      if (!res.ok) throw new Error(`API error ${res.status}`)
-
-      const data: { message: string; actions: ActionDone[]; thinking?: string } = await res.json()
-
-      setMessages((prev) => [...prev, {
-        id: `a-${Date.now()}`,
-        role: 'assistant',
-        content: data.message,
-        thinking: data.thinking ?? undefined,
-        actions: data.actions?.length ? data.actions : undefined,
-      }])
-
-      // Extract base64 from the most recent user message that had an image attached
-      const latestImageDataUrl = [...msgs].reverse()
-        .find((m) => m.role === 'user' && m.imageDataUrls?.length)
-        ?.imageDataUrls?.[0]
-      const overrideImageData = latestImageDataUrl ? latestImageDataUrl.split(',')[1] : undefined
-
-      for (const action of data.actions ?? []) {
-        if (action.payload?.type === 'mesh_update' && action.payload.url) {
-          updateCurrentJob({ outputUrl: action.payload.url })
-          pushMeshUrl(action.payload.url)
-        }
-        if (action.payload?.type === 'run_workflow' && action.payload.workflow_id) {
-          const wf = workflows.find((w) => w.id === action.payload!.workflow_id)
-          if (wf) { runWorkflow(wf, allExtensions, overrideImageData); setPendingWorkflow({ id: wf.id, name: wf.name }) }
-        }
-        if (action.payload?.type === 'create_workflow' && action.payload.workflow) {
-          const draft = action.payload.workflow as Omit<Workflow, 'id' | 'createdAt' | 'updatedAt'>
-          const now = new Date().toISOString()
-          const wf: Workflow = { ...draft, id: crypto.randomUUID(), createdAt: now, updatedAt: now }
-          const res = await saveWorkflow(wf)
-          if (res.success) setActiveWorkflow(wf.id)
-        }
-      }
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e)
-      setError(msg.includes('fetch') ? 'Cannot reach Modly API. Is the backend running?' : msg)
-    } finally {
-      setIsLoading(false)
-    }
+  function handleStop() {
+    stopAgent()
   }
 
-  async function fetchOllamaModels() {
+  /** What the panel itself has to forget when the visible conversation changes:
+   *  the collapsed-history toggle, and the message the Retry button would
+   *  otherwise re-send into a thread that never asked for it. */
+  function resetPanelView() {
+    setShowAll(false)
+    lastSentRef.current = null
+  }
+
+  async function fetchPickerModels() {
     try {
-      const res = await fetch(`${apiUrl}/agent/models?ollama_url=${encodeURIComponent(ollamaUrl)}`)
-      const data = await res.json()
-      setOllamaModels(data.models ?? [])
+      if (provider === 'local') {
+        const res = await fetch(`${apiUrl}/llm/models`)
+        const data: { models?: { id: string; downloaded: boolean; source?: string; tags?: string[] }[] } = await res.json()
+        // Chat is for general/vision/custom models — code & CAD models are node tools
+        setPickerModels(
+          (data.models ?? [])
+            .filter((m) => m.downloaded)
+            .filter((m) => m.source === 'custom' || !(m.tags ?? []).some((t) => t === 'code' || t === 'cad'))
+            .map((m) => m.id),
+        )
+      } else {
+        const base = providerBaseUrl(provider, externalCfg)
+        // POST, not a query string: a GET would put the API key in the uvicorn
+        // access log, which ends up in runtime.log and in users' bug reports.
+        const res = await fetch(`${apiUrl}/agent/external/models`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ base_url: base, api_key: externalCfg?.apiKey ?? '' }),
+        })
+        const data: { models?: string[] } = await res.json()
+        setPickerModels(data.models ?? [])
+      }
     } catch {
-      setOllamaModels([])
+      setPickerModels([])
     }
   }
 
@@ -454,18 +531,22 @@ export default function ChatPanel(): JSX.Element {
     const text = input.trim()
     if (!text || isLoading || pendingWorkflow) return
 
-    const userMsg: Message = {
-      id: `u-${Date.now()}`,
-      role: 'user',
-      content: text,
-      ...(attachments.length ? { imageDataUrls: [...attachments] } : {}),
-    }
-    const nextMessages = [...messages, userMsg]
-    setMessages(nextMessages)
+    const atts = [...attachments]
     setInput('')
     setAttachments([])
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
-    await callAgent(nextMessages)
+    lastSentRef.current = { text, attachments: atts }
+    await sendUserMessage(text, atts)
+  }
+
+  function handleDismissError() {
+    setAgentState({ error: null })
+  }
+
+  async function handleRetry() {
+    setAgentState({ error: null })
+    const last = lastSentRef.current
+    if (last) await sendUserMessage(last.text, last.attachments)
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -523,10 +604,13 @@ export default function ChatPanel(): JSX.Element {
         )}
 
         {/* Message list */}
-        <div className="flex flex-col px-4 py-3 gap-5">
+        <div className="flex flex-col px-4 py-3 gap-5 select-text">
           {visible.map((msg) => (
             <div key={msg.id}>
-              {msg.role === 'user' ? (
+              {msg.notice ? (
+                /* Info line (model auto-switch, etc.) */
+                <p className="text-[10.5px] text-zinc-500 italic text-center px-2">{msg.content}</p>
+              ) : msg.role === 'user' ? (
                 /* User message */
                 <div className="flex flex-col items-end gap-1.5">
                   {msg.imageDataUrls && msg.imageDataUrls.length > 0 && (
@@ -544,11 +628,30 @@ export default function ChatPanel(): JSX.Element {
                 /* Assistant message */
                 <div className="flex flex-col gap-3">
                   {msg.thinking && <ThinkingBlock content={msg.thinking} />}
-                  <ProseMessage content={msg.content} />
+                  {msg.imageUrls && msg.imageUrls.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {msg.imageUrls.map((url, i) => (
+                        <img key={i} src={`${apiUrl}${url}`} alt="Workflow output"
+                          className="h-36 max-w-full rounded-xl object-contain border border-zinc-700/50 bg-zinc-900/40"
+                          style={{ imageRendering: 'pixelated' }} />
+                      ))}
+                    </div>
+                  )}
+                  {msg.content && <ProseMessage content={msg.content} />}
                   {msg.actions && msg.actions.length > 0 && (
                     <ActionsCard actions={msg.actions} onUndo={undoMesh} />
                   )}
-                  <FeedbackRow content={msg.content} />
+                  {/* The model can describe an edit it never made — in a first-run
+                    * session it claimed three in a row without calling a tool. The
+                    * app knows the truth, so it says it: no payload, no change.
+                    * Shown on chat-only replies too, which is the point — the user
+                    * can tell talk from action without reading the wording. */}
+                  {!msg.streaming && msg.content && !appliedSomething(msg.actions) && (
+                    <p className="text-[11px] text-zinc-500 italic">No changes were applied.</p>
+                  )}
+                  {!msg.streaming && msg.content && (
+                    <FeedbackRow content={msg.content} onRate={(rating) => sendFeedback(msg, rating)} />
+                  )}
                 </div>
               )}
             </div>
@@ -559,20 +662,42 @@ export default function ChatPanel(): JSX.Element {
 
           {/* Loading indicator */}
           {isLoading && (
-            <div className="flex gap-1 items-center py-1">
-              {[0, 1, 2].map((i) => (
-                <span key={i}
-                  className="w-1.5 h-1.5 rounded-full bg-zinc-600 animate-bounce"
-                  style={{ animationDelay: `${i * 130}ms` }}
-                />
-              ))}
+            <div className="flex gap-2 items-center py-1">
+              <div className="flex gap-1 items-center">
+                {[0, 1, 2].map((i) => (
+                  <span key={i}
+                    className="w-1.5 h-1.5 rounded-full bg-zinc-600 animate-bounce"
+                    style={{ animationDelay: `${i * 130}ms` }}
+                  />
+                ))}
+              </div>
+              {statusText && <span className="text-[11px] text-zinc-500">{statusText}</span>}
             </div>
           )}
 
           {/* Error */}
           {error && (
-            <div className="px-3 py-2 rounded-lg bg-red-950/40 border border-red-800/40">
-              <p className="text-[11px] text-red-400">{error}</p>
+            <div className="px-3 py-2 rounded-lg bg-red-950/40 border border-red-800/40 flex items-start justify-between gap-2">
+              <p className="text-[11px] text-red-400 flex-1">{error}</p>
+              <div className="flex items-center gap-2 shrink-0">
+                {lastSentRef.current && (
+                  <button
+                    onClick={handleRetry}
+                    className="text-[10.5px] text-red-300 hover:text-red-100 underline underline-offset-2 transition-colors"
+                  >
+                    Retry
+                  </button>
+                )}
+                <button
+                  onClick={handleDismissError}
+                  aria-label="Dismiss error"
+                  className="text-red-400/70 hover:text-red-200 transition-colors"
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
             </div>
           )}
 
@@ -631,9 +756,10 @@ export default function ChatPanel(): JSX.Element {
                 <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="16" /><line x1="8" y1="12" x2="16" y2="12" />
               </svg>
             </button>
+            <ConversationsMenu onLeave={resetPanelView} />
             {/* Thinking toggle */}
             <button
-              onClick={() => setThinkingMode((m) => m === 'auto' ? 'on' : m === 'on' ? 'off' : 'auto')}
+              onClick={() => setThinkingOverride(thinkingMode === 'auto' ? 'on' : thinkingMode === 'on' ? 'off' : 'auto')}
               title={`Thinking: ${thinkingMode}`}
               className={`transition-colors ${thinkingMode === 'on' ? 'text-accent' : thinkingMode === 'off' ? 'text-zinc-700' : 'text-zinc-600 hover:text-zinc-400'}`}
             >
@@ -646,10 +772,10 @@ export default function ChatPanel(): JSX.Element {
             {/* Model selector */}
             <div className="relative" ref={modelPickerRef}>
               <button
-                onClick={() => { setShowModelPicker((v) => !v); if (!showModelPicker) fetchOllamaModels() }}
+                onClick={() => { setShowModelPicker((v) => !v); if (!showModelPicker) fetchPickerModels() }}
                 className="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors"
               >
-                {model}
+                {model || 'no model'}
                 <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                   <polyline points="6 9 12 15 18 9" />
                 </svg>
@@ -657,17 +783,69 @@ export default function ChatPanel(): JSX.Element {
 
               {showModelPicker && (
                 <div className="absolute bottom-full mb-2 left-0 z-50 bg-zinc-900 border border-zinc-700/60 rounded-xl shadow-xl overflow-hidden min-w-[180px]">
-                  {ollamaModels.length === 0 ? (
-                    <p className="px-3 py-2.5 text-[11px] text-zinc-500">No models found — is Ollama running?</p>
+                  {pickerModels.length === 0 ? (
+                    <p className="px-3 py-2.5 text-[11px] text-zinc-500">
+                      {provider === 'local'
+                        ? 'No local models downloaded yet.'
+                        : 'No models found — check the API key in Settings → Agent.'}
+                    </p>
                   ) : (
-                    ollamaModels.map((m) => (
+                    pickerModels.map((m) => (
                       <button
                         key={m}
-                        onClick={() => { setModel(m); setShowModelPicker(false) }}
+                        onClick={() => { setChatModel(m); setShowModelPicker(false) }}
                         className={`w-full px-3 py-2 text-left text-[11px] hover:bg-zinc-800 transition-colors flex items-center justify-between gap-3 ${m === model ? 'text-zinc-100' : 'text-zinc-400'}`}
                       >
                         <span className="truncate">{m}</span>
                         {m === model && (
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="shrink-0 text-accent">
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                        )}
+                      </button>
+                    ))
+                  )}
+                  {provider === 'local' && (
+                    <button
+                      onClick={() => { setShowModelPicker(false); setShowLibrary(true) }}
+                      className="w-full px-3 py-2 text-left text-[11px] text-accent hover:bg-zinc-800 transition-colors border-t border-zinc-800"
+                    >
+                      Manage models…
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+            {/* Current workflow selector */}
+            <div className="relative" ref={wfPickerRef}>
+              <button
+                onClick={() => setShowWfPicker((v) => !v)}
+                title="Current workflow — the one the assistant edits by default"
+                className="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors max-w-[130px]"
+              >
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0">
+                  <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
+                  <path d="M10 6.5h5.5a2 2 0 0 1 2 2V14" />
+                </svg>
+                <span className="truncate">{activeWorkflow?.name ?? 'no workflow'}</span>
+                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="shrink-0">
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </button>
+
+              {showWfPicker && (
+                <div className="absolute bottom-full mb-2 left-0 z-50 bg-zinc-900 border border-zinc-700/60 rounded-xl shadow-xl overflow-hidden min-w-[200px] max-w-[280px]">
+                  {openWorkflows.length === 0 ? (
+                    <p className="px-3 py-2.5 text-[11px] text-zinc-500">No open workflows — open one in the Workflows tab.</p>
+                  ) : (
+                    openWorkflows.map((w) => (
+                      <button
+                        key={w.id}
+                        onClick={() => { setActiveWorkflow(w.id); setShowWfPicker(false) }}
+                        className={`w-full px-3 py-2 text-left text-[11px] hover:bg-zinc-800 transition-colors flex items-center justify-between gap-3 ${w.id === activeWorkflowId ? 'text-zinc-100' : 'text-zinc-400'}`}
+                      >
+                        <span className="truncate">{w.name}</span>
+                        {w.id === activeWorkflowId && (
                           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="shrink-0 text-accent">
                             <polyline points="20 6 9 17 4 12" />
                           </svg>
@@ -680,19 +858,40 @@ export default function ChatPanel(): JSX.Element {
             </div>
             </div>
 
-            <button
-              onClick={handleSend}
-              disabled={!input.trim() || isLoading}
-              className="w-6 h-6 rounded-full bg-accent hover:bg-accent-dark disabled:opacity-30 disabled:cursor-not-allowed text-white flex items-center justify-center transition-colors shrink-0"
-            >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" />
-              </svg>
-            </button>
+            {isLoading ? (
+              <button
+                onClick={handleStop}
+                title="Stop"
+                className="group w-6 h-6 rounded-full bg-accent/15 border border-accent/40 hover:bg-red-500/20 hover:border-red-500/50 text-accent hover:text-red-400 flex items-center justify-center transition-colors shrink-0"
+              >
+                {/* Spinner — turns into a stop button on hover */}
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="animate-spin group-hover:hidden">
+                  <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                </svg>
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor" className="hidden group-hover:block">
+                  <rect x="5" y="5" width="14" height="14" rx="2" />
+                </svg>
+              </button>
+            ) : (
+              <button
+                onClick={handleSend}
+                disabled={!input.trim() || !!pendingWorkflow}
+                title={pendingWorkflow ? `Waiting on workflow "${pendingWorkflow.name}"…` : undefined}
+                className="w-6 h-6 rounded-full bg-accent hover:bg-accent-dark disabled:opacity-30 disabled:cursor-not-allowed text-white flex items-center justify-center transition-colors shrink-0"
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" />
+                </svg>
+              </button>
+            )}
           </div>
         </div>
         <p className="mt-1.5 text-[10px] text-zinc-700 text-center">Shift+Enter for new line</p>
       </div>
+
+      {showLibrary && (
+        <ModelLibraryModal onClose={() => { setShowLibrary(false); fetchPickerModels() }} />
+      )}
 
     </div>
   )

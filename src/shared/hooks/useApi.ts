@@ -59,32 +59,6 @@ export function useApi() {
     return data
   }
 
-  async function downloadModel(
-    onProgress?: (pct: number) => void
-  ): Promise<void> {
-    const response = await client.get('/model/download', {
-      responseType: 'stream'
-    })
-
-    const reader = response.data
-    reader.on('data', (chunk: Buffer) => {
-      try {
-        const line = chunk.toString().replace('data: ', '').trim()
-        if (line) {
-          const { progress } = JSON.parse(line)
-          onProgress?.(progress)
-        }
-      } catch {
-        // ignore parse errors
-      }
-    })
-
-    await new Promise<void>((resolve, reject) => {
-      reader.on('end', resolve)
-      reader.on('error', reject)
-    })
-  }
-
   async function optimizeMesh(
     path: string,
     targetFaces: number,
@@ -129,5 +103,5 @@ export function useApi() {
     return { url: data.url }
   }
 
-  return { generateFromImage, pollJobStatus, cancelJob, getModelStatus, getAllModelsStatus, downloadModel, optimizeMesh, smoothMesh, importMesh, transformMesh }
+  return { generateFromImage, pollJobStatus, cancelJob, getModelStatus, getAllModelsStatus, optimizeMesh, smoothMesh, importMesh, transformMesh }
 }

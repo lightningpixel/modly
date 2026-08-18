@@ -64,7 +64,7 @@ test('exposes every method consumed by the app (regression: getAllModelsStatus)'
   const api = loadUseApi()()
   for (const name of [
     'generateFromImage', 'pollJobStatus', 'cancelJob', 'getModelStatus',
-    'getAllModelsStatus', 'downloadModel', 'optimizeMesh', 'smoothMesh', 'importMesh',
+    'getAllModelsStatus', 'optimizeMesh', 'smoothMesh', 'importMesh', 'transformMesh',
   ]) {
     assert.equal(typeof api[name], 'function', `useApi() must expose ${name}`)
   }

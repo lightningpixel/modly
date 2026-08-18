@@ -91,6 +91,7 @@ test('opens only safe glb and gltf entries through existing Generate job and his
   if (target.kind !== 'self') throw new Error('expected self target')
 
   const selection = createAssetLibraryOpenJob(glb, target, 1718546400000)
+  if (!selection) throw new Error('expected an open selection')
   assert.equal(selection.historyUrl, '/workspace/Workflows/run/hero.glb')
   assert.equal(selection.job.status, 'done')
   assert.equal(selection.job.outputUrl, '/workspace/Workflows/run/hero.glb')

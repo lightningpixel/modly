@@ -7,8 +7,8 @@ test('renderer service validates requests before IPC and projects structured err
   let invoked = false
   const service = createAssetLibraryService({
     list: async () => ({ success: true, entries: [] }),
-    read: async () => { invoked = true; return { success: false, error: { code: 'unexpected', message: 'should not run' } } },
-    open: async () => { invoked = true; return { success: false, error: { code: 'unexpected', message: 'should not run' } } },
+    read: async () => { invoked = true; return { success: false, error: { code: 'not-found', message: 'should not run' } } },
+    open: async () => { invoked = true; return { success: false, error: { code: 'not-found', message: 'should not run' } } },
   })
 
   const read = await service.read({ workspacePath: '../escape.glb' })
@@ -24,8 +24,8 @@ test('renderer service validates sourceWorkspacePath before read and open IPC ca
   let invoked = false
   const service = createAssetLibraryService({
     list: async () => ({ success: true, entries: [] }),
-    read: async () => { invoked = true; return { success: false, error: { code: 'unexpected', message: 'should not run' } } },
-    open: async () => { invoked = true; return { success: false, error: { code: 'unexpected', message: 'should not run' } } },
+    read: async () => { invoked = true; return { success: false, error: { code: 'not-found', message: 'should not run' } } },
+    open: async () => { invoked = true; return { success: false, error: { code: 'not-found', message: 'should not run' } } },
   })
 
   const read = await service.read({ workspacePath: 'Workflows/hero.landmarks.v1.json', sourceWorkspacePath: '../secret.glb' })
@@ -48,8 +48,8 @@ test('renderer service delegates safe IPC calls and normalizes returned entries'
         capability: 'mesh', state: 'ready', previewKind: '3d-model', warnings: ['a', 'a'], openable: true,
       }],
     }),
-    read: async () => ({ success: false, error: { code: 'missing', message: 'Missing' } }),
-    open: async (request) => { openRequest = request; return { success: false, error: { code: 'missing', message: 'Missing' } } },
+    read: async () => ({ success: false, error: { code: 'not-found', message: 'Missing' } }),
+    open: async (request) => { openRequest = request; return { success: false, error: { code: 'not-found', message: 'Missing' } } },
   })
 
   const result = await service.list()
