@@ -9,6 +9,8 @@ interface ProcessContext {
   progress:     (pct: number, label: string) => void
 }
 
+const KEEP_FULL_DETAIL = 1_000_000
+
 const processor = async (
   input:   ProcessInput,
   params:  Record<string, unknown>,
@@ -16,7 +18,18 @@ const processor = async (
 ): Promise<ProcessResult> => {
   if (!input.filePath) throw new Error('mesh-optimizer: input.filePath is required')
 
-  const targetFaces = Math.max(100, Math.round(Number(params['target_faces'] ?? 10000)))
+  const requestedTargetFaces = Number(params['target_faces'] ?? KEEP_FULL_DETAIL)
+  if (!Number.isFinite(requestedTargetFaces)) {
+    throw new Error('mesh-optimizer: target_faces must be a number')
+  }
+
+  const targetFaces = Math.max(100, Math.round(requestedTargetFaces))
+  if (targetFaces >= KEEP_FULL_DETAIL) {
+    context.log('Full detail selected — skipping simplification')
+    context.progress(100, 'Done')
+    return { filePath: input.filePath }
+  }
+
   context.log(`Target: ${targetFaces} triangles — input: ${input.filePath}`)
 
   // Lazy requires — resolved from the extension's own node_modules

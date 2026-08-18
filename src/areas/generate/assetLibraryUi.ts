@@ -3,20 +3,33 @@ import type { AssetLibraryOpenRequest } from '../../shared/types/assetLibrary'
 import { resolveAssetLibraryOpenTarget, type AssetLibraryOpenTarget, type ProjectedAssetLibraryEntry } from './assetLibraryProjection'
 
 export type GenerateOpenPanel = 'export' | 'decimate' | 'smooth' | 'import' | 'library' | 'light' | null
-export type AssetLibrarySortMode = 'type' | 'name' | 'date'
+export type AssetLibrarySortMode = 'date' | 'name' | 'type'
+export type AssetLibraryViewMode = 'gallery' | 'list'
+export type AssetLibraryKindFilter = 'all' | 'rigged' | 'animated' | 'character' | 'prop'
+export type AssetLibraryPolyFilter = 'all' | 'low-poly' | 'mid-poly' | 'high-poly'
 
-export interface AssetLibraryEntryGroup {
-  capability: NonNullable<ProjectedAssetLibraryEntry['capability']>
-  capabilityLabel: string
-  sectionKey: string
-  entries: ProjectedAssetLibraryEntry[]
+export interface AssetLibraryFilters {
+  kind: AssetLibraryKindFilter
+  poly: AssetLibraryPolyFilter
+  needsAttention: boolean
 }
 
-export interface AssetLibrarySourceScopeGroup {
-  sourceScope: ProjectedAssetLibraryEntry['sourceScope']
-  sourceScopeLabel: string
+export interface AssetLibraryLineageFamily {
+  key: string
+  rootWorkspacePath: string
+  name: string
+  project?: string
+  entries: ProjectedAssetLibraryEntry[]
+  primaryEntry: ProjectedAssetLibraryEntry
+  tags: string[]
+}
+
+export interface AssetLibraryProjectGroup {
+  projectKey: string
+  projectLabel: string
   sectionKey: string
-  entryGroups: AssetLibraryEntryGroup[]
+  families: AssetLibraryLineageFamily[]
+  entryCount: number
 }
 
 export interface AssetLibraryOpenSelection {
@@ -24,48 +37,54 @@ export interface AssetLibraryOpenSelection {
   job: GenerationJob
 }
 
-const ASSET_LIBRARY_CAPABILITY_SECTIONS = [
-  { capability: 'mesh', label: 'Mesh' },
-  { capability: 'rigged-mesh', label: 'Rigged mesh' },
-  { capability: 'animation-motion', label: 'Animations/motions' },
-  { capability: 'landmarks-sidecar', label: 'Landmarks sidecars' },
-  { capability: 'generated-world', label: 'Generated worlds' },
-  { capability: 'scene-manifest', label: 'Scene manifests' },
-] as const satisfies ReadonlyArray<{ capability: NonNullable<ProjectedAssetLibraryEntry['capability']>, label: string }>
-
-const ASSET_LIBRARY_SOURCE_SCOPE_SECTIONS = [
-  { sourceScope: 'workflows', label: 'Workflows' },
-  { sourceScope: 'exports', label: 'Exports' },
-] as const satisfies ReadonlyArray<{ sourceScope: ProjectedAssetLibraryEntry['sourceScope'], label: string }>
-
-const ASSET_LIBRARY_CAPABILITY_ORDER = new Map(
-  ASSET_LIBRARY_CAPABILITY_SECTIONS.map((section, index) => [section.capability, index]),
-)
-
-const ASSET_LIBRARY_INTERNAL_DIRECTORY_NAMES = new Set(['tmp', 'temp', 'cache'])
-
 export const ASSET_LIBRARY_SORT_OPTIONS = [
-  { value: 'type', label: 'Type' },
-  { value: 'name', label: 'Name' },
-  { value: 'date', label: 'Date' },
+  { value: 'date', label: 'Recently added' },
+  { value: 'name', label: 'Name A–Z' },
+  { value: 'type', label: 'Asset type' },
 ] as const satisfies ReadonlyArray<{ value: AssetLibrarySortMode, label: string }>
 
+export const ASSET_LIBRARY_KIND_FILTERS = [
+  { value: 'all', label: 'All assets' },
+  { value: 'rigged', label: 'Rigged' },
+  { value: 'animated', label: 'Animated' },
+  { value: 'character', label: 'Characters' },
+  { value: 'prop', label: 'Props' },
+] as const satisfies ReadonlyArray<{ value: AssetLibraryKindFilter, label: string }>
+
+export const ASSET_LIBRARY_POLY_FILTERS = [
+  { value: 'all', label: 'Any weight' },
+  { value: 'low-poly', label: 'Light' },
+  { value: 'mid-poly', label: 'Medium' },
+  { value: 'high-poly', label: 'Heavy' },
+] as const satisfies ReadonlyArray<{ value: AssetLibraryPolyFilter, label: string }>
+
+const ASSET_LIBRARY_INTERNAL_DIRECTORY_NAMES = new Set(['tmp', 'temp', 'cache'])
+const NEEDS_PROJECT_KEY = 'needs-project'
+
+export function createDefaultAssetLibraryFilters(): AssetLibraryFilters {
+  return { kind: 'all', poly: 'all', needsAttention: false }
+}
+
 export function getDefaultAssetLibraryCollapsedSectionKeys(): string[] {
-  const sectionKeys = ASSET_LIBRARY_SOURCE_SCOPE_SECTIONS.flatMap((scopeSection) => {
-    const capabilityKeys = ASSET_LIBRARY_CAPABILITY_SECTIONS.map(
-      (capabilitySection) => `capability:${scopeSection.sourceScope}:${capabilitySection.capability}`,
-    )
-
-    return [`scope:${scopeSection.sourceScope}`, ...capabilityKeys]
-  })
-
-  return [...sectionKeys]
+  return []
 }
 
 export function toggleAssetLibrarySectionKey(currentKeys: string[], sectionKey: string): string[] {
   return currentKeys.includes(sectionKey)
     ? currentKeys.filter((value) => value !== sectionKey)
     : [...currentKeys, sectionKey]
+}
+
+/**
+ * Search and semantic filters always expose their matching projects. Clearing
+ * them restores the operator's untouched collapse choices.
+ */
+export function isAssetLibrarySectionExpanded(
+  collapsedSectionKeys: string[],
+  sectionKey: string,
+  hasActiveDiscovery: boolean,
+): boolean {
+  return hasActiveDiscovery || !collapsedSectionKeys.includes(sectionKey)
 }
 
 export function buildAssetLibraryOpenRequest(entry: ProjectedAssetLibraryEntry): AssetLibraryOpenRequest {
@@ -95,53 +114,83 @@ export function filterVisibleAssetLibraryEntries(entries: ProjectedAssetLibraryE
   return entries.filter((entry) => entry.state !== 'unsupported' && !hasInternalAssetLibraryDirectory(entry.workspacePath))
 }
 
-export function filterAssetLibraryScopeGroups(
+export function buildAssetLibraryProjectGroups(
   entries: ProjectedAssetLibraryEntry[],
   searchQuery: string,
   sortMode: AssetLibrarySortMode,
-): AssetLibrarySourceScopeGroup[] {
+  filters: AssetLibraryFilters,
+): AssetLibraryProjectGroup[] {
   const normalizedSearchQuery = normalizeAssetLibrarySearchQuery(searchQuery)
-  const visibleEntries = filterVisibleAssetLibraryEntries(entries)
+  const families = buildAssetLibraryLineageFamilies(filterVisibleAssetLibraryEntries(entries))
+    .filter((family) => (
+      (!normalizedSearchQuery || matchesAssetLibraryFamilySearch(family, normalizedSearchQuery))
+      && family.entries.some((entry) => matchesAssetLibraryFilters(entry, filters))
+    ))
 
-  return ASSET_LIBRARY_SOURCE_SCOPE_SECTIONS
-    .map((scopeSection) => {
-      const scopeEntries = visibleEntries.filter((entry) => entry.sourceScope === scopeSection.sourceScope)
-      const scopeMatches = normalizedSearchQuery.length > 0 && matchesAssetLibrarySearch(scopeSection.label, normalizedSearchQuery)
+  const groups = new Map<string, AssetLibraryProjectGroup>()
+  for (const family of families) {
+    const projectLabel = family.project ?? 'Needs project'
+    const projectKey = family.project
+      ? normalizeProjectKey(family.project)
+      : NEEDS_PROJECT_KEY
+    const current = groups.get(projectKey) ?? {
+      projectKey,
+      projectLabel,
+      sectionKey: `project:${projectKey}`,
+      families: [],
+      entryCount: 0,
+    }
+    current.families.push(family)
+    current.entryCount += family.entries.length
+    groups.set(projectKey, current)
+  }
 
-      const entryGroups = ASSET_LIBRARY_CAPABILITY_SECTIONS
-        .map((capabilitySection) => {
-          const capabilityEntries = scopeEntries.filter((entry) => entry.capability === capabilitySection.capability)
-          if (capabilityEntries.length === 0) return null
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      families: [...group.families].sort((left, right) => compareAssetLibraryFamilies(left, right, sortMode)),
+    }))
+    .sort(compareAssetLibraryProjectGroups)
+}
 
-          const capabilityMatches = scopeMatches || (normalizedSearchQuery.length > 0 && matchesAssetLibrarySearch(capabilitySection.label, normalizedSearchQuery))
-          const visibleCapabilityEntries = !normalizedSearchQuery || capabilityMatches
-            ? capabilityEntries
-            : capabilityEntries.filter((entry) => matchesAssetLibraryEntrySearch(entry, normalizedSearchQuery))
+export function buildAssetLibraryLineageFamilies(
+  entries: ProjectedAssetLibraryEntry[],
+): AssetLibraryLineageFamily[] {
+  const grouped = new Map<string, ProjectedAssetLibraryEntry[]>()
+  for (const entry of entries) {
+    const rootWorkspacePath = entry.semantic?.derivedFrom?.root.workspacePath ?? entry.workspacePath
+    grouped.set(rootWorkspacePath, [...(grouped.get(rootWorkspacePath) ?? []), entry])
+  }
 
-          if (visibleCapabilityEntries.length === 0) return null
+  return [...grouped.entries()].map(([rootWorkspacePath, familyEntries]) => {
+    const sortedEntries = [...familyEntries].sort((left, right) => compareAssetLibraryEntries(left, right, 'date'))
+    const primaryEntry = sortedEntries[0]
+    const namedEntry = sortedEntries.find((entry) => entry.semantic?.name)
+    const rootName = sortedEntries
+      .map((entry) => entry.semantic?.derivedFrom?.root.displayName)
+      .find((name): name is string => Boolean(name))
+    const project = primaryEntry.semantic?.project
+      ?? sortedEntries.map((entry) => entry.semantic?.project).find((value): value is string => Boolean(value))
 
-          return {
-            capability: capabilitySection.capability,
-            capabilityLabel: capabilitySection.label,
-            sectionKey: `capability:${scopeSection.sourceScope}:${capabilitySection.capability}`,
-            entries: sortAssetLibraryEntries(visibleCapabilityEntries, sortMode),
-          }
-        })
-        .filter((group): group is AssetLibraryEntryGroup => group !== null)
+    return {
+      key: rootWorkspacePath,
+      rootWorkspacePath,
+      name: primaryEntry.semantic?.name ?? namedEntry?.semantic?.name ?? rootName ?? primaryEntry.displayName,
+      project,
+      entries: sortedEntries,
+      primaryEntry,
+      tags: [...new Set(sortedEntries.flatMap((entry) => entry.semantic?.tags ?? []))],
+    }
+  })
+}
 
-      const sortedEntryGroups = sortMode === 'type'
-        ? entryGroups
-        : [...entryGroups].sort((left, right) => compareAssetLibraryEntryGroups(left, right, sortMode))
-
-      if (sortedEntryGroups.length === 0) return null
-      return {
-        sourceScope: scopeSection.sourceScope,
-        sourceScopeLabel: scopeSection.label,
-        sectionKey: `scope:${scopeSection.sourceScope}`,
-        entryGroups: sortedEntryGroups,
-      }
-    })
-    .filter((group): group is AssetLibrarySourceScopeGroup => group !== null)
+export function formatAssetLibraryClipName(clip: string): string {
+  const words = clip
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .trim()
+  if (!words) return 'Animation'
+  return words.replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
 export function createAssetLibraryOpenJob(
@@ -168,23 +217,90 @@ export function resolveOpenPanelAfterLibrarySelection(currentPanel: GenerateOpen
   return currentPanel === 'library' ? 'library' : currentPanel
 }
 
-function sortAssetLibraryEntries(
-  entries: ProjectedAssetLibraryEntry[],
-  sortMode: AssetLibrarySortMode,
-): ProjectedAssetLibraryEntry[] {
-  return [...entries].sort((left, right) => compareAssetLibraryEntries(left, right, sortMode))
+// Gallery-first dimensions: even the narrowest supported panel keeps a
+// motion preview well above the old 40px row thumbnail.
+export const ASSET_LIBRARY_PANEL_MIN_WIDTH = 560
+export const ASSET_LIBRARY_PANEL_MAX_WIDTH = 1200
+export const ASSET_LIBRARY_PANEL_DEFAULT_WIDTH = 880
+
+const ASSET_LIBRARY_PANEL_WIDTH_STORAGE_KEY = 'modly-library-panel-width'
+
+export function clampAssetLibraryPanelWidth(width: number): number {
+  return Math.min(ASSET_LIBRARY_PANEL_MAX_WIDTH, Math.max(ASSET_LIBRARY_PANEL_MIN_WIDTH, width))
 }
 
-function compareAssetLibraryEntryGroups(
-  left: AssetLibraryEntryGroup,
-  right: AssetLibraryEntryGroup,
-  sortMode: Exclude<AssetLibrarySortMode, 'type'>,
-): number {
-  const entryComparison = compareAssetLibraryEntries(left.entries[0], right.entries[0], sortMode)
-  if (entryComparison !== 0) return entryComparison
+export function getStoredAssetLibraryPanelWidth(): number {
+  try {
+    const raw = Number(localStorage.getItem(ASSET_LIBRARY_PANEL_WIDTH_STORAGE_KEY))
+    return Number.isFinite(raw) && raw > 0 ? clampAssetLibraryPanelWidth(raw) : ASSET_LIBRARY_PANEL_DEFAULT_WIDTH
+  } catch {
+    return ASSET_LIBRARY_PANEL_DEFAULT_WIDTH
+  }
+}
 
-  return (ASSET_LIBRARY_CAPABILITY_ORDER.get(left.capability) ?? Number.MAX_SAFE_INTEGER)
-    - (ASSET_LIBRARY_CAPABILITY_ORDER.get(right.capability) ?? Number.MAX_SAFE_INTEGER)
+export function storeAssetLibraryPanelWidth(width: number): void {
+  try {
+    localStorage.setItem(ASSET_LIBRARY_PANEL_WIDTH_STORAGE_KEY, String(width))
+  } catch {
+    // The panel still works when storage is unavailable.
+  }
+}
+
+export const ASSET_LIBRARY_PANEL_MIN_HEIGHT = 420
+export const ASSET_LIBRARY_PANEL_MAX_HEIGHT = 1200
+export const ASSET_LIBRARY_PANEL_DEFAULT_HEIGHT = 900
+
+const ASSET_LIBRARY_PANEL_HEIGHT_STORAGE_KEY = 'modly-library-panel-height'
+
+export function clampAssetLibraryPanelHeight(height: number): number {
+  return Math.min(ASSET_LIBRARY_PANEL_MAX_HEIGHT, Math.max(ASSET_LIBRARY_PANEL_MIN_HEIGHT, height))
+}
+
+export function getStoredAssetLibraryPanelHeight(): number {
+  try {
+    const raw = Number(localStorage.getItem(ASSET_LIBRARY_PANEL_HEIGHT_STORAGE_KEY))
+    return Number.isFinite(raw) && raw > 0 ? clampAssetLibraryPanelHeight(raw) : ASSET_LIBRARY_PANEL_DEFAULT_HEIGHT
+  } catch {
+    return ASSET_LIBRARY_PANEL_DEFAULT_HEIGHT
+  }
+}
+
+export function storeAssetLibraryPanelHeight(height: number): void {
+  try {
+    localStorage.setItem(ASSET_LIBRARY_PANEL_HEIGHT_STORAGE_KEY, String(height))
+  } catch {
+    // The panel still works when storage is unavailable.
+  }
+}
+
+function compareAssetLibraryProjectGroups(left: AssetLibraryProjectGroup, right: AssetLibraryProjectGroup): number {
+  if (left.projectKey === NEEDS_PROJECT_KEY && right.projectKey !== NEEDS_PROJECT_KEY) return 1
+  if (right.projectKey === NEEDS_PROJECT_KEY && left.projectKey !== NEEDS_PROJECT_KEY) return -1
+  return left.projectLabel.localeCompare(right.projectLabel, undefined, { sensitivity: 'base' })
+}
+
+function compareAssetLibraryFamilies(
+  left: AssetLibraryLineageFamily,
+  right: AssetLibraryLineageFamily,
+  sortMode: AssetLibrarySortMode,
+): number {
+  if (sortMode === 'name') {
+    return left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
+  }
+  if (sortMode === 'type') {
+    const rankDifference = assetLibraryFamilyTypeRank(left) - assetLibraryFamilyTypeRank(right)
+    if (rankDifference !== 0) return rankDifference
+    return left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
+  }
+  return compareAssetLibraryEntries(left.primaryEntry, right.primaryEntry, 'date')
+}
+
+function assetLibraryFamilyTypeRank(family: AssetLibraryLineageFamily): number {
+  if (family.tags.includes('animated')) return 0
+  if (family.tags.includes('rigged')) return 1
+  if (family.tags.includes('character') || family.tags.includes('creature')) return 2
+  if (family.tags.includes('prop')) return 3
+  return 4
 }
 
 function compareAssetLibraryEntries(
@@ -200,10 +316,6 @@ function compareAssetLibraryEntries(
     if (leftTime === null && rightTime !== null) return 1
   }
 
-  return compareAssetLibraryEntryNames(left, right)
-}
-
-function compareAssetLibraryEntryNames(left: ProjectedAssetLibraryEntry, right: ProjectedAssetLibraryEntry): number {
   const displayNameComparison = left.displayName.localeCompare(right.displayName, undefined, { sensitivity: 'base' })
   if (displayNameComparison !== 0) return displayNameComparison
   const workspacePathComparison = left.workspacePath.localeCompare(right.workspacePath, undefined, { sensitivity: 'base' })
@@ -221,8 +333,22 @@ function parseAssetLibrarySortTimestamp(value: string | undefined): number | nul
   return Number.isFinite(epochMs) ? epochMs : null
 }
 
-function normalizeAssetLibrarySearchQuery(searchQuery: string): string {
-  return searchQuery.trim().toLocaleLowerCase()
+function matchesAssetLibraryFilters(entry: ProjectedAssetLibraryEntry, filters: AssetLibraryFilters): boolean {
+  const tags = new Set(entry.semantic?.tags ?? [])
+  const kindMatches = filters.kind === 'all'
+    || (filters.kind === 'rigged' && (tags.has('rigged') || entry.capability === 'rigged-mesh'))
+    || (filters.kind === 'animated' && tags.has('animated'))
+    || (filters.kind === 'character' && ['character', 'characters', 'creature'].some((tag) => tags.has(tag)))
+    || (filters.kind === 'prop' && ['prop', 'props'].some((tag) => tags.has(tag)))
+  const polyMatches = filters.poly === 'all' || tags.has(filters.poly)
+  const attentionMatches = !filters.needsAttention || tags.has('unnamed') || !entry.semantic?.name
+  return kindMatches && polyMatches && attentionMatches
+}
+
+function matchesAssetLibraryFamilySearch(family: AssetLibraryLineageFamily, normalizedSearchQuery: string): boolean {
+  return matchesAssetLibrarySearch(family.name, normalizedSearchQuery)
+    || matchesAssetLibrarySearch(family.project ?? '', normalizedSearchQuery)
+    || family.entries.some((entry) => matchesAssetLibraryEntrySearch(entry, normalizedSearchQuery))
 }
 
 function matchesAssetLibraryEntrySearch(entry: ProjectedAssetLibraryEntry, normalizedSearchQuery: string): boolean {
@@ -234,14 +360,27 @@ function matchesAssetLibraryEntrySearch(entry: ProjectedAssetLibraryEntry, norma
     entry.manifest?.workspacePath,
     entry.capability,
     entry.sourceScope,
+    entry.semantic?.name,
+    entry.semantic?.project,
+    entry.semantic?.derivedFrom?.parent.workspacePath,
+    entry.semantic?.derivedFrom?.root.workspacePath,
     ...entry.warnings,
+    ...(entry.semantic?.tags ?? []),
   ]
     .filter((value): value is string => typeof value === 'string' && value.length > 0)
     .some((value) => matchesAssetLibrarySearch(value, normalizedSearchQuery))
 }
 
+function normalizeAssetLibrarySearchQuery(searchQuery: string): string {
+  return searchQuery.trim().toLocaleLowerCase()
+}
+
 function matchesAssetLibrarySearch(value: string, normalizedSearchQuery: string): boolean {
   return value.toLocaleLowerCase().includes(normalizedSearchQuery)
+}
+
+function normalizeProjectKey(project: string): string {
+  return project.toLocaleLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || NEEDS_PROJECT_KEY
 }
 
 function hasInternalAssetLibraryDirectory(workspacePath: string): boolean {

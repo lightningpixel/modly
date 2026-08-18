@@ -101,6 +101,12 @@ interface AppState {
   meshSelected: boolean
   setMeshSelected: (selected: boolean) => void
 
+  // Animation clips (set by Viewer3D, read by ChatPanel for agent context)
+  motionClips: { name: string }[]
+  setMotionClips: (clips: { name: string }[]) => void
+  activeClipIndex: number
+  setActiveClipIndex: (index: number) => void
+
   // Setup
   setupStatus:    SetupStatus
   setupProgress:  SetupProgress | null
@@ -262,6 +268,10 @@ export const useAppStore = create<AppState>()(
       setMeshStats: (stats) => set({ meshStats: stats }),
       meshSelected: false,
       setMeshSelected: (selected) => set({ meshSelected: selected }),
+      motionClips: [],
+      setMotionClips: (clips) => set({ motionClips: clips }),
+      activeClipIndex: 0,
+      setActiveClipIndex: (index) => set({ activeClipIndex: index }),
       initApp: async () => {
         set({ backendStatus: 'starting', backendError: null })
 
