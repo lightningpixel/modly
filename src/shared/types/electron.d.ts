@@ -7,6 +7,8 @@ import type {
   AssetLibraryOpenResult,
   AssetLibraryReadRequest,
   AssetLibraryReadResult,
+  AssetLibraryThumbnailRequest,
+  AssetLibraryThumbnailResult,
 } from './assetLibrary'
 
 // ─── Extension types ──────────────────────────────────────────────────────────
@@ -49,7 +51,7 @@ export type PickerIntent = 'folder' | 'image' | 'mesh' | 'text'
 export interface ParamSchema {
   id:       string
   label:    string
-  type:     'select' | 'int' | 'float' | 'string' | 'file-select'
+  type:     'select' | 'int' | 'float' | 'string' | 'text' | 'file-select'
   default:  number | string
   options?: { value: number | string; label: string }[]
   min?:     number
@@ -64,6 +66,9 @@ export interface ParamSchema {
   // file-select: dropdown of the files inside the folder held by another param
   dir_from?:   string     // id of the (string) param holding the folder path
   extensions?: string[]   // file extensions to list (e.g. ["json"])
+  // Renders a tall, resizable textarea instead of a single-line input,
+  // regardless of the base type (e.g. a "string" param with a long description).
+  multiline?: boolean
 }
 
 export interface ProcessExtension {
@@ -95,6 +100,9 @@ export interface ProcessInput {
   /** Per-slot texts for multi-text-input nodes (index = target handle slot). */
   texts?:    (string | undefined)[]
   nodeId?:   string
+  /** Absolute path of the existing workspace asset this input was sourced from
+   *  (if any) — threaded through the run so mesh-exporter can record lineage. */
+  sourceAssetPath?: string
 }
 
 export interface ProcessResult {
@@ -256,6 +264,7 @@ declare global {
           list: () => Promise<AssetLibraryListResult>
           read: (request: AssetLibraryReadRequest) => Promise<AssetLibraryReadResult>
           open: (request: AssetLibraryOpenRequest) => Promise<AssetLibraryOpenResult>
+          thumbnail: (request: AssetLibraryThumbnailRequest) => Promise<AssetLibraryThumbnailResult>
         }
       }
       setup: {
