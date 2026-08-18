@@ -13,10 +13,13 @@
     "prepare-resources": "node scripts/download-python-embed.js",
     "test": "npm run test:py && npm run test:node",
     "test:py": "node scripts/run-pytests.mjs",
-    "test:node": "node --test --experimental-strip-types --experimental-loader ./scripts/node-ts-extensionless-loader.mjs src/shared/types/assetLibrary.test.ts src/areas/generate/assetLibraryProjection.test.ts src/areas/generate/assetLibraryService.test.ts src/areas/generate/assetLibraryUi.test.ts electron/main/artifact-registry-service.test.ts electron/main/extension-path-guard.test.ts electron/preload/artifact-registry-preload.test.ts && node --test electron/main/*.test.mjs src/**/*.test.mjs",
+    "test:node": "node --test --experimental-strip-types --experimental-loader ./scripts/node-ts-extensionless-loader.mjs src/shared/types/assetLibrary.test.ts src/areas/generate/assetLibraryProjection.test.ts src/areas/generate/assetLibraryService.test.ts src/areas/generate/assetLibraryUi.test.ts src/areas/workflows/mockExtensions.test.ts src/shared/services/agentHistory.test.ts electron/main/artifact-registry-service.test.ts electron/main/extension-path-guard.test.ts electron/preload/artifact-registry-preload.test.ts && node --test electron/main/*.test.mjs src/**/*.test.mjs",
     "package": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && npm run prepare-resources && electron-builder",
     "package:mac": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && npm run prepare-resources && electron-builder --mac --arm64",
     "lint": "eslint ."
+  },
+  "engines": {
+    "node": ">=22.6"
   },
   "dependencies": {
     "@electron-toolkit/utils": "^4.0.0",
@@ -27,7 +30,6 @@
     "@xyflow/react": "^12.10.2",
     "axios": "^1.7.9",
     "electron-updater": "^6.8.3",
-    "esbuild": "^0.28.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tar": "^7.5.9",
@@ -48,9 +50,11 @@
     "electron": "^33.3.0",
     "electron-builder": "^24.13.3",
     "electron-vite": "^2.3.0",
+    "esbuild": "^0.28.2",
     "eslint": "^9.17.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "globals": "^17.6.0",
+    "jsdom": "^29.1.1",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.2",

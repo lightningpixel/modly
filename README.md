@@ -82,6 +82,8 @@ npm run build
 
 Modly supports external model and process extensions. Each extension is a GitHub repository containing a `manifest.json` plus the runtime entry files required by its type.
 
+Writing one? See the [extension manifest reference](arch/EXTENSION-MANIFEST.md) — every field the app reads, the param types available (including `llm-model`, which lets a node use Modly's shared local LLM instead of shipping its own), the environment a process extension gets, and the stdin/stdout protocol.
+
 ### Official extensions
 
 | Extension | Model | URL |
@@ -119,7 +121,7 @@ python tools/modly-cli/agent.py workflow-run status <run_id>
 python tools/modly-cli/agent.py generate --image ./input.png --output ./export.glb
 ```
 
-Canonical commands are `health`, `model`, `workflow-run`, `capability`, and `process-run`. The friendly `generate` command starts `POST /workflow-runs/from-image`, polls the returned run, exports the final mesh when requested, and includes recovery metadata such as `workflow-run status ...` and `workflow-run cancel ...` in the JSON response.
+Canonical commands are `health`, `model`, and `workflow-run`. (`capability` and `process-run` target an `/automation/capabilities` + `/process-runs` contract the backend does not implement yet — they fail closed with `UNSUPPORTED_PROCESS` against every current build.) The friendly `generate` command starts `POST /workflow-runs/from-image`, polls the returned run, exports the final mesh when requested, and includes recovery metadata such as `workflow-run status ...` and `workflow-run cancel ...` in the JSON response.
 
 Compatibility and helper surfaces are intentionally separated: `legacy` wraps old `/generate/*` job endpoints, `dev serve-api` / `dev ensure-server` start only the FastAPI backend and do not prove Electron/Desktop bridge readiness, and `experimental comfy-image` / `experimental generate-from-workflow` are external ComfyUI orchestration helpers rather than the canonical Modly agent contract. Hidden helper aliases such as `status`, `export`, and `batch` remain parseable for scripts, but they are not presented as canonical root commands.
 

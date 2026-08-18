@@ -7,10 +7,26 @@
     "lib": ["ES2022"],
     "strict": true,
     "skipLibCheck": true,
+    // The node:test suites run under --experimental-strip-types, which resolves
+    // the specifier literally and so requires the .ts extension in imports.
+    // emitDeclarationOnly is what composite accepts alongside it; nothing
+    // consumes the declarations, `tsc -b --noEmit` writes none.
+    "allowImportingTsExtensions": true,
+    "emitDeclarationOnly": true,
     "types": ["electron-vite/node"],
     "paths": {
       "@main/*": ["./electron/main/*"]
     }
   },
-  "include": ["electron.vite.config.*", "electron/**/*"]
+  // electron/main and the preload reach into src/shared/types for the shapes
+  // they share with the renderer; those files have to be in the project or tsc
+  // reports TS6307. Listed one by one rather than globbed: the rest of
+  // src/shared/types is renderer-only and needs DOM libs and @shared aliases
+  // this project deliberately does not have.
+  "include": [
+    "electron.vite.config.*",
+    "electron/**/*",
+    "src/shared/types/assetLibrary.ts",
+    "src/shared/types/artifacts.ts"
+  ]
 }

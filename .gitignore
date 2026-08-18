@@ -1,5 +1,7 @@
 node_modules/
 out/
+# Workflow artifacts written to the repo root by a relative output path
+output/
 dist/
 install.bat
 launch.bat
@@ -43,3 +45,4 @@ Thumbs.db
 # Local dev helpers
 install.bat
 launch.bat
+.orvix/

@@ -8,6 +8,9 @@
     "jsx": "react-jsx",
     "strict": true,
     "skipLibCheck": true,
+    // See tsconfig.node.json — the strip-types test runner needs .ts specifiers.
+    "allowImportingTsExtensions": true,
+    "emitDeclarationOnly": true,
     "paths": {
       "@/*":       ["./src/*"],
       "@areas/*":  ["./src/areas/*"],

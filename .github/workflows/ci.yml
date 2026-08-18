@@ -6,6 +6,42 @@ on:
       - main
 
 jobs:
+  # The three build jobs below only prove the app PACKAGES. Nothing was checking
+  # that it still WORKS: a broken test, a type error or a lint failure reached
+  # main untouched (the pre-push hook runs `npm test`, but --no-verify skips it
+  # and it never runs for a PR opened from a fork).
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 24, not the 20 the build jobs use: `npm run test:node` passes
+      # --experimental-strip-types (Node >= 22.6) and relies on the test runner
+      # expanding `src/**/*.test.mjs` itself, which Node 20 does not do — the job
+      # would have failed outright, or silently skipped every src/ test.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install node dependencies
+        run: npm install
+      # api/tests import routers.agent, which pulls fastapi/httpx/pydantic.
+      # Installing the real requirements also proves the file is installable.
+      - name: Install python dependencies
+        run: pip install -r api/requirements.txt
+      # -b, not a bare `tsc --noEmit`: the root tsconfig is solution-style
+      # ("files": [] + references), so a plain invocation compiles NOTHING and
+      # exits 0 — this step passed while both projects were failing to build.
+      - name: Typecheck
+        run: npx tsc -b --noEmit
+      - name: Lint
+        run: npm run lint
+      - name: Tests (python + node)
+        run: npm test
+
   build-windows:
     runs-on: windows-latest
     steps:
