@@ -21,7 +21,7 @@ export interface AssetLibraryScopeGroup {
 
 function isSafeWorkspacePath(workspacePath: string): boolean {
   const normalized = workspacePath.replace(/\\/g, '/').trim()
-  return /^(Workflows|Exports)\//.test(normalized)
+  return /^(Default|Workflows|Exports)\//.test(normalized)
     && !normalized.split('/').includes('..')
     && !/%2e|%2f|%5c/i.test(normalized)
     && !normalized.startsWith('/')
@@ -40,9 +40,22 @@ export function projectAssetLibraryEntry(entry: AssetLibraryEntry): ProjectedAss
   }
   const safeSource = entry.source && isSafeWorkspacePath(entry.source.workspacePath) ? entry.source : undefined
   const safeManifest = entry.manifest && isSafeWorkspacePath(entry.manifest.workspacePath) ? entry.manifest : undefined
+  const safeParent = entry.semantic?.derivedFrom?.parent && isSafeWorkspacePath(entry.semantic.derivedFrom.parent.workspacePath)
+    ? entry.semantic.derivedFrom.parent
+    : undefined
+  const safeRoot = entry.semantic?.derivedFrom?.root && isSafeWorkspacePath(entry.semantic.derivedFrom.root.workspacePath)
+    ? entry.semantic.derivedFrom.root
+    : undefined
   if (entry.source && !safeSource) warnings.push('Ignored unsafe source workspace path.')
   if (entry.manifest && !safeManifest) warnings.push('Ignored unsafe manifest workspace path.')
-  return { ...entry, source: safeSource, manifest: safeManifest, warnings: [...new Set(warnings)] }
+  if (entry.semantic?.derivedFrom && (!safeParent || !safeRoot)) warnings.push('Ignored unsafe asset lineage.')
+  const semantic = entry.semantic
+    ? {
+        ...entry.semantic,
+        derivedFrom: safeParent && safeRoot ? { parent: safeParent, root: safeRoot } : undefined,
+      }
+    : undefined
+  return { ...entry, source: safeSource, manifest: safeManifest, semantic, warnings: [...new Set(warnings)] }
 }
 
 export function resolveAssetLibraryOpenTarget(entry: ProjectedAssetLibraryEntry): AssetLibraryOpenTarget {
@@ -80,6 +93,11 @@ export function filterAssetLibraryEntries(entries: ProjectedAssetLibraryEntry[],
     entry.state,
     entry.source?.workspacePath ?? '',
     entry.manifest?.workspacePath ?? '',
+    entry.semantic?.name ?? '',
+    entry.semantic?.project ?? '',
+    ...(entry.semantic?.tags ?? []),
+    entry.semantic?.derivedFrom?.parent.workspacePath ?? '',
+    entry.semantic?.derivedFrom?.root.workspacePath ?? '',
   ].some((value) => value.toLowerCase().includes(needle)))
 }
 

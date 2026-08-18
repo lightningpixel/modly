@@ -15,12 +15,16 @@
       "params_schema": [
         {
           "id": "target_faces",
-          "label": "Target Triangles",
-          "type": "int",
-          "default": 10000,
-          "min": 100,
-          "max": 1000000,
-          "tooltip": "Target number of triangles after simplification."
+          "label": "Detail",
+          "type": "select",
+          "default": 1000000,
+          "options": [
+            { "value": 1000000, "label": "Full detail (unchanged)" },
+            { "value": 12000, "label": "Light — background props" },
+            { "value": 30000, "label": "Standard — most props" },
+            { "value": 60000, "label": "Heavy — hero pieces you get close to" },
+            { "value": 120000, "label": "Very heavy — 3D printing, film shots" }
+          ]
         }
       ]
     }

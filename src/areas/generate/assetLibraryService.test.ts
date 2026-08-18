@@ -50,6 +50,7 @@ test('renderer service delegates safe IPC calls and normalizes returned entries'
     }),
     read: async () => ({ success: false, error: { code: 'missing', message: 'Missing' } }),
     open: async (request) => { openRequest = request; return { success: false, error: { code: 'missing', message: 'Missing' } } },
+    thumbnail: async () => ({ success: false }),
   })
 
   const result = await service.list()
@@ -57,4 +58,39 @@ test('renderer service delegates safe IPC calls and normalizes returned entries'
   assert.deepEqual(result.success && result.entries[0]?.warnings, ['a'])
   await service.open({ workspacePath: 'Workflows/hero.landmarks.v1.json', sourceWorkspacePath: 'Workflows/hero.glb' })
   assert.deepEqual(openRequest, { workspacePath: 'Workflows/hero.landmarks.v1.json', sourceWorkspacePath: 'Workflows/hero.glb' })
+})
+
+test('renderer service validates thumbnail requests before IPC and never surfaces an error', async () => {
+  let invoked = false
+  const service = createAssetLibraryService({
+    list: async () => ({ success: true, entries: [] }),
+    read: async () => ({ success: false, error: { code: 'unexpected', message: 'should not run' } }),
+    open: async () => ({ success: false, error: { code: 'unexpected', message: 'should not run' } }),
+    thumbnail: async () => { invoked = true; return { success: true, dataUrl: 'data:image/png;base64,ok' } },
+  })
+
+  const unsafe = await service.thumbnail({ workspacePath: '../escape.glb' })
+  assert.deepEqual(unsafe, { success: false })
+  assert.equal(invoked, false)
+
+  const safe = await service.thumbnail({ workspacePath: 'Exports/hero.glb' })
+  assert.deepEqual(safe, { success: true, dataUrl: 'data:image/png;base64,ok' })
+  assert.equal(invoked, true)
+})
+
+test('renderer service forwards previewClip through to the thumbnail IPC call unchanged', async () => {
+  let receivedRequest: unknown = null
+  const service = createAssetLibraryService({
+    list: async () => ({ success: true, entries: [] }),
+    read: async () => ({ success: false, error: { code: 'read-failed', message: 'should not run' } }),
+    open: async () => ({ success: false, error: { code: 'read-failed', message: 'should not run' } }),
+    thumbnail: async (request) => {
+      receivedRequest = request
+      return { success: true, dataUrl: 'data:image/webp;base64,ok', previews: [{ clip: 'walk', duration: 0.8 }] }
+    },
+  })
+
+  const result = await service.thumbnail({ workspacePath: 'Exports/hero.glb', previewClip: 'walk' })
+  assert.deepEqual(receivedRequest, { workspacePath: 'Exports/hero.glb', previewClip: 'walk' })
+  assert.deepEqual(result, { success: true, dataUrl: 'data:image/webp;base64,ok', previews: [{ clip: 'walk', duration: 0.8 }] })
 })

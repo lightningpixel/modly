@@ -1,11 +1,14 @@
 """
 Agent chat endpoint — runs an Ollama-powered tool-use loop against Modly's API.
 """
+import json
 import re
 import uuid
 import httpx
 from fastapi import APIRouter
 from pydantic import BaseModel
+
+import services.generator_registry as reg_module
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -408,6 +411,60 @@ def _extract_thinking(msg: dict) -> tuple[str, str | None]:
     return content, thinking
 
 
+def _read_glb_modly_extras(glb_path) -> dict | None:
+    """Parse a GLB's leading JSON chunk and return asset.extras.modly, if present.
+    Used only as a fallback for assets that predate the .tags.json sidecar."""
+    try:
+        with open(glb_path, "rb") as f:
+            header = f.read(12)
+            if len(header) < 12 or header[0:4] != b"glTF":
+                return None
+            chunk_header = f.read(8)
+            if len(chunk_header) < 8 or chunk_header[4:8] != b"JSON":
+                return None
+            chunk_length = int.from_bytes(chunk_header[0:4], "little")
+            doc = json.loads(f.read(chunk_length))
+            return (doc.get("asset") or {}).get("extras", {}).get("modly")
+    except Exception:
+        return None
+
+
+def _load_asset_meta(workspace_rel_path: str) -> dict | None:
+    """Resolve name/project/tags/lineage for the model currently in the viewer.
+
+    Reads the .tags.json sidecar when present, falling back to the GLB's own
+    embedded extras.modly for name/project/tags. Lineage (derived_from) is only
+    ever written to the sidecar, so an asset with no sidecar has none to report.
+    """
+    workspace_dir = reg_module.WORKSPACE_DIR.resolve()
+    abs_path = (workspace_dir / workspace_rel_path).resolve()
+    if not str(abs_path).startswith(str(workspace_dir)):
+        return None  # escapes the workspace — refuse to read
+
+    sidecar_path = abs_path.with_suffix(".tags.json")
+    if sidecar_path.exists():
+        try:
+            data = json.loads(sidecar_path.read_text(encoding="utf-8"))
+            return {
+                "name": data.get("name"),
+                "project": data.get("project"),
+                "tags": data.get("tags") or [],
+                "derived_from": data.get("derived_from"),
+            }
+        except Exception:
+            pass  # malformed sidecar — fall through to the GLB fallback
+
+    modly = _read_glb_modly_extras(abs_path)
+    if modly:
+        return {
+            "name": modly.get("name"),
+            "project": modly.get("project"),
+            "tags": modly.get("tags") or [],
+            "derived_from": None,
+        }
+    return None
+
+
 @router.get("/models")
 async def list_ollama_models(ollama_url: str = "http://localhost:11434"):
     async with httpx.AsyncClient(timeout=5.0) as client:
@@ -431,6 +488,30 @@ async def agent_chat(request: AgentChatRequest):
             ctx_lines.append(f"Current mesh path: {request.context['currentMeshPath']}")
         if request.context.get("meshTriangles"):
             ctx_lines.append(f"Current mesh triangles: {request.context['meshTriangles']:,}")
+        if request.context.get("currentClipName"):
+            ctx_lines.append(f"Current animation clip: {request.context['currentClipName']}")
+        if request.context.get("availableClips"):
+            ctx_lines.append(f"Available animation clips: {', '.join(request.context['availableClips'])}")
+
+        mesh_path = request.context.get("currentMeshPath")
+        meta = _load_asset_meta(mesh_path) if mesh_path else None
+        if meta:
+            if meta.get("name"):
+                ctx_lines.append(f"Model name: {meta['name']}")
+            if meta.get("project"):
+                ctx_lines.append(f"Project: {meta['project']}")
+            if meta.get("tags"):
+                ctx_lines.append(f"Tags: {', '.join(meta['tags'])}")
+            derived = meta.get("derived_from")
+            if derived:
+                parent = derived.get("parent") or {}
+                root = derived.get("root") or {}
+                parent_label = parent.get("name") or parent.get("path")
+                root_label = root.get("name") or root.get("path")
+                if parent_label == root_label:
+                    ctx_lines.append(f"Derived from: {parent_label}")
+                else:
+                    ctx_lines.append(f"Derived from: {parent_label} (originally: {root_label})")
         if ctx_lines:
             messages.append({
                 "role": "system",

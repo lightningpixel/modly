@@ -5,6 +5,7 @@ import { getWorkflowExtension } from './mockExtensions'
 import type { WorkflowExtension } from './mockExtensions'
 import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
 import { isBranchStarter, isSceneOutput, resolveDataSource, reachesSceneOutput, nearestUpstreamWaits } from './nodeBehaviors'
+import { resolveBoundWorkflowParams } from './workflowParamBindings'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -44,7 +45,15 @@ function flushResume(): void {
   if (fn) fn()
 }
 
-interface NodeOutput { filePath?: string; text?: string; outputType?: string }
+interface NodeOutput {
+  filePath?: string
+  text?:     string
+  outputType?: string
+  /** Absolute path of the existing workspace asset this output traces back to
+   *  (if any) — propagated unchanged from whatever node first resolved it, so a
+   *  mesh-exporter several hops downstream can still record lineage. */
+  sourceAssetPath?: string
+}
 
 function isSceneMeshOutput(output: NodeOutput | undefined): output is NodeOutput & { filePath: string } {
   return output?.outputType === 'mesh' && typeof output.filePath === 'string'
@@ -298,7 +307,13 @@ async function executeExtensionNode(
   const ext = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
   // Freshest params at the moment the node starts (so loop iterations / Retry pick
   // up edits made while paused, not the values captured at run start).
-  const liveParams = _liveParams.current.get(node.id) ?? node.data.params ?? {}
+  const nodeParams = _liveParams.current.get(node.id) ?? node.data.params ?? {}
+  const liveParams = resolveBoundWorkflowParams(
+    workflow,
+    node.id,
+    nodeParams,
+    (sourceNodeId) => _liveParams.current.get(sourceNodeId) ?? nodeMap.get(sourceNodeId)?.data.params,
+  )
 
   const resolveSource = (sourceId: string): NodeOutput | undefined => {
     const realId = resolveDataSource(sourceId, workflow.edges, nodeMap)
@@ -308,6 +323,11 @@ async function executeExtensionNode(
   let nodeInputPath:     string | undefined
   let nodeInputText:     string | undefined
   let nodeInputMeshPath: string | undefined
+  // Carries forward whatever existing workspace asset fed this run, however many
+  // hops back — set once at the source (mesh node) and passed through untouched
+  // by every node in between, so mesh-exporter can record lineage even at the
+  // end of a multi-step chain.
+  let nodeInputSourceAssetPath: string | undefined
   // Per-slot texts for multi-text-input nodes (e.g. positive/negative prompts).
   // Indexed by target handle: input-0 → texts[0], input-1 → texts[1].
   const nodeInputTexts: (string | undefined)[] = []
@@ -321,6 +341,7 @@ async function executeExtensionNode(
       if (src.outputType === 'mesh')        nodeInputMeshPath = src.filePath
       else if (src.outputType === 'image')  nodeInputPath     = src.filePath
       else if (src.filePath !== undefined)  nodeInputPath     = src.filePath
+      if (src.sourceAssetPath !== undefined) nodeInputSourceAssetPath = src.sourceAssetPath
       if (src.text !== undefined && src.text.trim().length > 0) {
         nodeInputText = src.text
         const slot = /^input-(\d+)$/.exec(edge.targetHandle ?? '')
@@ -331,6 +352,7 @@ async function executeExtensionNode(
     for (const edge of incomingEdges) {
       const src = resolveSource(edge.source)
       if (src?.filePath !== undefined) nodeInputPath = src.filePath
+      if (src?.sourceAssetPath !== undefined) nodeInputSourceAssetPath = src.sourceAssetPath
       if (src?.text !== undefined && src.text.trim().length > 0) nodeInputText = src.text
     }
   }
@@ -433,6 +455,7 @@ async function executeExtensionNode(
         text:     nodeInputText,
         texts:    nodeInputTexts.length > 0 ? nodeInputTexts : undefined,
         nodeId:   nid,
+        sourceAssetPath: nodeInputSourceAssetPath,
       },
       liveParams as Record<string, unknown>,
     )
@@ -443,7 +466,7 @@ async function executeExtensionNode(
   }
 
   const outputType = ext?.output ?? (nodeInputPath ? 'mesh' : undefined)
-  nodeOutputs.set(node.id, { filePath: nodeInputPath, text: nodeInputText, outputType })
+  nodeOutputs.set(node.id, { filePath: nodeInputPath, text: nodeInputText, outputType, sourceAssetPath: nodeInputSourceAssetPath })
 
   const output = nodeOutputs.get(node.id)
   const url = isSceneMeshOutput(output) ? toWorkspaceUrl(output.filePath, workspaceDir) : undefined
@@ -758,10 +781,12 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
                 const rel = currentMeshUrl.replace(/^\/workspace\//, '')
                 meshFilePath = `${workspaceDir}/${rel}`
               }
-              nodeOutputs.set(node.id, { filePath: meshFilePath, outputType: 'mesh' })
+              // The loaded scene mesh is itself a workspace asset (or a copy of
+              // one) — track it as the lineage source for anything downstream.
+              nodeOutputs.set(node.id, { filePath: meshFilePath, outputType: 'mesh', sourceAssetPath: meshFilePath })
             } else {
               const fp = node.data.params?.filePath as string | undefined
-              if (fp) nodeOutputs.set(node.id, { filePath: fp, outputType: 'mesh' })
+              if (fp) nodeOutputs.set(node.id, { filePath: fp, outputType: 'mesh', sourceAssetPath: fp })
             }
           }
         }
