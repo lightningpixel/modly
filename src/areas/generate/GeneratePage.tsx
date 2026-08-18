@@ -12,20 +12,48 @@ import { resolveAssetLibraryOpenTarget, type ProjectedAssetLibraryEntry } from '
 import {
   ASSET_LIBRARY_SORT_OPTIONS,
   buildAssetLibraryOpenRequest,
+  clampAssetLibraryPanelWidth,
   createAssetLibraryOpenJob,
   describeAssetLibraryOpenability,
   filterAssetLibraryScopeGroups,
   getDefaultAssetLibraryCollapsedSectionKeys,
+  getStoredAssetLibraryPanelWidth,
   isAssetLibraryEntryOpenable,
   resolveOpenPanelAfterLibrarySelection,
+  storeAssetLibraryPanelWidth,
   toggleAssetLibrarySectionKey,
   type AssetLibrarySortMode,
   type GenerateOpenPanel,
 } from './assetLibraryUi'
 
 const MIN_WIDTH = 220
-const MAX_WIDTH = 520
+const MAX_WIDTH = 900
 const DEFAULT_WIDTH = 320
+
+const PANEL_WIDTH_STORAGE_KEY = 'modly-panel-width'
+
+function clampPanelWidth(width: number): number {
+  return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, width))
+}
+
+/** Reads the user's saved Generate panel width, falling back to the default when unset, invalid, or unreadable. */
+function getStoredPanelWidth(): number {
+  try {
+    const raw = Number(localStorage.getItem(PANEL_WIDTH_STORAGE_KEY))
+    return Number.isFinite(raw) && raw > 0 ? clampPanelWidth(raw) : DEFAULT_WIDTH
+  } catch {
+    return DEFAULT_WIDTH
+  }
+}
+
+/** Persists the Generate panel width so it survives app restarts. */
+function storePanelWidth(width: number): void {
+  try {
+    localStorage.setItem(PANEL_WIDTH_STORAGE_KEY, String(width))
+  } catch {
+    // Ignore quota/private-mode failures — the panel just won't remember its size.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Export dropdown
@@ -368,6 +396,8 @@ function AssetLibraryPopover({
   searchQuery,
   sortMode,
   collapsedSectionKeys,
+  thumbnails,
+  panelWidth,
   onSelectEntry,
   onSearchQueryChange,
   onSortModeChange,
@@ -375,6 +405,7 @@ function AssetLibraryPopover({
   onOpenSelected,
   onRefresh,
   onClose,
+  onResizeMouseDown,
 }: {
   entries: ProjectedAssetLibraryEntry[]
   selectedEntryId: string | null
@@ -384,6 +415,9 @@ function AssetLibraryPopover({
   searchQuery: string
   sortMode: AssetLibrarySortMode
   collapsedSectionKeys: string[]
+  /** Data URLs keyed by workspacePath, populated lazily as thumbnails load. */
+  thumbnails: Record<string, string>
+  panelWidth: number
   onSelectEntry: (entryId: string) => void
   onSearchQueryChange: (value: string) => void
   onSortModeChange: (value: AssetLibrarySortMode) => void
@@ -391,6 +425,7 @@ function AssetLibraryPopover({
   onOpenSelected: () => void
   onRefresh: () => void
   onClose: () => void
+  onResizeMouseDown: (event: React.MouseEvent) => void
 }) {
   const scopeGroups = filterAssetLibraryScopeGroups(entries, searchQuery, sortMode)
   const visibleEntryIds = new Set(scopeGroups.flatMap((scopeGroup) => scopeGroup.entryGroups.flatMap((group) => group.entries.map((entry) => entry.id))))
@@ -409,7 +444,8 @@ function AssetLibraryPopover({
     <div
       role="dialog"
       aria-label="Workspace library"
-      className="absolute top-full left-0 mt-1 z-50 w-[320px] max-w-[calc(100vw-2rem)] bg-zinc-900 border border-zinc-700/60 rounded-xl p-3 flex flex-col gap-3 shadow-xl"
+      style={{ width: panelWidth }}
+      className="absolute top-full left-0 mt-1 z-50 max-w-[calc(100vw-2rem)] bg-zinc-900 border border-zinc-700/60 rounded-xl p-3 flex flex-col gap-3 shadow-xl"
     >
       <div className="flex items-center justify-between gap-2">
         <div>
@@ -424,6 +460,15 @@ function AssetLibraryPopover({
           Close library
         </button>
       </div>
+
+      {/* Resize handle — drag to widen/narrow the library panel; size is persisted. */}
+      <div
+        onMouseDown={onResizeMouseDown}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize workspace library panel"
+        className="absolute top-0 right-0 bottom-0 w-1.5 cursor-col-resize hover:bg-violet-400/40 active:bg-violet-400/60 transition-colors rounded-r-xl"
+      />
 
       <button
         type="button"
@@ -505,6 +550,7 @@ function AssetLibraryPopover({
                             <div id={capabilityRegionId}>
                               {group.entries.map((entry) => {
                                 const selected = entry.id === selectedEntryId
+                                const thumbnailDataUrl = thumbnails[entry.workspacePath]
                                 return (
                                   <button
                                     key={entry.id}
@@ -513,14 +559,23 @@ function AssetLibraryPopover({
                                     aria-pressed={selected}
                                     aria-label={`Select library asset ${entry.displayName}`}
                                     onClick={() => onSelectEntry(entry.id)}
-                                    className={`w-full text-left px-4 py-2 border-t border-zinc-800 first:border-t-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400
+                                    className={`flex w-full items-center gap-3 text-left px-4 py-2 border-t border-zinc-800 first:border-t-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400
                                       ${selected ? 'bg-violet-500/10 text-zinc-100' : 'text-zinc-300 hover:bg-zinc-800/80'}`}
                                   >
-                                    <div className="flex items-center justify-between gap-2">
-                                      <span className="text-xs font-medium">{entry.displayName}</span>
-                                      <span className="text-[10px] uppercase tracking-wider text-zinc-500">{entry.capability ?? entry.state.replace(/-/g, ' ')}</span>
+                                    {thumbnailDataUrl && (
+                                      <img
+                                        src={thumbnailDataUrl}
+                                        alt=""
+                                        className="h-20 w-20 shrink-0 rounded-lg border border-zinc-800 bg-zinc-950 object-contain"
+                                      />
+                                    )}
+                                    <div className="min-w-0 flex-1">
+                                      <div className="flex items-center justify-between gap-2">
+                                        <span className="text-xs font-medium">{entry.displayName}</span>
+                                        <span className="text-[10px] uppercase tracking-wider text-zinc-500">{entry.capability ?? entry.state.replace(/-/g, ' ')}</span>
+                                      </div>
+                                      <p className="mt-1 truncate text-[10px] text-zinc-500">{entry.workspacePath}</p>
                                     </div>
-                                    <p className="mt-1 truncate text-[10px] text-zinc-500">{entry.workspacePath}</p>
                                   </button>
                                 )
                               })}
@@ -561,7 +616,7 @@ function AssetLibraryPopover({
 
 export default function GeneratePage(): JSX.Element {
   const [unloadStatus, setUnloadStatus] = useState<'idle' | 'done'>('idle')
-  const [panelWidth, setPanelWidth] = useState(DEFAULT_WIDTH)
+  const [panelWidth, setPanelWidth] = useState<number>(() => getStoredPanelWidth())
   const [openPanel, setOpenPanel] = useState<GenerateOpenPanel>(null)
   const [decimating, setDecimating] = useState(false)
   const [smoothing, setSmoothing] = useState(false)
@@ -575,8 +630,11 @@ export default function GeneratePage(): JSX.Element {
   const [librarySearchQuery, setLibrarySearchQuery] = useState('')
   const [librarySortMode, setLibrarySortMode] = useState<AssetLibrarySortMode>('type')
   const [libraryCollapsedSectionKeys, setLibraryCollapsedSectionKeys] = useState<string[]>(() => getDefaultAssetLibraryCollapsedSectionKeys())
+  const [libraryThumbnails, setLibraryThumbnails] = useState<Record<string, string>>({})
+  const [libraryPanelWidth, setLibraryPanelWidth] = useState<number>(() => getStoredAssetLibraryPanelWidth())
   const [gizmoMode, setGizmoMode] = useState<'translate' | 'rotate' | 'scale' | null>(null)
   const dragging = useRef(false)
+  const libraryPanelDragging = useRef(false)
   // Populated by Viewer3D — undoes the latest live gizmo transform, if any.
   const gizmoUndoRef = useRef<(() => boolean) | null>(null)
 
@@ -639,6 +697,16 @@ export default function GeneratePage(): JSX.Element {
     void loadLibraryEntries()
     // eslint-disable-next-line react-hooks/exhaustive-deps -- lazy-load guarded by loaded/loading flags
   }, [openPanel, libraryLoaded, libraryLoading])
+
+  // Persist the library panel's width so a manual resize survives app restarts.
+  useEffect(() => {
+    storeAssetLibraryPanelWidth(libraryPanelWidth)
+  }, [libraryPanelWidth])
+
+  // Persist the generate options panel's width so a manual resize survives app restarts.
+  useEffect(() => {
+    storePanelWidth(panelWidth)
+  }, [panelWidth])
 
   async function handleUnloadAll() {
     await window.electron.model.unloadAll()
@@ -710,6 +778,7 @@ export default function GeneratePage(): JSX.Element {
         ? current
         : result.entries.find(isAssetLibraryEntryOpenable)?.id ?? result.entries[0]?.id ?? null)
       setLibraryLoaded(true)
+      void loadLibraryThumbnails(result.entries)
     } catch (err) {
       setLibraryLoaded(false)
       setLibraryEntries([])
@@ -718,6 +787,17 @@ export default function GeneratePage(): JSX.Element {
     } finally {
       setLibraryLoading(false)
     }
+  }
+
+  // Thumbnails are best-effort: only .glb/.gltf entries can have a rendered
+  // .thumb.png, and a missing one is silently skipped rather than surfaced.
+  async function loadLibraryThumbnails(entries: ProjectedAssetLibraryEntry[]) {
+    const candidates = entries.filter((entry) => entry.previewKind === '3d-model')
+    const results = await Promise.all(candidates.map(async (entry) => {
+      const result = await assetLibraryService.thumbnail({ workspacePath: entry.workspacePath })
+      return [entry.workspacePath, result.success ? result.dataUrl : null] as const
+    }))
+    setLibraryThumbnails(Object.fromEntries(results.filter((pair): pair is [string, string] => pair[1] !== null)))
   }
 
   async function handleOpenSelectedLibraryEntry() {
@@ -795,10 +875,27 @@ export default function GeneratePage(): JSX.Element {
 
     const onMouseMove = (ev: MouseEvent) => {
       if (!dragging.current) return
-      setPanelWidth((w) => Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, w + ev.movementX)))
+      setPanelWidth((w) => clampPanelWidth(w + ev.movementX))
     }
     const onMouseUp = () => {
       dragging.current = false
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+  }, [])
+
+  const onLibraryPanelResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    libraryPanelDragging.current = true
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!libraryPanelDragging.current) return
+      setLibraryPanelWidth((w) => clampAssetLibraryPanelWidth(w + ev.movementX))
+    }
+    const onMouseUp = () => {
+      libraryPanelDragging.current = false
       window.removeEventListener('mousemove', onMouseMove)
       window.removeEventListener('mouseup', onMouseUp)
     }
@@ -812,10 +909,14 @@ export default function GeneratePage(): JSX.Element {
         <WorkflowPanel />
       </div>
 
-      {/* Resize handle */}
+      {/* Resize handle — drag to widen/narrow the generate options panel; size is persisted. */}
       <div
         onMouseDown={onMouseDown}
-        className="w-1 shrink-0 cursor-col-resize hover:bg-accent/40 active:bg-accent/60 transition-colors"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize the generate options panel"
+        title="Drag to make this panel wider or narrower"
+        className="w-2 shrink-0 cursor-col-resize bg-zinc-600/40 hover:bg-accent/60 active:bg-accent/70 transition-colors"
       />
 
       <div className="flex-1 flex flex-col overflow-hidden">
@@ -929,6 +1030,8 @@ export default function GeneratePage(): JSX.Element {
                 searchQuery={librarySearchQuery}
                 sortMode={librarySortMode}
                 collapsedSectionKeys={libraryCollapsedSectionKeys}
+                thumbnails={libraryThumbnails}
+                panelWidth={libraryPanelWidth}
                 onSelectEntry={(entryId) => {
                   setLibraryError(null)
                   setLibrarySelectedEntryId(entryId)
@@ -939,6 +1042,7 @@ export default function GeneratePage(): JSX.Element {
                 onOpenSelected={() => { void handleOpenSelectedLibraryEntry() }}
                 onRefresh={() => { void loadLibraryEntries() }}
                 onClose={() => setOpenPanel(null)}
+                onResizeMouseDown={onLibraryPanelResizeMouseDown}
               />
             )}
           </div>

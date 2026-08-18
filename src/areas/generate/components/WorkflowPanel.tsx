@@ -61,6 +61,50 @@ function mimeFromPath(p: string): string {
   return 'image/png'
 }
 
+// ─── Tag suggestions ──────────────────────────────────────────────────────────
+
+const TAG_STOPWORDS = new Set([
+  'a', 'an', 'the', 'of', 'for', 'and', 'or', 'to', 'in', 'on', 'my', 'this', 'is', 'with',
+])
+
+const FIXED_TAG_VOCAB = [
+  'prop', 'character', 'creature', 'environment', 'weapon',
+  'furniture', 'hero-asset', 'background', 'low-poly', 'stylized', 'realistic',
+]
+
+const MAX_TAG_SUGGESTIONS = 10
+
+/** Slugified words pulled from the typed name/project, plus a small fixed vocabulary — capped and deduped. */
+function suggestedTags(modelName: string, project: string): string[] {
+  const fromFields = `${modelName} ${project}`
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((word) => word.length > 1 && !TAG_STOPWORDS.has(word))
+
+  const seen = new Set<string>()
+  const suggestions: string[] = []
+  for (const tag of [...fromFields, ...FIXED_TAG_VOCAB]) {
+    if (!tag || seen.has(tag)) continue
+    seen.add(tag)
+    suggestions.push(tag)
+    if (suggestions.length >= MAX_TAG_SUGGESTIONS) break
+  }
+  return suggestions
+}
+
+function parseTags(value: string): string[] {
+  return value.split(',').map((s) => s.trim()).filter(Boolean)
+}
+
+/** Appends a tag to the comma-separated value, or removes it if already present. */
+function toggleTag(value: string, tag: string): string {
+  const tags = parseTags(value)
+  const i = tags.indexOf(tag)
+  if (i >= 0) tags.splice(i, 1)
+  else tags.push(tag)
+  return tags.join(', ')
+}
+
 // ─── Param field ──────────────────────────────────────────────────────────────
 
 const inputCls = 'w-full bg-zinc-800 border border-zinc-700/80 rounded-md px-2 py-1 text-[11px] text-zinc-200 focus:outline-none focus:border-accent/60'
@@ -143,11 +187,48 @@ function ParamField({ param, value, onChange }: {
       </div>
     )
   }
+  if (param.type === 'text') {
+    return (
+      <input type="text" value={value as string} placeholder={param.tooltip ?? ''}
+        onChange={(e) => onChange(e.target.value)} className={inputCls} />
+    )
+  }
   if (param.type === 'float') {
     return <FloatInput value={value as number} onChange={(v) => onChange(v)} className={inputCls} />
   }
   // int
   return <IntInput value={value as number} onChange={(v) => onChange(v)} className={inputCls} />
+}
+
+function TagSuggestionPills({ value, onChange, modelName, project }: {
+  value:     string
+  onChange:  (v: string) => void
+  modelName: string
+  project:   string
+}) {
+  const suggestions = useMemo(() => suggestedTags(modelName, project), [modelName, project])
+  if (suggestions.length === 0) return null
+
+  const active = new Set(parseTags(value))
+
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {suggestions.map((tag) => (
+        <button
+          key={tag}
+          type="button"
+          onClick={() => onChange(toggleTag(value, tag))}
+          className={`px-2 py-0.5 rounded-full text-[10px] border transition-colors ${
+            active.has(tag)
+              ? 'bg-accent/20 border-accent/60 text-accent-light'
+              : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'
+          }`}
+        >
+          {tag}
+        </button>
+      ))}
+    </div>
+  )
 }
 
 // ─── Workflow dropdown ────────────────────────────────────────────────────────
@@ -228,7 +309,7 @@ function ImageParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: Flow
           <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/>
           <polyline points="21 15 16 10 5 21"/>
         </svg>
-        <span className="text-[11px] font-medium text-zinc-300">Image</span>
+        <span className="text-[11px] font-medium text-zinc-300">Your sketch or photo — required</span>
       </div>
       {preview ? (
         <button onClick={browse} className="relative w-full aspect-square rounded-lg overflow-hidden border border-zinc-700 group">
@@ -325,13 +406,13 @@ function TextParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: FlowN
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" strokeWidth="2">
           <path d="M17 6.1H3M21 12.1H3M15.1 18H3"/>
         </svg>
-        <span className="text-[11px] font-medium text-zinc-300">Text</span>
+        <span className="text-[11px] font-medium text-zinc-300">Extra details — optional</span>
       </div>
       <textarea
         value={text}
         onChange={(e) => onPatch(nodeId, { params: { ...(data?.params ?? {}), text: e.target.value } })}
-        placeholder="Enter text…" rows={3}
-        className="w-full bg-zinc-800 border border-zinc-700/80 rounded-md px-2.5 py-2 text-[11px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-amber-500/40 resize-none leading-relaxed"
+        placeholder="Enter text…" rows={14}
+        className="w-full bg-zinc-800 border border-zinc-700/80 rounded-md px-2.5 py-2 text-[11px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-amber-500/40 resize-y min-h-[14rem] leading-relaxed"
       />
     </div>
   )
@@ -426,13 +507,24 @@ function ExtensionParamRow({ nodeId, ext, nodes, onPatch }: { nodeId: string; ex
         <div className="mt-2 flex flex-col gap-2">
           {ext.params.map((param) => {
             const val = ((data?.params[param.id] ?? param.default) as number | string)
+            const setValue = (v: number | string) =>
+              onPatch(nodeId, { params: { ...(data?.params ?? {}), [param.id]: v } })
             return (
-              <div key={param.id} className="flex items-center gap-2">
-                <label className="text-[10px] text-zinc-500 w-20 shrink-0 truncate">{param.label}</label>
-                <div className="flex-1">
-                  <ParamField param={param} value={val}
-                    onChange={(v) => onPatch(nodeId, { params: { ...(data?.params ?? {}), [param.id]: v } })} />
+              <div key={param.id} className="flex flex-col gap-1.5">
+                <div className="flex items-center gap-2">
+                  <label className="text-[10px] text-zinc-500 w-32 shrink-0 leading-tight">{param.label}</label>
+                  <div className="flex-1">
+                    <ParamField param={param} value={val} onChange={setValue} />
+                  </div>
                 </div>
+                {param.id === 'tags' && (
+                  <TagSuggestionPills
+                    value={String(val)}
+                    onChange={setValue}
+                    modelName={String(data?.params['model_name'] ?? '')}
+                    project={String(data?.params['project'] ?? '')}
+                  />
+                )}
               </div>
             )
           })}

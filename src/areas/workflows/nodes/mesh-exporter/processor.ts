@@ -200,16 +200,74 @@ const processor = async (
   context.progress(20, 'Loading mesh…')
   const doc = await io.read(input.filePath)
 
-  let outPath: string
-  if (outputPath) {
-    fs.mkdirSync(outputPath, { recursive: true })
-    outPath = path.join(outputPath, `export-${Date.now()}${ext}`)
-  } else {
-    const exportsDir = path.join(context.workspaceDir, 'Exports')
-    fs.mkdirSync(exportsDir, { recursive: true })
-    outPath = path.join(exportsDir, `export-${Date.now()}${ext}`)
+  // modly-friendly-names: a folder of export-1785194887022.glb tells you nothing.
+  const stamp  = new Date()
+  const pad    = (n: number): string => String(n).padStart(2, '0')
+  const unique = Date.now().toString(36).slice(-4)
+  const typed  = String(params['model_name'] ?? '').trim()
+  const slug   = typed
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+  const dated = `model-${stamp.getFullYear()}-${pad(stamp.getMonth() + 1)}-${pad(stamp.getDate())}`
+    + `-${pad(stamp.getHours())}${pad(stamp.getMinutes())}`
+  const baseName = `${slug || dated}-${unique}${ext}`
+
+  const slugify = (s: unknown): string => String(s ?? '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40)
+  const project = slugify(params['project'])
+
+  const root = outputPath || path.join(context.workspaceDir, 'Exports')
+  const dir  = project ? path.join(root, project) : root
+  fs.mkdirSync(dir, { recursive: true })
+  const outPath = path.join(dir, baseName)
+
+  // Tags: what the operator typed, plus what the file itself can tell us.
+  const typedTags = String(params['tags'] ?? '').split(',').map(slugify).filter(Boolean)
+  const suggested: string[] = []
+  try {
+    const r = doc.getRoot()
+    if (r.listSkins().length) suggested.push('rigged')
+    if (r.listAnimations().length) {
+      suggested.push('animated')
+      for (const a of r.listAnimations()) {
+        const n = slugify(a.getName())
+        if (n) suggested.push(`clip-${n}`)
+      }
+    }
+    if (r.listTextures().length) suggested.push('textured')
+    let tris = 0
+    for (const m of r.listMeshes())
+      for (const prim of m.listPrimitives()) {
+        const idx = prim.getIndices()
+        tris += idx ? idx.getCount() / 3
+                    : (prim.getAttribute('POSITION')?.getCount() ?? 0) / 3
+      }
+    tris = Math.round(tris)
+    suggested.push(tris < 5000 ? 'low-poly' : tris > 100000 ? 'high-poly' : 'mid-poly')
+    if (project) suggested.push(project)
+  } catch (e) {
+    context.log(`tagging skipped: ${e}`)
   }
+  const tags = Array.from(new Set([...typedTags, ...suggested]))
+
   fs.mkdirSync(path.dirname(outPath), { recursive: true })
+  fs.writeFileSync(outPath.replace(/\.[^.]+$/, '') + '.tags.json', JSON.stringify({
+    name:    typed || null,
+    project: params['project'] || null,
+    tags,
+    created: new Date().toISOString(),
+  }, null, 2))
+
+  try {
+    const asset = doc.getRoot().getAsset()
+    asset.extras = Object.assign({}, asset.extras, {
+      modly: { name: typed || null, project: params['project'] || null, tags },
+    })
+  } catch (e) {
+    context.log(`could not embed tags: ${e}`)
+  }
 
   context.progress(50, `Exporting as ${format.toUpperCase()}…`)
 

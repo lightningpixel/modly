@@ -7,6 +7,8 @@ import type {
   AssetLibraryOpenResult,
   AssetLibraryReadRequest,
   AssetLibraryReadResult,
+  AssetLibraryThumbnailRequest,
+  AssetLibraryThumbnailResult,
 } from './assetLibrary'
 
 // ─── Extension types ──────────────────────────────────────────────────────────
@@ -49,7 +51,7 @@ export type PickerIntent = 'folder' | 'image' | 'mesh' | 'text'
 export interface ParamSchema {
   id:       string
   label:    string
-  type:     'select' | 'int' | 'float' | 'string' | 'file-select'
+  type:     'select' | 'int' | 'float' | 'string' | 'text' | 'file-select'
   default:  number | string
   options?: { value: number | string; label: string }[]
   min?:     number
@@ -256,6 +258,7 @@ declare global {
           list: () => Promise<AssetLibraryListResult>
           read: (request: AssetLibraryReadRequest) => Promise<AssetLibraryReadResult>
           open: (request: AssetLibraryOpenRequest) => Promise<AssetLibraryOpenResult>
+          thumbnail: (request: AssetLibraryThumbnailRequest) => Promise<AssetLibraryThumbnailResult>
         }
       }
       setup: {
