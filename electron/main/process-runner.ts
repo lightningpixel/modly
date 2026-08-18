@@ -52,6 +52,9 @@ export interface ProcessInput {
   /** Per-slot texts for multi-text-input nodes (index = target handle slot). */
   texts?:    (string | undefined)[]
   nodeId?:   string
+  /** Absolute path of the existing workspace asset this input was sourced from
+   *  (if any) — threaded through the run so mesh-exporter can record lineage. */
+  sourceAssetPath?: string
 }
 
 export interface ProcessResult {

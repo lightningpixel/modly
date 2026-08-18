@@ -1,5 +1,6 @@
 import { app, BrowserWindow, shell, session } from 'electron'
 import { join } from 'path'
+import { readFileSync, writeFileSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { setupIpcHandlers } from './ipc-handlers'
 import { PythonBridge } from './python-bridge'
@@ -17,6 +18,37 @@ let pythonBridge: PythonBridge | null = null
 // through the uncaughtException handler forever. Swallow stream errors.
 process.stdout?.on('error', () => {})
 process.stderr?.on('error', () => {})
+
+// UI zoom: Ctrl/Cmd with + / - / 0 scales the whole window like a browser,
+// clamped to a sane range and persisted across restarts. This is done at the
+// Chromium level (not CSS) so pointer math in the 3D viewport stays correct.
+const ZOOM_MIN = -2
+const ZOOM_MAX = 4
+
+function zoomFilePath(): string {
+  return join(app.getPath('userData'), 'ui-zoom.json')
+}
+
+function loadZoomLevel(): number {
+  try {
+    const saved = JSON.parse(readFileSync(zoomFilePath(), 'utf-8')) as { level?: number }
+    return typeof saved.level === 'number' ? saved.level : 0
+  } catch {
+    return 0
+  }
+}
+
+function saveZoomLevel(level: number): void {
+  try {
+    writeFileSync(zoomFilePath(), JSON.stringify({ level }), 'utf-8')
+  } catch (err) {
+    logger.error(`Failed to persist UI zoom level: ${err}`)
+  }
+}
+
+function clampZoomLevel(level: number): number {
+  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, level))
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -59,6 +91,33 @@ function createWindow(): void {
       event.preventDefault()
       app.quit()
     }
+
+    const isZoomChord = input.type === 'keyDown' && (input.control || input.meta) && !input.alt
+    if (!isZoomChord) return
+
+    const wc = mainWindow?.webContents
+    if (!wc) return
+
+    if (input.key === '+' || input.key === '=') {
+      event.preventDefault()
+      const level = clampZoomLevel(wc.getZoomLevel() + 0.5)
+      wc.setZoomLevel(level)
+      saveZoomLevel(level)
+    } else if (input.key === '-' || input.key === '_') {
+      event.preventDefault()
+      const level = clampZoomLevel(wc.getZoomLevel() - 0.5)
+      wc.setZoomLevel(level)
+      saveZoomLevel(level)
+    } else if (input.key === '0') {
+      event.preventDefault()
+      wc.setZoomLevel(0)
+      saveZoomLevel(0)
+    }
+  })
+
+  mainWindow.webContents.on('did-finish-load', () => {
+    const level = loadZoomLevel()
+    if (level) mainWindow?.webContents.setZoomLevel(level)
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {

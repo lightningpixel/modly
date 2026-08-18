@@ -68,6 +68,21 @@ export function toggleAssetLibrarySectionKey(currentKeys: string[], sectionKey: 
     : [...currentKeys, sectionKey]
 }
 
+/**
+ * A section renders expanded either because the user left it expanded, or
+ * because a live search matched into it — search always wins so results are
+ * visible without clicking through "Show" first. Clearing the query falls
+ * straight back through to the untouched `collapsedSectionKeys`, so whatever
+ * was collapsed before searching stays collapsed after.
+ */
+export function isAssetLibrarySectionExpanded(
+  collapsedSectionKeys: string[],
+  sectionKey: string,
+  hasActiveSearch: boolean,
+): boolean {
+  return hasActiveSearch || !collapsedSectionKeys.includes(sectionKey)
+}
+
 export function buildAssetLibraryOpenRequest(entry: ProjectedAssetLibraryEntry): AssetLibraryOpenRequest {
   const target = resolveAssetLibraryOpenTarget(entry)
   return target.kind === 'linked-source'
@@ -166,6 +181,69 @@ export function createAssetLibraryOpenJob(
 
 export function resolveOpenPanelAfterLibrarySelection(currentPanel: GenerateOpenPanel): GenerateOpenPanel {
   return currentPanel === 'library' ? 'library' : currentPanel
+}
+
+// Wide enough that a 40px thumbnail, a readable name, its full workspace path,
+// and its type badge all sit on one row without truncating for typical asset
+// names — narrow (~280px) made the panel unusable even at full height. Raising
+// the minimum (not just the default) also repairs the shape for anyone who
+// already dragged a prior session's panel down toward the old, cramped floor.
+export const ASSET_LIBRARY_PANEL_MIN_WIDTH = 380
+export const ASSET_LIBRARY_PANEL_MAX_WIDTH = 960
+export const ASSET_LIBRARY_PANEL_DEFAULT_WIDTH = 640
+
+const ASSET_LIBRARY_PANEL_WIDTH_STORAGE_KEY = 'modly-library-panel-width'
+
+export function clampAssetLibraryPanelWidth(width: number): number {
+  return Math.min(ASSET_LIBRARY_PANEL_MAX_WIDTH, Math.max(ASSET_LIBRARY_PANEL_MIN_WIDTH, width))
+}
+
+/** Reads the user's saved Library panel width, falling back to the default when unset, invalid, or unreadable. */
+export function getStoredAssetLibraryPanelWidth(): number {
+  try {
+    const raw = Number(localStorage.getItem(ASSET_LIBRARY_PANEL_WIDTH_STORAGE_KEY))
+    return Number.isFinite(raw) && raw > 0 ? clampAssetLibraryPanelWidth(raw) : ASSET_LIBRARY_PANEL_DEFAULT_WIDTH
+  } catch {
+    return ASSET_LIBRARY_PANEL_DEFAULT_WIDTH
+  }
+}
+
+/** Persists the Library panel width so it survives app restarts. */
+export function storeAssetLibraryPanelWidth(width: number): void {
+  try {
+    localStorage.setItem(ASSET_LIBRARY_PANEL_WIDTH_STORAGE_KEY, String(width))
+  } catch {
+    // Ignore quota/private-mode failures — the panel just won't remember its size.
+  }
+}
+
+export const ASSET_LIBRARY_PANEL_MIN_HEIGHT = 280
+export const ASSET_LIBRARY_PANEL_MAX_HEIGHT = 1000
+export const ASSET_LIBRARY_PANEL_DEFAULT_HEIGHT = 860
+
+const ASSET_LIBRARY_PANEL_HEIGHT_STORAGE_KEY = 'modly-library-panel-height'
+
+export function clampAssetLibraryPanelHeight(height: number): number {
+  return Math.min(ASSET_LIBRARY_PANEL_MAX_HEIGHT, Math.max(ASSET_LIBRARY_PANEL_MIN_HEIGHT, height))
+}
+
+/** Reads the user's saved Library panel height, falling back to the default when unset, invalid, or unreadable. */
+export function getStoredAssetLibraryPanelHeight(): number {
+  try {
+    const raw = Number(localStorage.getItem(ASSET_LIBRARY_PANEL_HEIGHT_STORAGE_KEY))
+    return Number.isFinite(raw) && raw > 0 ? clampAssetLibraryPanelHeight(raw) : ASSET_LIBRARY_PANEL_DEFAULT_HEIGHT
+  } catch {
+    return ASSET_LIBRARY_PANEL_DEFAULT_HEIGHT
+  }
+}
+
+/** Persists the Library panel height so it survives app restarts. */
+export function storeAssetLibraryPanelHeight(height: number): void {
+  try {
+    localStorage.setItem(ASSET_LIBRARY_PANEL_HEIGHT_STORAGE_KEY, String(height))
+  } catch {
+    // Ignore quota/private-mode failures — the panel just won't remember its size.
+  }
 }
 
 function sortAssetLibraryEntries(

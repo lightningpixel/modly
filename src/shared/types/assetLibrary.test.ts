@@ -14,6 +14,8 @@ import type {
   AssetLibraryOpenRequest,
   AssetLibraryReadResult,
   AssetLibrarySourceLink,
+  AssetLibraryThumbnailRequest,
+  AssetLibraryThumbnailResult,
 } from './assetLibrary.ts'
 
 test('declares capability-first asset taxonomy without extension categories', () => {
@@ -113,6 +115,26 @@ test('AssetLibraryEntry carries library-owned source, manifest, artifact, versio
   assert.equal(entry.artifactId, 'artifact-hero')
   assert.equal(entry.versionId, 'version-1')
   assert.equal(entry.provenance?.source, 'library-sidecar')
+})
+
+test('thumbnail requests and results can carry a previewClip name and its clip list', () => {
+  // Typed (not `satisfies`) so the omitted optional `previewClip` is still
+  // part of `staticRequest`'s type instead of narrowing it away entirely.
+  const staticRequest: AssetLibraryThumbnailRequest = { workspacePath: 'Exports/hero.glb' }
+  const clipRequest: AssetLibraryThumbnailRequest = { workspacePath: 'Exports/hero.glb', previewClip: 'walk' }
+  const staticResult = {
+    success: true,
+    dataUrl: 'data:image/png;base64,aa',
+    previews: [{ clip: 'idle', duration: 1.5 }, { clip: 'walk', duration: 0.8 }],
+  } satisfies AssetLibraryThumbnailResult
+  const clipResult = { success: true, dataUrl: 'data:image/webp;base64,bb' } satisfies AssetLibraryThumbnailResult
+  const miss = { success: false } satisfies AssetLibraryThumbnailResult
+
+  assert.equal(staticRequest.previewClip, undefined)
+  assert.equal(clipRequest.previewClip, 'walk')
+  assert.equal(staticResult.previews?.[1]?.clip, 'walk')
+  assert.equal(clipResult.success && clipResult.dataUrl, 'data:image/webp;base64,bb')
+  assert.equal(miss.success, false)
 })
 
 test('read and open requests can carry a sourceWorkspacePath for linked-source opens', () => {
