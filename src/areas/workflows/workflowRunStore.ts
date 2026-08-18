@@ -1,10 +1,12 @@
 import { create } from 'zustand'
 import axios, { AxiosInstance } from 'axios'
 import { useAppStore } from '@shared/stores/appStore'
+import { useAgentStore } from '@shared/stores/agentStore'
 import { getWorkflowExtension } from './mockExtensions'
 import type { WorkflowExtension } from './mockExtensions'
 import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
-import { isBranchStarter, isSceneOutput, resolveDataSource, reachesSceneOutput, nearestUpstreamWaits } from './nodeBehaviors'
+import { isBranchStarter, isSceneOutput, resolveDataSource, reachesSceneOutput, nearestUpstreamWaits,
+         isLlmPortHandle, isProviderOnlyLlm, LLM_PORT_PREFIX } from './nodeBehaviors'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -29,6 +31,12 @@ const IDLE: WorkflowRunState = {
 
 const _cancel      = { current: false }
 const _activeJobId = { current: null as string | null }
+// Extension id of the process-extension run currently in flight, so Cancel can
+// kill its subprocess (a Python runner may be parked in a long /llm/chat call).
+const _activeProcessExtId = { current: null as string | null }
+// In-flight LLM generation, so Cancel can abort the SSE stream instead of letting
+// it run to completion in the background.
+const _activeLlmAbort = { current: null as AbortController | null }
 // While container (manual mode) pause/resume — set by continueWhile()/retryWhile().
 const _resume      = { current: null as (() => void) | null }
 const _retry       = { current: false }
@@ -70,10 +78,13 @@ function isIterator(type: string | undefined): boolean {
   return type === 'forEachNode'
 }
 
-/** True for nodes the runner executes (and can re-run inside a loop body). */
-function isExecutable(node: WFNode): boolean {
+/** True for nodes the runner executes (and can re-run inside a loop body).
+ *  `enabled` is opt-out: only an explicit `false` skips a node, so a workflow
+ *  authored by the agent or imported without the flag still runs. */
+function isExecutable(node: WFNode, edges: WFEdge[]): boolean {
   if (isIterator(node.type)) return true
-  return node.type === 'extensionNode' && !!node.data.enabled
+  if (node.type === 'llmNode') return node.data.enabled !== false && !isProviderOnlyLlm(node.id, edges)
+  return node.type === 'extensionNode' && node.data.enabled !== false
 }
 
 /** Absolute, alphabetically-sorted paths of an iterator's files (listFiles sorts). */
@@ -104,7 +115,7 @@ function reachableExecutable(startId: string, edges: WFEdge[], nodeMap: Map<stri
       seen.add(e.target)
       const t = nodeMap.get(e.target)
       if (!t || isBranchStarter(t.type)) continue
-      if (isExecutable(t)) body.add(e.target)
+      if (isExecutable(t, edges)) body.add(e.target)
       stack.push(e.target)
     }
   }
@@ -137,6 +148,8 @@ interface RunContext {
   iteratorFiles:      Map<string, string[]>
   /** workspace URL of the most recently pushed scene mesh (last branch the user ran wins) */
   lastSceneMesh?:     string
+  /** live per-node text setter — lets a streaming node fill its output as tokens arrive */
+  setNodeText:        (nodeId: string, text: string) => void
 }
 const _ctx = { current: null as RunContext | null }
 
@@ -224,7 +237,7 @@ function identifyBranches(workflow: Workflow): {
   // Wait → … → Wait chains nest: nodes after the 2nd Wait belong to it, not the 1st.
   const branchOwner = new Map<string, string>()
   for (const node of workflow.nodes) {
-    if (isBranchStarter(node.type) || !isExecutable(node)) continue
+    if (isBranchStarter(node.type) || !isExecutable(node, workflow.edges)) continue
     const nearest = nearestUpstreamWaits(node.id, workflow.edges, nodeMap)
     if (nearest.size === 1) branchOwner.set(node.id, [...nearest][0])
   }
@@ -240,7 +253,7 @@ function identifyBranches(workflow: Workflow): {
   for (const w of waitIds) branches.set(w, [])
   const preExecExtNodes: WFNode[] = []
   for (const node of ordered) {
-    if (!isExecutable(node)) continue
+    if (!isExecutable(node, workflow.edges)) continue
     const owner = branchOwner.get(node.id)
     if (owner) branches.get(owner)!.push(node)
     else preExecExtNodes.push(node)
@@ -277,6 +290,129 @@ async function executeIteratorNode(
   setRunState((s) => ({ ...s, blockProgress: 100, blockStep: `Loaded ${name}` }))
 }
 
+// ─── LLM node execution ────────────────────────────────────────────────────────
+// Runs a chat completion through the shared local llama.cpp server (POST
+// /llm/chat). The incoming text connection (if any) is the user prompt; the
+// node's own Prompt field is only a fallback, matching what LLMNode.tsx shows.
+
+async function executeLLMNode(
+  node:        WFNode,
+  ctx:         RunContext,
+  setRunState: (updater: (s: WorkflowRunState) => WorkflowRunState) => void,
+): Promise<void> {
+  const { workflow, nodeOutputs, nodeMap } = ctx
+
+  // Every incoming text is used, not just the first one — the LLM node has a
+  // single unnamed handle, so several sources can legitimately land on it and
+  // silently dropping all but one loses the user's data. Ordered by the source
+  // node's position (top-to-bottom, then left-to-right) so the prompt reads the
+  // way the graph looks and doesn't depend on edge insertion order.
+  const incomingTexts = workflow.edges
+    .filter((e) => e.target === node.id)
+    .map((e) => resolveDataSource(e.source, workflow.edges, nodeMap))
+    .map((sourceId) => (sourceId ? { node: nodeMap.get(sourceId), text: nodeOutputs.get(sourceId)?.text } : undefined))
+    .filter((x): x is { node: WFNode | undefined; text: string } => !!x?.text && x.text.trim().length > 0)
+    .sort((a, b) =>
+      (a.node?.position.y ?? 0) - (b.node?.position.y ?? 0) ||
+      (a.node?.position.x ?? 0) - (b.node?.position.x ?? 0))
+    .map((x) => x.text)
+  const incomingText = incomingTexts.length > 0 ? incomingTexts.join('\n\n') : undefined
+
+  // Freshest params at the moment the node starts, like extension nodes do, so
+  // loop iterations / Retry pick up edits made while the run was paused.
+  const params      = _liveParams.current.get(node.id) ?? node.data.params ?? {}
+  const userText     = (incomingText && incomingText.trim().length > 0) ? incomingText : (params.prompt as string | undefined)
+  if (!userText || userText.trim().length === 0) {
+    throw new Error('LLM needs a prompt or an incoming text connection')
+  }
+
+  const system      = params.system as string | undefined
+  const model        = (params.model as string | undefined) ?? useAgentStore.getState().localModel
+  const temperature  = params.temperature as number | undefined
+  const maxTokensRaw = params.maxTokens as number | undefined
+  const maxTokens    = (typeof maxTokensRaw === 'number' && maxTokensRaw > 0) ? maxTokensRaw : undefined
+
+  const messages: { role: string; content: string }[] = []
+  if (system && system.trim().length > 0) messages.push({ role: 'system', content: system })
+  messages.push({ role: 'user', content: userText })
+
+  // Loading a cold model + generating can take a while; keep the bar off "Starting…".
+  setRunState((s) => ({ ...s, blockProgress: 20, blockStep: `Generating with ${model}…` }))
+  ctx.setNodeText(node.id, '')
+
+  // Stream so the node fills its output live instead of freezing on "Generating…".
+  // The abort controller is what makes Cancel actually stop a generation: aborting
+  // the fetch closes the SSE connection, which llama-server treats as a stop.
+  const apiUrl     = useAppStore.getState().apiUrl
+  const controller = new AbortController()
+  _activeLlmAbort.current = controller
+  if (_cancel.current) { controller.abort() }
+
+  let res: Response
+  try {
+    res = await fetch(`${apiUrl}/llm/chat`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ model, messages, temperature, max_tokens: maxTokens, stream: true }),
+      signal:  controller.signal,
+    })
+  } catch (err) {
+    _activeLlmAbort.current = null
+    if (_cancel.current || (err as Error)?.name === 'AbortError') throw new Error('Cancelled')
+    throw err
+  }
+  if (!res.ok || !res.body) {
+    _activeLlmAbort.current = null
+    throw new Error(`LLM request failed (HTTP ${res.status})`)
+  }
+
+  const reader  = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf  = ''
+  let text = ''
+  try {
+    for (;;) {
+      // Checked every chunk as well as via the signal, so a cancel that lands
+      // between two tokens doesn't wait for the next one.
+      if (_cancel.current) { controller.abort(); throw new Error('Cancelled') }
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const parts = buf.split('\n\n')
+      buf = parts.pop() ?? ''
+      for (const part of parts) {
+        const line = part.split('\n').find((l) => l.startsWith('data: '))
+        if (!line) continue
+        const payload = line.slice(6).trim()
+        if (payload === '[DONE]') continue
+        let frame: { choices?: { delta?: { content?: string } }[]; error?: string }
+        try { frame = JSON.parse(payload) } catch { continue }
+        if (frame.error) throw new Error(frame.error)
+        const delta = frame.choices?.[0]?.delta?.content
+        if (delta) { text += delta; ctx.setNodeText(node.id, text) }
+      }
+    }
+  } catch (err) {
+    if (_cancel.current || (err as Error)?.name === 'AbortError') throw new Error('Cancelled')
+    throw err
+  } finally {
+    _activeLlmAbort.current = null
+    // Don't leave the response stream open when we bail out mid-generation.
+    void reader.cancel().catch(() => {})
+  }
+
+  // An empty completion (0 tokens, context overflow, a bare [DONE]) is a
+  // failure, not a value: downstream nodes discard blank text, so a later LLM
+  // node would silently fall back to its own Prompt field and the run would
+  // "succeed" having generated from a different prompt than the graph says.
+  if (text.trim().length === 0) {
+    throw new Error(`${model} returned an empty response — try a shorter prompt or a higher max tokens`)
+  }
+
+  nodeOutputs.set(node.id, { text, outputType: 'text' })
+  setRunState((s) => ({ ...s, blockProgress: 100, blockStep: 'Done' }))
+}
+
 // ─── Per-node execution ──────────────────────────────────────────────────────
 // Resolves inputs (walking through Wait passthroughs), runs the extension
 // (model or process), updates nodeOutputs, and pushes the mesh to the scene
@@ -289,6 +425,10 @@ async function executeExtensionNode(
 ): Promise<void> {
   if (isIterator(node.type)) {
     await executeIteratorNode(node, ctx, setRunState)
+    return
+  }
+  if (node.type === 'llmNode') {
+    await executeLLMNode(node, ctx, setRunState)
     return
   }
 
@@ -312,7 +452,11 @@ async function executeExtensionNode(
   // Indexed by target handle: input-0 → texts[0], input-1 → texts[1].
   const nodeInputTexts: (string | undefined)[] = []
 
-  const incomingEdges = workflow.edges.filter((e) => e.target === node.id)
+  // Model-provider edges are not data inputs — they only set an `llm-model`
+  // param — so they're resolved separately and kept out of the loops below.
+  const allIncoming   = workflow.edges.filter((e) => e.target === node.id)
+  const llmPortEdges  = allIncoming.filter((e) => isLlmPortHandle(e.targetHandle))
+  const incomingEdges = allIncoming.filter((e) => !isLlmPortHandle(e.targetHandle))
 
   if (ext?.inputs && ext.inputs.length > 1) {
     for (const edge of incomingEdges) {
@@ -336,6 +480,24 @@ async function executeExtensionNode(
   }
 
   const isModelNode = ext?.type === 'model'
+
+  // Nodes are created with `params: {}` — the schema defaults only ever existed
+  // in the UI (ExtensionNode shows `params[id] ?? default`). Merge them here so
+  // an untouched control still sends its declared default to the extension.
+  const schemaDefaults = Object.fromEntries(
+    (ext?.params ?? []).map((p) => [p.id, p.default]),
+  )
+  const effectiveParams: Record<string, unknown> = { ...schemaDefaults, ...liveParams }
+
+  // A wired LLM node wins over the node's own dropdown for that param.
+  for (const edge of llmPortEdges) {
+    const paramId = (edge.targetHandle ?? '').slice(LLM_PORT_PREFIX.length)
+    const provider = nodeMap.get(edge.source)
+    if (!paramId || provider?.type !== 'llmNode') continue
+    const providerParams = _liveParams.current.get(provider.id) ?? provider.data.params ?? {}
+    const model = (providerParams.model as string | undefined) ?? useAgentStore.getState().localModel
+    if (model) effectiveParams[paramId] = model
+  }
 
   if (isModelNode) {
     const isTextInput = ext?.inputs ? ext.inputs.every((i) => i === 'text') : ext?.input === 'text'
@@ -370,11 +532,6 @@ async function executeExtensionNode(
       extraParams.prompt = nodeInputText
       extraParams.text   = nodeInputText
     }
-
-    const schemaDefaults = Object.fromEntries(
-      (ext.params ?? []).map((p) => [p.id, p.default]),
-    )
-    const effectiveParams = { ...schemaDefaults, ...liveParams }
 
     const fd = new FormData()
     fd.append('image', blob, fname)
@@ -426,16 +583,26 @@ async function executeExtensionNode(
     const parts  = (node.data.extensionId ?? '').split('/')
     const extId  = parts[0]
     const nid    = parts[1] ?? ''
-    const result = await window.electron.extensions.runProcess(
-      extId,
-      {
-        filePath: nodeInputPath,
-        text:     nodeInputText,
-        texts:    nodeInputTexts.length > 0 ? nodeInputTexts : undefined,
-        nodeId:   nid,
-      },
-      liveParams as Record<string, unknown>,
-    )
+    // The runner only exposes one in-flight run per extension id, so cancelling
+    // by extension id is unambiguous.
+    _activeProcessExtId.current = extId
+    setRunState((s) => ({ ...s, blockProgress: 0, blockStep: 'Starting…' }))
+    let result: { success: boolean; result?: { filePath?: string; text?: string }; error?: string }
+    try {
+      result = await window.electron.extensions.runProcess(
+        extId,
+        {
+          filePath: nodeInputPath,
+          text:     nodeInputText,
+          texts:    nodeInputTexts.length > 0 ? nodeInputTexts : undefined,
+          nodeId:   nid,
+        },
+        effectiveParams,
+      )
+    } finally {
+      _activeProcessExtId.current = null
+    }
+    if (_cancel.current) throw new Error('Cancelled')
     if (!result.success) throw new Error(result.error ?? 'Process extension failed')
     nodeInputPath = result.result?.filePath ?? nodeInputPath
     nodeInputText = result.result?.text     ?? nodeInputText
@@ -500,6 +667,7 @@ interface WorkflowRunStore {
   activeNodeId:     string | null
   activeWorkflowId: string | null
   nodeImageOutputs: Record<string, string>
+  nodeTextOutputs:  Record<string, string>
   waitStates:       Record<string, WaitState>
   runningBranchId:  string | null
   /** whileId → current iteration / total (total null = manual/unbounded) */
@@ -521,6 +689,33 @@ interface WorkflowRunStore {
   setLiveNodeParams: (nodeId: string, params: Record<string, unknown>) => void
 }
 
+/** Which kind of pause a run is parked in, if any.
+ *
+ *  Both share `runState.status === 'paused'`, which is exactly why every caller
+ *  got it wrong: a Wait handoff was treated as a loop boundary and resumed with
+ *  `continueWhile()`, which no-ops when no loop is parked — the run could never
+ *  be continued, from the chat or from the Continue button. `runningBranchId` is
+ *  the discriminator: a loop pause parks the pre-phase on the container node, a
+ *  Wait handoff leaves it null.
+ *
+ *  Resume with `continueWhile()`/`retryWhile()` for 'loop', `continueRun(waitId)`
+ *  for 'wait'.
+ */
+export type RunPause = { kind: 'loop' } | { kind: 'wait'; waitId: string } | null
+
+export function pauseKind(s: {
+  runState:        { status: WorkflowRunState['status'] }
+  runningBranchId: string | null
+  waitStates:      Record<string, WaitState>
+}): RunPause {
+  if (s.runState.status === 'paused' && s.runningBranchId !== null) return { kind: 'loop' }
+  const waitId = Object.entries(s.waitStates).find(([, w]) => w === 'pending')?.[0]
+  if (waitId && (s.runState.status === 'paused' || s.runState.status === 'done')) {
+    return { kind: 'wait', waitId }
+  }
+  return s.runState.status === 'paused' ? { kind: 'loop' } : null
+}
+
 export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
   const setRunState = (updater: (s: WorkflowRunState) => WorkflowRunState): void => {
     set((s) => ({ runState: updater(s.runState) }))
@@ -535,6 +730,14 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
           out[nodeId] = `/workspace/${norm.slice(ctx.workspaceDir.length).replace(/^\//, '')}`
         }
       }
+    }
+    return out
+  }
+
+  const collectTextOutputs = (ctx: RunContext): Record<string, string> => {
+    const out: Record<string, string> = {}
+    for (const [nodeId, o] of ctx.nodeOutputs) {
+      if (o.outputType === 'text' && o.text !== undefined) out[nodeId] = o.text
     }
     return out
   }
@@ -557,7 +760,13 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
     if (!outputUrl) {
       for (const [, o] of ctx.nodeOutputs) {
         if (o.filePath) {
-          if (o.outputType === 'audio') {
+          // Only viewer-loadable files may become outputUrl (images, audio, etc.
+          // go to outputPath). The list mirrors what Viewer3D actually dispatches
+          // to a loader: glb/gltf → useGLTF, obj → OBJLoader, ply/splat →
+          // SplatViewer. .obj was missing and its outputs never reached the
+          // viewer. Not .stl/.fbx: those are export-only and would land in
+          // useGLTF and fail, which is why outputType === 'mesh' is too broad.
+          if (!/\.(glb|gltf|obj|ply|splat)$/i.test(o.filePath)) {
             outputPath = o.filePath
             continue
           }
@@ -575,6 +784,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
       pausedGroup:      [],
       waitStates:       finalWaitStates ?? s.waitStates,
       nodeImageOutputs: collectImageOutputs(ctx),
+      nodeTextOutputs:  collectTextOutputs(ctx),
       runState: {
         status:        'done',
         blockIndex:    0,
@@ -593,6 +803,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
     activeNodeId:     null,
     activeWorkflowId: null,
     nodeImageOutputs: {},
+    nodeTextOutputs:  {},
     waitStates:       {},
     runningBranchId:  null,
     whileProgress:    {},
@@ -601,6 +812,12 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
     async run(workflow, allExtensions, overrideImageData?) {
       _cancel.current = false
       _pauseRequested.current = false
+      // Enter 'running' before anything can fail. The For Each pre-checks below
+      // set 'error' directly, so re-running a workflow that fails the same way
+      // twice went error → error with no transition — and every subscriber
+      // (the chat's run watcher) keys off the transition, so the second failure
+      // was silently swallowed and the chat stayed stuck on the first.
+      set((s) => ({ runState: { ...s.runState, status: 'running', error: undefined } }))
       // Seed live params from the snapshot; UI edits during the run override these.
       _liveParams.current = new Map(workflow.nodes.map((n) => [n.id, { ...(n.data.params ?? {}) }]))
 
@@ -708,6 +925,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
       set({
         activeWorkflowId: workflow.id,
         nodeImageOutputs: {},
+        nodeTextOutputs:  {},
         // Top-level Waits are pending; nested Waits start blocked until their parent finishes.
         waitStates:       Object.fromEntries(waitIds.map((id) => [id, parentWait.get(id) ? 'blocked' as WaitState : 'pending' as WaitState])),
         runningBranchId:  null,
@@ -769,6 +987,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
         const ctx: RunContext = {
           workflow, allExtensions, client, workspaceDir, selectedImagePath, selectedImageData,
           overrideImageData, nodeOutputs, nodeMap, ordered, branches, waitIds, parentWait, iteratorFiles,
+          setNodeText: (nodeId, text) => set((s) => ({ nodeTextOutputs: { ...s.nodeTextOutputs, [nodeId]: text } })),
         }
         _ctx.current = ctx
 
@@ -776,7 +995,11 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
         // active loop (or the union of several For Each loops sharing a boundary);
         // re-iterations then execute only those members and skip everything else in
         // the range. null = first pass / no active loop (run all nodes once).
-        let activeLoopBody: Set<string> | null = null
+        //
+        // A ref rather than a plain `let`, and for a type reason: every write is
+        // inside handleLoopEnd, so at the read site TS still saw the declaration's
+        // `null` and typed the guarded branch `never`. Same idiom as _resume/_cancel.
+        const activeLoopBody: { current: Set<string> | null } = { current: null }
 
         // End-of-body handler for While containers. Called after each pre-phase node;
         // when the index is a loop's last body node, it either jumps back (auto N× or
@@ -818,7 +1041,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
               setRunState((s) => ({ ...s, status: 'running' }))
               if (_retry.current) {   // re-run the current file(s), no advance
                 _retry.current = false
-                activeLoopBody = groupBody
+                activeLoopBody.current = groupBody
                 return jumpTo
               }
               // Continue → fall through to the normal advance below
@@ -836,10 +1059,10 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
             }
             if (anyMore) {
               setRunState((s) => ({ ...s, blockStep: 'Next file…' }))
-              activeLoopBody = groupBody
+              activeLoopBody.current = groupBody
               return jumpTo
             }
-            activeLoopBody = null
+            activeLoopBody.current = null
             return undefined
           }
 
@@ -851,7 +1074,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
             loopCounters.set(whileLoop.whileId, remaining - 1)
             bumpWhileProgress(whileLoop.whileId)
             setRunState((s) => ({ ...s, blockStep: `Looping… ${remaining - 1} left` }))
-            activeLoopBody = whileLoop.bodyIds
+            activeLoopBody.current = whileLoop.bodyIds
             return whileLoop.firstIdx
           }
           // Otherwise the auto counter is exhausted (or it's manual mode): pause on
@@ -867,10 +1090,10 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
           if (_retry.current) {
             _retry.current = false
             bumpWhileProgress(whileLoop.whileId)
-            activeLoopBody = whileLoop.bodyIds
+            activeLoopBody.current = whileLoop.bodyIds
             return whileLoop.firstIdx
           }
-          activeLoopBody = null   // Continue → resume normal forward execution
+          activeLoopBody.current = null   // Continue → resume normal forward execution
           return undefined
         }
 
@@ -880,7 +1103,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
           if (_cancel.current) { _ctx.current = null; set({ runState: IDLE, activeNodeId: null }); return }
           const node = preExecExtNodes[i]
           // During a loop replay, only re-run the active loop's body members.
-          if (activeLoopBody && !activeLoopBody.has(node.id)) continue
+          if (activeLoopBody.current && !activeLoopBody.current.has(node.id)) continue
           set((s) => ({
             activeNodeId: node.id,
             runState: { ...s.runState, blockIndex: stepsDone, blockProgress: 0, blockStep: 'Starting…' },
@@ -1011,14 +1234,20 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
         axios.create({ baseURL: apiUrl }).post(`/generate/cancel/${_activeJobId.current}`).catch(() => {})
         _activeJobId.current = null
       }
+      if (_activeProcessExtId.current) {
+        window.electron.extensions.cancelProcess(_activeProcessExtId.current).catch(() => {})
+        _activeProcessExtId.current = null
+      }
+      _activeLlmAbort.current?.abort()
+      _activeLlmAbort.current = null
       _ctx.current = null
-      set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null, nodeImageOutputs: {}, waitStates: {}, runningBranchId: null, whileProgress: {}, pausedGroup: [] })
+      set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null, nodeImageOutputs: {}, nodeTextOutputs: {}, waitStates: {}, runningBranchId: null, whileProgress: {}, pausedGroup: [] })
       useAppStore.getState().setCurrentJob(null)
     },
 
     reset() {
       _ctx.current = null
-      set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null, nodeImageOutputs: {}, waitStates: {}, runningBranchId: null, whileProgress: {}, pausedGroup: [] })
+      set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null, nodeImageOutputs: {}, nodeTextOutputs: {}, waitStates: {}, runningBranchId: null, whileProgress: {}, pausedGroup: [] })
     },
 
     continueWhile() {
@@ -1039,3 +1268,27 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
     },
   }
 })
+
+// Live progress from process extensions. Registered once: the main process only
+// emits while a run is in flight, and _activeProcessExtId gates late messages.
+if (typeof window !== 'undefined' && window.electron?.extensions?.onProcessProgress) {
+  window.electron.extensions.onProcessProgress(({ extensionId, percent, label, message }) => {
+    // Ignore anything from a run that is no longer the active one.
+    if (!_activeProcessExtId.current || extensionId !== _activeProcessExtId.current) return
+    if (message !== undefined) {
+      // Surfaced as the step text so a long silent run shows what it's doing;
+      // also mirrored to the console for the full history.
+      console.debug('[extension]', message)
+      const line = message.trim().slice(0, 120)
+      if (line) useWorkflowRunStore.setState((s) => ({ runState: { ...s.runState, blockStep: line } }))
+      return
+    }
+    useWorkflowRunStore.setState((s) => ({
+      runState: {
+        ...s.runState,
+        blockProgress: typeof percent === 'number' ? percent : s.runState.blockProgress,
+        blockStep:     label && label.length > 0 ? label : s.runState.blockStep,
+      },
+    }))
+  })
+}

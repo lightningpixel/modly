@@ -1,3 +1,4 @@
+import type { Dirent } from 'node:fs'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
@@ -254,7 +255,10 @@ async function collectFiles(workspaceDir: string, rootName: typeof ALLOWED_ROOTS
   const files: string[] = []
 
   async function walk(dir: string): Promise<void> {
-    let entries: Awaited<ReturnType<typeof readdir>>
+    // Not `Awaited<ReturnType<typeof readdir>>`: that picks readdir's FIRST
+    // overload, which current @types/node types as Dirent<NonSharedBuffer>[],
+    // so every entry.name read as a Buffer instead of a string.
+    let entries: Dirent<string>[]
     try {
       entries = await readdir(dir, { withFileTypes: true })
     } catch {

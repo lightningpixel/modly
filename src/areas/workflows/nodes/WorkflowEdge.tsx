@@ -2,13 +2,7 @@ import { getBezierPath, useReactFlow, useEdges } from '@xyflow/react'
 import type { EdgeProps } from '@xyflow/react'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
 import { buildAllWorkflowExtensions } from '../mockExtensions'
-
-const HANDLE_COLOR: Record<string, string> = {
-  audio: '#34d399',
-  image: '#38bdf8',
-  mesh:  '#a78bfa',
-  text:  '#fbbf24',
-}
+import { HANDLE_COLOR, FALLBACK_COLOR } from '../portColors'
 
 export default function WorkflowEdge({
   id, source, target,
@@ -23,17 +17,24 @@ export default function WorkflowEdge({
   const sourceNode = getNode(source)
   const targetNode = getNode(target)
 
-  // Read targetHandle directly from edge store — reliable regardless of EdgeProps version
-  const thisEdge    = edges.find((e) => e.id === id)
+  // Read the handles directly from the edge store — reliable regardless of EdgeProps version
+  const thisEdge     = edges.find((e) => e.id === id)
   const targetHandle = thisEdge?.targetHandle
+  const sourceHandle = thisEdge?.sourceHandle
 
-  const sourceColor = sourceNode?.type === 'imageNode'
+  // Model-provider link (LLM node → an extension's llm-model param): one colour
+  // end to end, it carries no data type.
+  const isLlmLink = sourceHandle === 'llm' || (targetHandle ?? '').startsWith('llm-')
+
+  const sourceColor = isLlmLink
+    ? HANDLE_COLOR.llm
+    : sourceNode?.type === 'imageNode'
     ? HANDLE_COLOR.image
-    : sourceNode?.type === 'textNode'
+    : sourceNode?.type === 'textNode' || sourceNode?.type === 'llmNode'
     ? HANDLE_COLOR.text
     : sourceNode?.type === 'meshNode'
     ? HANDLE_COLOR.mesh
-    : (HANDLE_COLOR[allExtensions.find((e) => e.id === sourceNode?.data?.extensionId)?.output ?? ''] ?? '#52525b')
+    : (HANDLE_COLOR[allExtensions.find((e) => e.id === sourceNode?.data?.extensionId)?.output ?? ''] ?? FALLBACK_COLOR)
 
   // For multi-input nodes pick the color of the specific connected handle
   const targetExt = allExtensions.find((e) => e.id === targetNode?.data?.extensionId)
@@ -45,11 +46,15 @@ export default function WorkflowEdge({
     return targetExt?.input
   })()
 
-  const targetColor = targetNode?.type === 'outputNode'
+  const targetColor = isLlmLink
+    ? HANDLE_COLOR.llm
+    : targetNode?.type === 'outputNode'
     ? HANDLE_COLOR.mesh
     : targetNode?.type === 'previewNode'
     ? HANDLE_COLOR.image
-    : (HANDLE_COLOR[targetInputType ?? ''] ?? '#52525b')
+    : targetNode?.type === 'llmNode'
+    ? HANDLE_COLOR.text
+    : (HANDLE_COLOR[targetInputType ?? ''] ?? FALLBACK_COLOR)
 
   const [edgePath] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition })
   const gradientId = `wf-edge-${id}`

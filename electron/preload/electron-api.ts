@@ -87,6 +87,14 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         ipcRenderer.invoke('fs:readScreenshotDataUrl', filename) as Promise<string>,
     },
 
+    // Secure storage — OS-level encryption for secrets (API keys, …)
+    secureStore: {
+      encrypt: (plainText: string): Promise<string> => ipcRenderer.invoke('secure:encrypt', plainText) as Promise<string>,
+      // null = one of our blobs that couldn't be decrypted here (different OS
+      // user/machine). Never the ciphertext — see secure-store.ts.
+      decrypt: (stored: string): Promise<string | null> => ipcRenderer.invoke('secure:decrypt', stored) as Promise<string | null>,
+    },
+
     // Settings
     settings: {
       get: (): Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string; hfToken?: string }> =>
@@ -234,6 +242,26 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         params:      Record<string, unknown>,
       ): Promise<{ success: boolean; result?: { filePath?: string; text?: string }; error?: string }> =>
         ipcRenderer.invoke('extensions:runProcess', extensionId, input, params) as Promise<{ success: boolean; result?: { filePath?: string; text?: string }; error?: string }>,
+
+      cancelProcess: (extensionId: string): Promise<{ success: boolean }> =>
+        ipcRenderer.invoke('extensions:cancelProcess', extensionId) as Promise<{ success: boolean }>,
+
+      onProcessProgress: (cb: (data: {
+        extensionId: string
+        nodeId:      string
+        percent?:    number
+        label?:      string
+        message?:    string
+      }) => void) => {
+        ipcRenderer.on('extensions:progress', (_event, data) => cb(data as {
+          extensionId: string
+          nodeId:      string
+          percent?:    number
+          label?:      string
+          message?:    string
+        }))
+      },
+      offProcessProgress: () => ipcRenderer.removeAllListeners('extensions:progress'),
 
       onInstallProgress: (cb: (data: {
         step: 'downloading' | 'extracting' | 'validating' | 'setting_up' | 'done' | 'error'

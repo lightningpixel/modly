@@ -14,10 +14,15 @@ import type {
 export interface ExtensionNode {
   id:               string
   name:             string
+  /** What this node does, for the agent's extension list. Falls back to the
+   *  extension-level description when the manifest doesn't set one per node. */
+  description?:     string
   input:            'image' | 'text' | 'mesh' | 'audio'
   inputs?:          ('image' | 'text' | 'mesh' | 'audio')[]   // multi-input nodes; overrides input when set
   inputLabels?:     string[]   // display labels per input slot (e.g. positive/negative)
   output:           'image' | 'text' | 'mesh' | 'audio'
+  /** Sink node: renders no output handle (e.g. an exporter that writes to disk). */
+  terminal?:        boolean
   paramsSchema:     ParamSchema[]
   paramDefaults?:   Record<string, number | string>
   hfRepo?:          string
@@ -47,7 +52,7 @@ export interface ModelExtension {
 export interface ParamSchema {
   id:       string
   label:    string
-  type:     'select' | 'int' | 'float' | 'string' | 'file-select'
+  type:     'select' | 'int' | 'float' | 'string' | 'file-select' | 'llm-model'
   default:  number | string
   options?: { value: number | string; label: string }[]
   min?:     number
@@ -58,6 +63,11 @@ export interface ParamSchema {
   // file-select: dropdown of the files inside the folder held by another param
   dir_from?:   string     // id of the (string) param holding the folder path
   extensions?: string[]   // file extensions to list (e.g. ["json"])
+  // llm-model: dropdown of the local LLM library (Settings → Agent). The
+  // extension receives the chosen model id as a plain string and talks to the
+  // shared server itself (POST {MODLY_API_URL}/llm/chat).
+  llm_tag?:    string     // optional category filter, e.g. "code" for coder models
+  port?:       boolean    // also expose it as a node handle an LLM node can drive
 }
 
 export interface ProcessExtension {
@@ -126,6 +136,10 @@ export interface WFEdge {
   target:        string
   sourceHandle?: string | null
   targetHandle?: string | null
+  /** React Flow edge renderer. The editor stamps 'workflowEdge' via
+   *  DEFAULT_EDGE_OPTS and the agent's graph builder emits it too, so edges
+   *  round-tripped through a saved workflow carry it. */
+  type?:         string
 }
 
 export interface Workflow {
@@ -187,6 +201,11 @@ declare global {
       settings: {
         get: () => Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string; hfToken?: string }>
         set: (patch: { modelsDir?: string; workspaceDir?: string; workflowsDir?: string; extensionsDir?: string; hfToken?: string }) => Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string; hfToken?: string }>
+      }
+      /** decrypt returns null when the stored blob can't be decrypted here. */
+      secureStore: {
+        encrypt: (plainText: string) => Promise<string>
+        decrypt: (stored: string) => Promise<string | null>
       }
       cache: {
         clear: () => Promise<{ success: boolean; error?: string }>
@@ -299,6 +318,15 @@ declare global {
         repair:      (extensionId: string) => Promise<{ success: boolean; error?: string }>
         reload:      () => Promise<{ success: boolean; error?: string; errors?: Record<string, string> }>
         runProcess:  (extensionId: string, input: ProcessInput, params: Record<string, unknown>) => Promise<{ success: boolean; result?: ProcessResult; error?: string }>
+        cancelProcess: (extensionId: string) => Promise<{ success: boolean }>
+        onProcessProgress: (cb: (data: {
+          extensionId: string
+          nodeId:      string
+          percent?:    number
+          label?:      string
+          message?:    string
+        }) => void) => void
+        offProcessProgress: () => void
         onInstallProgress: (cb: (data: {
           step:          'downloading' | 'extracting' | 'validating' | 'setting_up' | 'done' | 'error'
           percent?:      number

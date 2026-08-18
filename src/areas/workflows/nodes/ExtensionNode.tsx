@@ -1,27 +1,13 @@
 import { useCallback, useEffect, useRef, useLayoutEffect, useState } from 'react'
-import { Handle, Position, useReactFlow } from '@xyflow/react'
+import { Handle, Position, useReactFlow, useEdges } from '@xyflow/react'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
+import LlmModelSelect from '@shared/components/ui/LlmModelSelect'
 import { buildAllWorkflowExtensions } from '../mockExtensions'
+import { HANDLE_COLOR, TAG_CLS, TAG_FALLBACK, FALLBACK_COLOR } from '../portColors'
 import type { ParamSchema } from '../mockExtensions'
 import type { WFNodeData } from '@shared/types/electron.d'
 import { useWorkflowRunStore } from '../workflowRunStore'
 import BaseNode from './BaseNode'
-
-// ─── Handle colors ────────────────────────────────────────────────────────────
-
-const HANDLE_COLOR: Record<string, string> = {
-  audio: '#34d399',
-  image: '#38bdf8',
-  mesh:  '#a78bfa',
-  text:  '#fbbf24',
-}
-
-const TAG_CLS: Record<string, string> = {
-  audio: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400',
-  image: 'border-sky-500/30 bg-sky-500/10 text-sky-400',
-  mesh:  'border-violet-500/30 bg-violet-500/10 text-violet-400',
-  text:  'border-amber-500/30 bg-amber-500/10 text-amber-400',
-}
 
 // ─── Param control ────────────────────────────────────────────────────────────
 
@@ -109,15 +95,28 @@ function FileSelectControl({ param, value, dirValue, onChange }: {
   )
 }
 
-function ParamControl({ param, value, onChange, resolvedParams }: {
+function ParamControl({ param, value, onChange, resolvedParams, drivenByPort }: {
   param:          ParamSchema
   value:          number | string
   onChange:       (v: number | string) => void
   resolvedParams: Record<string, unknown>
+  drivenByPort?:  boolean
 }) {
   if (param.type === 'file-select') {
     const dirValue = String(resolvedParams[param.dir_from ?? ''] ?? '')
     return <FileSelectControl param={param} value={String(value ?? '')} dirValue={dirValue} onChange={onChange} />
+  }
+  if (param.type === 'llm-model') {
+    // An attached LLM node overrides the param at run time — show that instead
+    // of letting the user edit a value that won't be used.
+    if (drivenByPort) {
+      return (
+        <p className="text-[10px] text-pink-400/90 leading-snug px-0.5 py-1">
+          Driven by the connected LLM node.
+        </p>
+      )
+    }
+    return <LlmModelSelect value={String(value ?? '')} tag={param.llm_tag} className={inputCls} onChange={onChange} />
   }
   if (param.type === 'select') {
     return (
@@ -158,35 +157,52 @@ function ParamControl({ param, value, onChange, resolvedParams }: {
 
 export default function ExtensionNode({ id, data, selected }: { id: string; data: WFNodeData; selected?: boolean }) {
   const { updateNodeData } = useReactFlow()
+  const edges   = useEdges()
   const running = useWorkflowRunStore((s) => s.activeNodeId === id)
-
-  // Refs for handle alignment — support up to 2 inputs
-  const ioRowRef  = useRef<HTMLDivElement>(null)
-  const ioRow2Ref = useRef<HTMLDivElement>(null)
-  const [handleTop,  setHandleTop]  = useState('50%')
-  const [handle2Top, setHandle2Top] = useState('50%')
 
   const { modelExtensions, processExtensions } = useExtensionsStore()
   const allExtensions = buildAllWorkflowExtensions(modelExtensions, processExtensions)
   const ext = allExtensions.find((e) => e.id === data.extensionId)
 
-  const inputs      = ext?.inputs  // defined → multi-input mode
-  const isMulti     = inputs && inputs.length > 1
-  const isTerminal  = ext?.id === 'mesh-exporter'
+  // One row (and one handle) per declared input, however many the manifest
+  // declares — a 3rd input used to be dropped silently by the UI while the
+  // runner, preflight and autowire all handled it fine.
+  const inputs      = (ext?.inputs && ext.inputs.length > 0 ? ext.inputs : [ext?.input ?? 'image']) as string[]
+  const isMulti     = inputs.length > 1
+  // Manifest-driven. Deliberately NOT set on mesh-exporter: the old check here
+  // compared `ext.id === 'mesh-exporter'` against an id that is really
+  // "mesh-exporter/export", so it never fired — Export Mesh has always had an
+  // output handle, and turning it off now would hide (but not delete) the edges
+  // of every saved workflow that chains something after it.
+  const isTerminal  = ext?.terminal ?? false
   const outputColor = HANDLE_COLOR[ext?.output ?? 'mesh']
   const hasParams   = (ext?.params.length ?? 0) > 0
 
+  // Refs for handle alignment — one per input row.
+  const ioRowRefs = useRef<(HTMLDivElement | null)[]>([])
+  const [handleTops, setHandleTops] = useState<string[]>([])
+  const handleTop = handleTops[0] ?? '50%'
+
+  // Model-provider ports: an `llm-model` param declared with `port: true` gets a
+  // handle on the bottom edge (separate from the data flow, like n8n's
+  // ai_languageModel connector) that an LLM node can drive.
+  const llmPorts = (ext?.params ?? []).filter((p) => p.type === 'llm-model' && p.port)
+  const connectedLlmPorts = new Set(
+    edges
+      .filter((e) => e.target === id && (e.targetHandle ?? '').startsWith('llm-'))
+      .map((e) => (e.targetHandle ?? '').slice(4)),
+  )
+
   // Align handles with their respective IO rows after mount
   useLayoutEffect(() => {
-    if (ioRowRef.current) {
-      const center = ioRowRef.current.offsetTop + ioRowRef.current.offsetHeight / 2
-      setHandleTop(`${center}px`)
-    }
-    if (ioRow2Ref.current) {
-      const center = ioRow2Ref.current.offsetTop + ioRow2Ref.current.offsetHeight / 2
-      setHandle2Top(`${center}px`)
-    }
-  }, [isMulti])
+    const tops = inputs.map((_, i) => {
+      const el = ioRowRefs.current[i]
+      return el ? `${el.offsetTop + el.offsetHeight / 2}px` : '50%'
+    })
+    setHandleTops((prev) => (prev.length === tops.length && prev.every((v, i) => v === tops[i]) ? prev : tops))
+    // `inputs` is rebuilt on every render; its length is what changes the layout.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inputs.length, hasParams])
 
   const patchParam = useCallback((key: string, val: number | string) => {
     const params = { ...data.params, [key]: val }
@@ -206,42 +222,24 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
   }
 
   // ── IO subheader ─────────────────────────────────────────────────────────
-  const ioSubheader = isMulti ? (
-    // Multi-input layout: one row per input, output on first row
-    <div className="flex flex-col divide-y divide-zinc-800/40">
-      <div ref={ioRowRef} className="flex items-center justify-between px-3 py-2">
-        <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TAG_CLS[inputs[0]] ?? 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>
-          {ext?.inputLabels?.[0] ?? inputs[0]}
-        </span>
-        {!isTerminal && (
-          <>
-            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-zinc-600 shrink-0">
-              <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
-            </svg>
-            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TAG_CLS[ext?.output ?? ''] ?? 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>
-              {ext?.output ?? '—'}
-            </span>
-          </>
-        )}
-      </div>
-      <div ref={ioRow2Ref} className="flex items-center px-3 py-2">
-        <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TAG_CLS[inputs[1]] ?? 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>
-          {ext?.inputLabels?.[1] ?? inputs[1]}
-        </span>
-      </div>
-    </div>
-  ) : (
-    // Single-input layout (existing behavior)
-    <div ref={ioRowRef} className="flex items-center justify-between px-3 py-2">
-      <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TAG_CLS[ext?.input ?? ''] ?? 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>
-        {ext?.input ?? '—'}
+  // One row per input; the output badge rides on the first row.
+  const tagCls = (type: string | undefined) => TAG_CLS[type ?? ''] ?? TAG_FALLBACK
+
+  const ioRow = (type: string, index: number) => (
+    <div
+      key={index}
+      ref={(el) => { ioRowRefs.current[index] = el }}
+      className="flex items-center justify-between px-3 py-2"
+    >
+      <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${tagCls(type)}`}>
+        {ext?.inputLabels?.[index] ?? type ?? '—'}
       </span>
-      {!isTerminal && (
+      {index === 0 && !isTerminal && (
         <>
           <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-zinc-600 shrink-0">
             <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
           </svg>
-          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TAG_CLS[ext?.output ?? ''] ?? 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>
+          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${tagCls(ext?.output)}`}>
             {ext?.output ?? '—'}
           </span>
         </>
@@ -249,25 +247,28 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
     </div>
   )
 
+  const ioSubheader = isMulti ? (
+    <div className="flex flex-col divide-y divide-zinc-800/40">{inputs.map(ioRow)}</div>
+  ) : (
+    ioRow(inputs[0], 0)
+  )
+
   // ── Handles ──────────────────────────────────────────────────────────────
   const handlesEl = (
     <>
-      {/* Primary input handle */}
-      <Handle
-        id="input-0"
-        type="target"
-        position={Position.Left}
-        style={{ background: HANDLE_COLOR[isMulti ? inputs[0] : (ext?.input ?? 'image')], width: 14, height: 14, border: '2.5px solid #18181b', top: handleTop }}
-      />
-      {/* Secondary input handle (multi-input only) */}
-      {isMulti && (
+      {/* One input handle per declared input, aligned with its row */}
+      {inputs.map((type, i) => (
         <Handle
-          id="input-1"
+          key={i}
+          id={`input-${i}`}
           type="target"
           position={Position.Left}
-          style={{ background: HANDLE_COLOR[inputs[1]], width: 14, height: 14, border: '2.5px solid #18181b', top: handle2Top }}
+          style={{
+            background: HANDLE_COLOR[type] ?? FALLBACK_COLOR, width: 14, height: 14,
+            border: '2.5px solid #18181b', top: handleTops[i] ?? '50%',
+          }}
         />
-      )}
+      ))}
       {/* Output handle */}
       {!isTerminal && (
         <Handle
@@ -277,6 +278,19 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
           style={{ background: outputColor, width: 14, height: 14, border: '2.5px solid #18181b', top: handleTop }}
         />
       )}
+      {/* Model-provider ports (bottom edge) */}
+      {llmPorts.map((p, i) => (
+        <Handle
+          key={p.id}
+          id={`llm-${p.id}`}
+          type="target"
+          position={Position.Bottom}
+          style={{
+            background: HANDLE_COLOR.llm, width: 12, height: 12, border: '2.5px solid #18181b',
+            left: `${((i + 1) / (llmPorts.length + 1)) * 100}%`,
+          }}
+        />
+      ))}
     </>
   )
 
@@ -307,7 +321,13 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
                 <div key={param.id} className="flex items-center gap-2">
                   <label className="text-[10px] text-zinc-500 w-24 shrink-0 leading-tight">{param.label}</label>
                   <div className="flex-1">
-                    <ParamControl param={param} value={val} onChange={(v) => patchParam(param.id, v)} resolvedParams={resolvedParams} />
+                    <ParamControl
+                      param={param}
+                      value={val}
+                      onChange={(v) => patchParam(param.id, v)}
+                      resolvedParams={resolvedParams}
+                      drivenByPort={connectedLlmPorts.has(param.id)}
+                    />
                   </div>
                 </div>
               )

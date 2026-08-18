@@ -15,6 +15,8 @@ import {
   downloadModelFromHF,
 } from './model-downloader'
 import { getSettings, setSettings } from './settings-store'
+import { encryptSecret, decryptSecret } from './secure-store'
+import { getHfToken, initHfToken, setHfToken } from './hf-token'
 import { checkSetupNeeded, markSetupDone, runFullSetup, getVenvPythonExe, ensureSslPatch } from './python-setup'
 import { logger } from './logger'
 import { getProcessRunner, getPythonProcessRunner, getExtPythonExe, terminateProcessRunner, terminateAllProcessRunners } from './process-runner'
@@ -351,6 +353,11 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     }
   })
 
+  // Secure storage — OS-level encryption (Keychain/DPAPI/libsecret) for secrets
+  // the renderer would otherwise have to keep in plain-text localStorage (API keys).
+  ipcMain.handle('secure:encrypt', (_, plainText: string) => encryptSecret(plainText))
+  ipcMain.handle('secure:decrypt', (_, stored: string) => decryptSecret(stored))
+
   // Window controls (frameless window)
   ipcMain.on('window:minimize', () => getWindow()?.minimize())
   ipcMain.on('window:maximize', () => {
@@ -587,8 +594,19 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         timeout: 5000,
       })
       const modelDir = join(getSettings(app.getPath('userData')).modelsDir, modelId)
-      await rmAsync(modelDir, { recursive: true, force: true })
-      return { success: true }
+      // The cancel POST only SETS an event — the Python writer may still be
+      // inside an hf_hub_download write. A plain rm then fails with EBUSY on
+      // Windows and leaves a partial folder, which `isModelDownloaded` (dir is
+      // non-empty) reports as "Downloaded" until it fails at load time. Same
+      // retry loop model:delete uses, for the same reason.
+      const removed = await rmWithRetry(modelDir, 'model-cancel')
+      if (removed.ok) return { success: true }
+      return {
+        success: false,
+        error: removed.locked
+          ? 'Download files are still locked after several attempts. Try again in a moment.'
+          : String(removed.error),
+      }
     } catch (err) {
       return { success: false, error: String(err) }
     } finally {
@@ -669,33 +687,41 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     arch:      process.arch,
   }))
 
-  // Settings — seed HF token into main-process env at startup
+  // Settings — decrypt the HF token (migrating a legacy plaintext one) and seed
+  // it into the main-process env at startup.
   {
-    const initialToken = getSettings(app.getPath('userData')).hfToken ?? ''
-    if (initialToken) {
-      process.env['HUGGING_FACE_HUB_TOKEN'] = initialToken
-      process.env['HF_TOKEN']               = initialToken
+    const token = initHfToken(app.getPath('userData'))
+    if (token) {
+      process.env['HUGGING_FACE_HUB_TOKEN'] = token
+      process.env['HF_TOKEN']               = token
     }
   }
 
   ipcMain.handle('settings:get', () => {
-    return getSettings(app.getPath('userData'))
+    // hfToken is stored encrypted — hand the renderer the usable value.
+    return { ...getSettings(app.getPath('userData')), hfToken: getHfToken() }
   })
 
   ipcMain.handle('settings:set', async (_event, patch: { modelsDir?: string; workspaceDir?: string; extensionsDir?: string; hfToken?: string }) => {
-    const updated = setSettings(app.getPath('userData'), patch)
+    const { hfToken, ...dirs } = patch
+    setSettings(app.getPath('userData'), dirs)
     // Keep main-process env in sync so child processes spawned after token change inherit it
-    if (patch.hfToken !== undefined) {
-      process.env['HUGGING_FACE_HUB_TOKEN'] = patch.hfToken
-      process.env['HF_TOKEN']               = patch.hfToken
+    if (hfToken !== undefined) {
+      setHfToken(app.getPath('userData'), hfToken)
+      process.env['HUGGING_FACE_HUB_TOKEN'] = hfToken
+      process.env['HF_TOKEN']               = hfToken
       // Also push the token into the live FastAPI process env so extension
       // subprocesses spawned by ExtensionProcess._build_env() pick it up
       // without requiring a full app restart.
       try {
-        await axios.post(`${API_BASE_URL}/settings/hf-token`, { token: patch.hfToken }, { timeout: 3000 })
+        await axios.post(`${API_BASE_URL}/settings/hf-token`, { token: hfToken }, { timeout: 3000 })
       } catch { /* FastAPI may not be running yet — ignore */ }
     }
-    return updated
+    // Same shape as settings:get. getSettings() reads the file, where hfToken is
+    // stored encrypted, so returning it raw handed the renderer a ciphertext
+    // whenever the patch carried no token — a different value for the same key
+    // depending on which handler you asked.
+    return { ...getSettings(app.getPath('userData')), hfToken: getHfToken() }
   })
 
   // Directory picker
@@ -895,10 +921,14 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     nodes?: {
       id:                string
       name?:             string
-      input?:            'mesh' | 'image' | 'text' | 'audio'
-      inputs?:           ('mesh' | 'image' | 'text' | 'audio')[]
+      description?:      string
+      // Declared as plain strings on purpose: this is parsed JSON, so anything
+      // can be in there. coercePortType() is what narrows it to a known type.
+      input?:            string
+      inputs?:           string[]
       input_labels?:     string[]
-      output?:           'mesh' | 'image' | 'text' | 'audio'
+      output?:           string
+      terminal?:         boolean
       params_schema?:    unknown[]
       param_defaults?:   Record<string, unknown>
       hf_repo?:          string
@@ -906,6 +936,27 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       hf_skip_prefixes?: string[]
       hf_include_prefixes?: string[]
     }[]
+  }
+
+  // Port types the app knows how to draw and type-check. An unknown string used
+  // to flow straight through and land as `undefined` downstream, which preflight
+  // treats as a wildcard — so a single typo in a manifest silently disabled every
+  // type check on that node. Coerce to a safe default and say so in the log.
+  const DATA_TYPES = ['mesh', 'image', 'text', 'audio'] as const
+  type DataPortType = typeof DATA_TYPES[number]
+
+  function coercePortType(
+    value:    string | undefined,
+    fallback: DataPortType,
+    where:    string,
+  ): DataPortType {
+    if (value === undefined) return fallback
+    if ((DATA_TYPES as readonly string[]).includes(value)) return value as DataPortType
+    logger.error(
+      `[manifest] ${where}: unknown port type "${value}" — expected one of ${DATA_TYPES.join(', ')}. ` +
+      `Falling back to "${fallback}".`,
+    )
+    return fallback
   }
 
   function parseExtensionManifest(parsed: ParsedManifest, fallbackId: string, trustedRepos: Set<string>, builtin = false) {
@@ -920,13 +971,19 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       builtin,
     }
 
+    const extLabel = parsed.id ?? fallbackId
+
     const nodes = (parsed.nodes ?? []).map(n => ({
       id:             n.id,
       name:           n.name ?? n.id,
-      input:          n.input  ?? 'image' as const,
-      inputs:         n.inputs,
+      // Per node, because the agent reads it per node: one line covering both a
+      // generator and its texture pass describes neither.
+      description:    n.description ?? parsed.description,
+      input:          coercePortType(n.input, 'image', `${extLabel}/${n.id} input`),
+      inputs:         n.inputs?.map((t, i) => coercePortType(t, 'image', `${extLabel}/${n.id} inputs[${i}]`)),
       inputLabels:    n.input_labels,
-      output:         n.output ?? 'mesh'  as const,
+      output:         coercePortType(n.output, 'mesh', `${extLabel}/${n.id} output`),
+      terminal:       n.terminal ?? false,
       paramsSchema:   n.params_schema ?? parsed.params_schema ?? [],
       paramDefaults:  { ...(parsed.param_defaults ?? {}), ...(n.param_defaults ?? {}) },
       hfRepo:         n.hf_repo,
@@ -1397,12 +1454,22 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   // Run a process extension in an isolated worker thread
   ipcMain.handle('extensions:runProcess', async (_, extensionId: string, input: { filePath?: string; text?: string; texts?: (string | undefined)[]; nodeId?: string }, params: Record<string, unknown>) => {
     const userData        = app.getPath('userData')
-    const { extensionsDir, workspaceDir } = getSettings(userData)
+    const { extensionsDir, workspaceDir, modelsDir } = getSettings(userData)
 
-    // Resolve extension directory: check built-ins first, then user extensions
-    const builtinExtDir = join(getBuiltinExtensionsDir(), extensionId)
-    const userExtDir    = join(extensionsDir, extensionId)
-    const extDir        = existsSync(builtinExtDir) ? builtinExtDir : userExtDir
+    // Resolve extension directory: check built-ins first, then user extensions.
+    // Confined to its root like every other extension handler — this is the one
+    // that SPAWNS the folder's code, and `extensionId` comes from workflow JSON
+    // the user may have imported from anyone (`workflows:import` doesn't inspect
+    // node data). A bare join() normalises `..` but does not confine.
+    let builtinExtDir: string
+    let userExtDir:    string
+    try {
+      builtinExtDir = resolveExtensionPathWithinRoot(getBuiltinExtensionsDir(), extensionId)
+      userExtDir    = resolveExtensionPathWithinRoot(extensionsDir, extensionId)
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+    const extDir = existsSync(builtinExtDir) ? builtinExtDir : userExtDir
 
     if (!existsSync(extDir)) return { success: false, error: `Extension "${extensionId}" not found` }
 
@@ -1418,16 +1485,40 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       let runner
       if (isPythonEntry) {
         const pythonExe = getExtPythonExe(extDir) ?? getVenvPythonExe(userData)
-        runner = getPythonProcessRunner(extensionId, pythonExe, extDir, entry, workspaceDir, app.getPath('temp'))
+        runner = getPythonProcessRunner(extensionId, pythonExe, extDir, entry, workspaceDir, app.getPath('temp'), modelsDir)
       } else {
         runner = getProcessRunner(extensionId, extDir, entry, workspaceDir, app.getPath('temp'))
       }
 
-      const result = await runner.run(input, params)
+      // Forward the extension's own progress/log messages to the renderer —
+      // an LLM-backed node can run for minutes, so a silent bar is not an option.
+      const nodeId = input.nodeId ?? ''
+      const send = (payload: { percent?: number; label?: string; message?: string }) => {
+        // `mainWindow` is never nulled on close, so `?.` still yields a DESTROYED
+        // BrowserWindow and `.webContents` throws. A child flushing its last
+        // stderr during quit would take the main process down through the
+        // uncaughtException handler (which then throws again).
+        const wc = getWindow()?.webContents
+        if (wc && !wc.isDestroyed()) wc.send('extensions:progress', { extensionId, nodeId, ...payload })
+      }
+
+      const result = await runner.run(
+        input,
+        params,
+        (percent, label) => send({ percent, label }),
+        (message)        => send({ message }),
+      )
       return { success: true, result }
     } catch (err) {
       return { success: false, error: String(err) }
     }
+  })
+
+  // Kill an in-flight process-extension run (workflow Cancel). A Python runner
+  // can be parked in a 10-minute /llm/chat call, so cooperative cancel is out.
+  ipcMain.handle('extensions:cancelProcess', (_, extensionId: string) => {
+    terminateProcessRunner(extensionId)
+    return { success: true }
   })
 
   // Terminate all process runners on app quit

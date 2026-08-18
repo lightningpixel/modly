@@ -14,6 +14,7 @@ export interface WorkflowExtension {
   inputs?:         ('image' | 'text' | 'mesh' | 'audio')[]   // multi-input; overrides input when set
   inputLabels?:    string[]                                  // display labels per input slot
   output:          'image' | 'text' | 'mesh' | 'audio'
+  terminal?:       boolean   // sink node: no output handle (e.g. an exporter)
   params:          ParamSchema[]
   builtin:         boolean
   type:            'model' | 'process'
@@ -46,11 +47,12 @@ export function buildAllWorkflowExtensions(
         extensionAuthor: ext.author ?? '',
         nodeId:          node.id,
         name:            node.name,
-        description:     ext.description ?? '',
+        description:     node.description ?? ext.description ?? '',
         input:           node.input,
         inputs:          node.inputs,
         inputLabels:     node.inputLabels,
         output:          node.output,
+        terminal:        node.terminal,
         params:          applyParamDefaults(node.paramsSchema as ParamSchema[], node.paramDefaults),
         builtin:         ext.builtin,
         type:            'process',
@@ -67,11 +69,12 @@ export function buildAllWorkflowExtensions(
         extensionAuthor: ext.author ?? '',
         nodeId:          node.id,
         name:            node.name,
-        description:     ext.description ?? '',
+        description:     node.description ?? ext.description ?? '',
         input:           node.input,
         inputs:          node.inputs,
         inputLabels:     node.inputLabels,
         output:          node.output,
+        terminal:        node.terminal,
         params:          applyParamDefaults(node.paramsSchema as ParamSchema[], node.paramDefaults),
         builtin:         ext.builtin,
         type:            'model',

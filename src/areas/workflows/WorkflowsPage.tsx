@@ -17,11 +17,14 @@ import {
 import { useWorkflowsStore, NODE_TYPES_WITHOUT_TARGET, NODE_TYPES_WITHOUT_SOURCE, FOLDER_COLORS } from '@shared/stores/workflowsStore'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
 import { useAppStore } from '@shared/stores/appStore'
+import { useLlmModels } from '@shared/stores/llmModelsStore'
+import { useAgentStore } from '@shared/stores/agentStore'
 import type { Workflow, WFNode, WFEdge, WFNodeData } from '@shared/types/electron.d'
 import { buildAllWorkflowExtensions } from './mockExtensions'
 import type { WorkflowExtension } from './mockExtensions'
 import { useWorkflowRunStore } from './workflowRunStore'
-import { validateWorkflowPreflight } from './preflight'
+import { validateWorkflowPreflight, getNodeOutputType as preflightOutputType } from './preflight'
+import { isLlmPortHandle, LLM_PROVIDER_HANDLE } from './nodeBehaviors'
 import ExtensionNode    from './nodes/ExtensionNode'
 import ImageNode        from './nodes/ImageNode'
 import TextNode         from './nodes/TextNode'
@@ -31,13 +34,14 @@ import PreviewImageNode from './nodes/PreviewImageNode'
 import WaitNode         from './nodes/WaitNode'
 import WhileNode        from './nodes/WhileNode'
 import ForEachNode      from './nodes/ForEachNode'
+import LLMNode          from './nodes/LLMNode'
 import WorkflowEdge     from './nodes/WorkflowEdge'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const DRAG_KEY      = 'modly/extension-id'
 const DRAG_NODE_KEY = 'modly/node-type'
-const NODE_TYPES = { extensionNode: ExtensionNode, imageNode: ImageNode, textNode: TextNode, outputNode: AddToSceneNode, meshNode: Load3DMeshNode, previewNode: PreviewImageNode, waitNode: WaitNode, whileNode: WhileNode, forEachNode: ForEachNode }
+const NODE_TYPES = { extensionNode: ExtensionNode, imageNode: ImageNode, textNode: TextNode, outputNode: AddToSceneNode, meshNode: Load3DMeshNode, previewNode: PreviewImageNode, waitNode: WaitNode, whileNode: WhileNode, forEachNode: ForEachNode, llmNode: LLMNode }
 
 // Loop-container node types: resizable frames whose children form a loop body.
 // (For Each iterators are plain source nodes, not containers.)
@@ -103,6 +107,7 @@ const PANEL_BUILTIN_NODES = [
   { type: 'waitNode',    label: 'Wait',           color: '#71717a', icon: <><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></> },
   { type: 'whileNode',   label: 'While',          color: '#f59e0b', icon: <><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></> },
   { type: 'forEachNode', label: 'For Each', color: '#38bdf8', icon: <><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></> },
+  { type: 'llmNode',     label: 'LLM',      color: '#fbbf24', icon: <><path d="M9.9 2.8l1.6 4.2 4.2 1.6-4.2 1.6-1.6 4.2-1.6-4.2-4.2-1.6 4.2-1.6z"/><path d="M18 13l1 2.6 2.6 1-2.6 1-1 2.6-1-2.6-2.6-1 2.6-1z"/></> },
 ]
 
 function ExtGroupHeader({ title, author, expanded, onToggle, count }: { title: string; author?: string; expanded: boolean; onToggle: () => void; count: number }) {
@@ -696,12 +701,12 @@ function HelpModal({ onClose }: { onClose: () => void }) {
 
 // ─── Connection type helpers ──────────────────────────────────────────────────
 
+/** Output type of a node, reusing preflight's single source of truth (which
+ *  already covers llmNode and forEachNode — this used to be a partial copy that
+ *  returned undefined for them, silently allowing e.g. mesh → LLM). */
 function getNodeOutputType(node: Node | undefined, allExts: WorkflowExtension[]): string | undefined {
   if (!node) return undefined
-  if (node.type === 'imageNode') return 'image'
-  if (node.type === 'meshNode')  return 'mesh'
-  if (node.type === 'textNode')  return 'text'
-  return allExts.find((e) => e.id === (node.data as WFNodeData)?.extensionId)?.output
+  return preflightOutputType(node as unknown as WFNode, allExts)
 }
 
 function getNodeInputType(
@@ -712,6 +717,7 @@ function getNodeInputType(
   if (!node) return undefined
   if (node.type === 'outputNode')  return 'mesh'
   if (node.type === 'previewNode') return 'image'
+  if (node.type === 'llmNode')     return 'text'
   const ext = allExts.find((e) => e.id === (node.data as WFNodeData)?.extensionId)
   if (ext?.inputs && ext.inputs.length > 1 && targetHandle) {
     const idx = parseInt(targetHandle.replace('input-', ''), 10)
@@ -736,6 +742,11 @@ function WorkflowCanvasInner({
   const { screenToFlowPosition, getNode } = useReactFlow()
   const { runState, run: runWorkflow, cancel } = useWorkflowRunStore()
   const currentMeshUrl = useAppStore((s) => s.currentJob?.outputUrl)
+  // Shared local-LLM library, so preflight can catch a model that isn't on disk
+  // before the run dies on an HTTP 404 deep inside an extension.
+  const { models: llmModels } = useLlmModels()
+  // What an LLM node without an explicit model actually runs with.
+  const defaultLlmModel = useAgentStore((s) => s.localModel)
   const showToast = useAppStore((s) => s.showToast)
   const isRunning = runState.status === 'running' || runState.status === 'paused'
 
@@ -760,16 +771,21 @@ function WorkflowCanvasInner({
   const [histIdx, setHistIdx] = useState(0)
   const skipPushRef = useRef(true) // skip the initial autosave-triggered push
 
-  // Re-sync when workflow switches
+  // Distinguishes our own autosave echo from an external update (e.g. the
+  // agent editing this workflow from the chat) coming back through the store.
+  const lastSavedAtRef = useRef<string | null>(null)
+
+  // Re-sync when the workflow switches — or when it was modified externally
   useEffect(() => {
+    if (workflow.updatedAt === lastSavedAtRef.current) return
     setNodes(workflow.nodes as Node[])
     setEdges(workflow.edges as Edge[])
     historyRef.current = [{ nodes: workflow.nodes as Node[], edges: workflow.edges as Edge[] }]
     histIdxRef.current = 0
     setHistIdx(0)
     skipPushRef.current = true
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- re-sync only when the workflow switches; adding nodes/edges would reset the editor on every change
-  }, [workflow.id])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- re-sync on switch or external change; adding nodes/edges would reset the editor on every change
+  }, [workflow.id, workflow.updatedAt])
 
   // Auto-save + history push debounced
   useEffect(() => {
@@ -781,6 +797,7 @@ function WorkflowCanvasInner({
         edges: edges as WFEdge[],
         updatedAt: new Date().toISOString(),
       }
+      lastSavedAtRef.current = updated.updatedAt
       onSave(updated)
 
       if (!skipPushRef.current) {
@@ -805,8 +822,8 @@ function WorkflowCanvasInner({
       edges: edges as WFEdge[],
       updatedAt: workflow.updatedAt,
     }
-    return validateWorkflowPreflight(draft, allExtensions, { currentMeshUrl })
-  }, [workflow, nodes, edges, allExtensions, currentMeshUrl])
+    return validateWorkflowPreflight(draft, allExtensions, { currentMeshUrl, llmModels, defaultLlmModel })
+  }, [workflow, nodes, edges, allExtensions, currentMeshUrl, llmModels, defaultLlmModel])
 
   useEffect(() => {
     if (!didMountRef.current) {
@@ -851,9 +868,21 @@ function WorkflowCanvasInner({
   const canRedo = histIdx < historyRef.current.length - 1
 
   const isValidConnection = useCallback((connection: Edge | Connection) => {
-    const srcType = getNodeOutputType(getNode(connection.source) as Node, allExtensions)
-    const tgtType = getNodeInputType(getNode(connection.target) as Node, connection.targetHandle, allExtensions)
-    if (srcType && tgtType && srcType !== tgtType) return false  // type mismatch (unknown types allowed)
+    // Model-provider link: the LLM node's `llm` handle only fits an extension's
+    // `llm-<paramId>` port, and those ports accept nothing else.
+    const fromProvider = connection.sourceHandle === LLM_PROVIDER_HANDLE
+    const toLlmPort    = isLlmPortHandle(connection.targetHandle)
+    if (fromProvider !== toLlmPort) return false
+    // One provider per port: a second edge would make which model wins depend on
+    // edge array order.
+    if (toLlmPort && edges.some((e) =>
+      e.target === connection.target && e.targetHandle === connection.targetHandle)) return false
+
+    if (!fromProvider) {
+      const srcType = getNodeOutputType(getNode(connection.source) as Node, allExtensions)
+      const tgtType = getNodeInputType(getNode(connection.target) as Node, connection.targetHandle, allExtensions)
+      if (srcType && tgtType && srcType !== tgtType) return false  // type mismatch (unknown types allowed)
+    }
     // Reject connections that would create a cycle: if the target can already
     // reach the source, adding source→target closes a loop.
     if (connection.source && connection.target) {
@@ -1329,6 +1358,7 @@ const MINI_NODE_TINTS: Record<string, { fill: string; stroke: string }> = {
   extensionNode: { fill: 'rgba(167,139,250,0.24)', stroke: '#a78bfa' },
   outputNode:    { fill: 'rgba(56,189,248,0.22)',  stroke: '#38bdf8' },
   previewNode:   { fill: 'rgba(56,189,248,0.22)',  stroke: '#38bdf8' },
+  llmNode:       { fill: 'rgba(251,191,36,0.22)',  stroke: '#fbbf24' },
 }
 const MINI_NODE_DEFAULT_TINT = { fill: 'rgba(113,113,122,0.25)', stroke: '#71717a' }
 
