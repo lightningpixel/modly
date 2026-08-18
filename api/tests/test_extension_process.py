@@ -70,6 +70,24 @@ class AutoRepairPackageTests(unittest.TestCase):
         self.assertIsNone(proc._resolve_auto_repair_package("totally_unknown_pkg"))
 
 
+class StderrDecodingTests(unittest.TestCase):
+    """tqdm draws partial blocks with U+258D/U+258F, whose UTF-8 bytes are
+    undefined in cp1252. Decoding the child's pipes with the locale codec killed
+    _stderr_loop mid-run; nothing then drained stderr and the child blocked
+    forever on write once the pipe filled (a 3D generation froze at 80%)."""
+
+    def test_tqdm_partial_blocks_survive_the_loop(self) -> None:
+        proc = _make_proc()
+        bar = "Volume Decoding:   1%|█▍▏| 123/13827\r"
+        fake_proc = type("FakeProc", (), {"stderr": io.StringIO(bar)})()
+
+        proc._stderr_loop(fake_proc)  # must not raise
+
+    def test_child_is_told_to_write_utf8(self) -> None:
+        proc = _make_proc()
+        self.assertEqual(proc._build_env().get("PYTHONIOENCODING"), "utf-8")
+
+
 class RecvTests(unittest.TestCase):
     def test_returns_message_from_queue(self) -> None:
         proc = _make_proc()

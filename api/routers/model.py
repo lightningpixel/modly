@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from services.generator_registry import generator_registry, MODELS_DIR
 
@@ -74,7 +74,7 @@ async def model_params(model_id: Optional[str] = None):
 async def switch_model(model_id: str):
     """Switch the active model."""
     try:
-        generator_registry.switch_model(model_id)
+        await asyncio.to_thread(generator_registry.switch_model, model_id)
         return {"active": model_id}
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -128,7 +128,7 @@ async def hf_download(
     model_id: str,
     skip_prefixes: Optional[str] = None,
     include_prefixes: Optional[str] = None,
-    token: Optional[str] = None,
+    x_hf_token: Optional[str] = Header(default=None),
 ):
     """
     Streams a HuggingFace Hub model download via SSE.
@@ -137,11 +137,16 @@ async def hf_download(
 
     skip_prefixes:    JSON-encoded list of path prefixes to exclude.
     include_prefixes: JSON-encoded list of path prefixes to include (whitelist).
-    token:            HuggingFace access token for gated repos (from Electron settings).
-    All three fall back to the extension's manifest / environment when not supplied.
+    X-HF-Token:       HuggingFace access token for gated repos (from Electron settings).
+                      A HEADER, not a query param: uvicorn logs the full request
+                      line to stdout, python-bridge.ts pipes that into runtime.log,
+                      and `log:readAll` hands that file to the user for bug
+                      reports — the token used to travel all the way there.
+    All fall back to the extension's manifest / environment when not supplied.
 
     SSE format: data: {"percent": 0-100, "file": "...", "status": "..."}
     """
+    token = x_hf_token
     import json as _json
     import os
     dest_dir  = str(MODELS_DIR / model_id)

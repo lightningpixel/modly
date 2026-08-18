@@ -4,6 +4,8 @@ import { app, BrowserWindow } from 'electron'
 import { existsSync, mkdirSync } from 'fs'
 import axios from 'axios'
 import { getSettings } from './settings-store'
+import { getBuiltinExtensionsDir } from './builtin-sync'
+import { getHfToken } from './hf-token'
 import { logger } from './logger'
 import { cleanPythonEnv, getVenvPythonExe } from './python-setup'
 
@@ -52,10 +54,19 @@ export class PythonBridge {
       env: {
         ...cleanPythonEnv(),
         PYTHONUNBUFFERED:       '1',
+        // We decode both pipes as UTF-8 below (Buffer.toString() default), and
+        // the API forwards extension output — tqdm bars included — through its
+        // own stderr. Without this the API would encode them with the Windows
+        // locale codec and the HUD log pane would show █ escapes.
+        PYTHONIOENCODING:       'utf-8',
         // No PYTHONPATH needed - the venv's Python has its own isolated site-packages
         MODELS_DIR:             this.resolveModelsDir(),
         WORKSPACE_DIR:          this.resolveWorkspaceDir(),
         EXTENSIONS_DIR:         this.resolveExtensionsDir(),
+        // The built-ins live in their own folder, so the API's manifest lookups
+        // used to miss them entirely: the agent's param validation was silently
+        // skipped for the five extensions every user has.
+        BUILTIN_EXTENSIONS_DIR: getBuiltinExtensionsDir(),
         SELECTED_MODEL_ID:      process.env['SELECTED_MODEL_ID'] ?? '',
         HUGGING_FACE_HUB_TOKEN: this.resolveHfToken(),
         HF_TOKEN:               this.resolveHfToken(),
@@ -238,6 +249,6 @@ export class PythonBridge {
   }
 
   private resolveHfToken(): string {
-    return getSettings(app.getPath('userData')).hfToken ?? ''
+    return getHfToken()   // decrypted cache — settings.json holds the ciphertext
   }
 }
