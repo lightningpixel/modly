@@ -312,6 +312,31 @@ def _load_modly_settings() -> dict[str, Any]:
     return {}
 
 
+def _readable_hf_token(settings: dict[str, Any]) -> str:
+    """The desktop app encrypts `hfToken` with the OS keychain, which this CLI
+    cannot read. Return it only when it is usable as-is (a legacy plaintext
+    token, or the `plain:` fallback written when no keychain was available);
+    otherwise say so instead of exporting a ciphertext that silently 401s."""
+    stored = str(settings.get("hfToken") or "")
+    if not stored:
+        return ""
+    if stored.startswith("plain:"):
+        return stored[len("plain:"):]
+    # Matches secure-store.ts encryptSecretSync(): an even-length hex blob.
+    is_ciphertext = (
+        len(stored) >= 32 and len(stored) % 2 == 0
+        and all(c in "0123456789abcdefABCDEF" for c in stored)
+    )
+    if is_ciphertext:
+        print(
+            "[modly] The Hugging Face token stored by the app is encrypted and cannot be read "
+            "from the CLI. Pass --hf-token or set HF_TOKEN if you need gated repositories.",
+            file=sys.stderr,
+        )
+        return ""
+    return stored
+
+
 def _resolve_serve_config(args: argparse.Namespace) -> tuple[Path, Path, dict[str, str], list[str], str]:
     api_dir = Path(args.api_dir).expanduser().resolve() if getattr(args, "api_dir", None) else _default_api_dir()
     if not api_dir or not (api_dir / "main.py").exists():
@@ -323,7 +348,11 @@ def _resolve_serve_config(args: argparse.Namespace) -> tuple[Path, Path, dict[st
 
     settings = _load_modly_settings()
     env = os.environ.copy()
-    hf_token = getattr(args, "hf_token", None) or settings.get("hfToken") or os.environ.get("HF_TOKEN", "")
+    hf_token = (
+        getattr(args, "hf_token", None)
+        or _readable_hf_token(settings)
+        or os.environ.get("HF_TOKEN", "")
+    )
     env.update({
         "PYTHONUNBUFFERED": "1",
         "MODELS_DIR": getattr(args, "models_dir", None) or settings.get("modelsDir") or str(Path.home() / ".modly" / "models"),

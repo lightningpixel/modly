@@ -19,8 +19,11 @@ Modly exposes a local API at `http://127.0.0.1:8765` while the official desktop 
 - `health`
 - `model`
 - `workflow-run`
-- `capability`
-- `process-run`
+
+`capability` and `process-run` are also parsed, but they call `/automation/capabilities`
+and `/process-runs`, which `api/main.py` does not mount on any current build: they
+always fail closed with `{"code": "UNSUPPORTED_PROCESS"}`. Do not build on them until
+the server side exists.
 
 Final machine-readable JSON is printed to stdout. Progress JSON lines, when requested, are printed to stderr.
 
