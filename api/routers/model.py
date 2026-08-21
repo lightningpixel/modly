@@ -8,9 +8,16 @@ from pathlib import Path
 from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request as FastAPIRequest
 from fastapi.responses import StreamingResponse
 from services.generator_registry import generator_registry, MODELS_DIR
+from services.model_sources import (
+    normalize_model_sources,
+    resolve_download_path,
+    resolve_model_root,
+    resolve_source_destination,
+    validate_source_file_plan,
+)
 
 router = APIRouter(tags=["model"])
 
@@ -97,7 +104,7 @@ async def unload_all_models():
     return {"unloaded": True}
 
 
-@router.post("/unload/{model_id}")
+@router.post("/unload/{model_id:path}")
 async def unload_model(model_id: str):
     """Unloads a model from memory so its files can be safely deleted."""
     try:
@@ -120,6 +127,159 @@ async def cancel_hf_download(model_id: str):
     control = _download_control(model_id)
     control["cancel"].set()
     return {"cancelled": True}
+
+
+@router.post("/hf-download-sources")
+async def hf_download_sources(request: FastAPIRequest, model_id: str):
+    """Download all Hugging Face sources declared for one model node."""
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("Request body must be an object")
+        sources = normalize_model_sources({"model_sources": body.get("sources")})
+        if sources is None:
+            raise ValueError("sources are required")
+        model_root = resolve_model_root(MODELS_DIR, model_id)
+        destinations = {
+            source["id"]: resolve_source_destination(
+                MODELS_DIR, model_id, source["destination"]
+            )
+            for source in sources
+        }
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    authorization = request.headers.get("authorization", "")
+    hf_token = (
+        authorization[7:].strip()
+        if authorization.lower().startswith("bearer ")
+        else os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        or os.environ.get("HF_TOKEN")
+        or None
+    )
+    control = _new_download_control(model_id)
+
+    async def stream():
+        loop = asyncio.get_running_loop()
+
+        def _fmt(data: dict) -> str:
+            return f"data: {json.dumps(data)}\n\n"
+
+        try:
+            yield _fmt({"percent": 0, "status": "Listing repository files..."})
+            files_by_source: dict[str, list[str]] = {}
+
+            for source in sources:
+                _check_download_control(control)
+
+                def _list_files(current=source):
+                    from huggingface_hub import list_repo_files
+                    listed = list_repo_files(
+                        current["repo_id"],
+                        revision=current.get("revision"),
+                        token=hf_token,
+                    )
+                    include = current.get("include_prefixes", [])
+                    skip = current.get("skip_prefixes", [])
+                    return [
+                        filename for filename in listed
+                        if (not include or any(filename.startswith(prefix) for prefix in include))
+                        if not any(filename.startswith(prefix) for prefix in skip)
+                    ]
+
+                files = await loop.run_in_executor(None, _list_files)
+                if not files:
+                    raise RuntimeError(
+                        f'No files found in Hugging Face repo: {source["repo_id"]}'
+                    )
+                destination = destinations[source["id"]]
+                for filename in files:
+                    resolve_download_path(destination, filename)
+                files_by_source[source["id"]] = files
+
+            validate_source_file_plan(sources, files_by_source)
+            planned_files = [
+                (source, filename)
+                for source in sources
+                for filename in files_by_source[source["id"]]
+            ]
+            total = len(planned_files)
+            yield _fmt({"percent": 1, "status": f"Downloading {total} files..."})
+
+            from huggingface_hub import hf_hub_url
+
+            for index, (source, filename) in enumerate(planned_files):
+                _check_download_control(control)
+                display_file = f'{source["id"]}/{filename}'
+                base_percent = 1 + round(index / total * 94)
+                yield _fmt({
+                    "percent": base_percent,
+                    "file": display_file,
+                    "fileIndex": index + 1,
+                    "totalFiles": total,
+                    "status": f"Starting {display_file}",
+                    "bytesDownloaded": 0,
+                    "stalledSeconds": 0,
+                })
+
+                queue: asyncio.Queue[dict] = asyncio.Queue()
+
+                def _progress(message: dict) -> None:
+                    message["file"] = display_file
+                    loop.call_soon_threadsafe(queue.put_nowait, message)
+
+                url = hf_hub_url(
+                    repo_id=source["repo_id"],
+                    filename=filename,
+                    revision=source.get("revision"),
+                )
+                future = loop.run_in_executor(
+                    None,
+                    lambda: _download_file_streamed(
+                        url=url,
+                        filename=filename,
+                        dest_dir=str(destinations[source["id"]]),
+                        file_index=index + 1,
+                        total_files=total,
+                        base_percent=base_percent,
+                        progress_cb=_progress,
+                        control=control,
+                        token=hf_token,
+                    ),
+                )
+                while not future.done():
+                    try:
+                        message = await asyncio.wait_for(queue.get(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    yield _fmt(message)
+
+                final_size = await future
+                _check_download_control(control)
+                yield _fmt({
+                    "percent": 1 + round((index + 1) / total * 94),
+                    "file": display_file,
+                    "fileIndex": index + 1,
+                    "totalFiles": total,
+                    "status": "Downloaded",
+                    "bytesDownloaded": final_size,
+                    "stalledSeconds": 0,
+                })
+
+            yield _fmt({"percent": 100, "status": "done"})
+        except DownloadPaused:
+            yield _fmt({"paused": True, "status": "paused"})
+        except DownloadCancelled:
+            for part in model_root.rglob("*.part"):
+                part.unlink(missing_ok=True)
+            yield _fmt({"cancelled": True, "status": "cancelled"})
+        except Exception as exc:
+            yield _fmt({"error": str(exc)})
+        finally:
+            if _download_controls.get(model_id) is control:
+                _download_controls.pop(model_id, None)
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 @router.get("/hf-download")

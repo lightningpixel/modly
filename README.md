@@ -106,6 +106,42 @@ Modly supports external model and process extensions. Each extension is a GitHub
 
 ![Install models](docs/install-models.png)
 
+### Multiple Hugging Face repositories per model node
+
+A model node whose weights are split across repositories can declare
+`model_sources`. Modly validates every source, downloads them sequentially in
+one Models-page action, and considers the node installed only when every
+declared check exists.
+
+```json
+{
+  "id": "generate",
+  "model_sources": [
+    {
+      "id": "primary",
+      "provider": "huggingface",
+      "repo_id": "org/main-model",
+      "destination": ".",
+      "checks": ["model.safetensors"]
+    },
+    {
+      "id": "encoder",
+      "provider": "huggingface",
+      "repo_id": "org/encoder",
+      "revision": "v1.0",
+      "destination": "auxiliary/encoder",
+      "include_prefixes": ["config.json", "model.safetensors"],
+      "checks": ["config.json", "model.safetensors"]
+    }
+  ]
+}
+```
+
+`destination`, filters, and checks use safe POSIX paths relative to the node's
+model directory. The only supported provider is `huggingface`. Existing nodes
+that use `hf_repo`, `download_check`, `hf_include_prefixes`, and
+`hf_skip_prefixes` keep their original behavior.
+
 ---
 
 ## Workflows

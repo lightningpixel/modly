@@ -2,11 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
 import type { AnyExtension, ModelExtension } from '@shared/types/electron.d'
-import { formatModelName } from './utils'
+import { deleteModelsThenUninstallExtension, formatModelName } from './utils'
 import { ExtensionCard } from './components/ExtensionCard'
 import type { ExtensionNode } from './components/ExtensionCard'
 import { ExtensionDrawer } from './components/ExtensionDrawer'
-import { ICONS } from './components/extensionShared'
+import { ICONS, nodeHasManagedWeights } from './components/extensionShared'
 
 // ─── Filters & sorts ──────────────────────────────────────────────────────────
 
@@ -49,6 +49,7 @@ export default function ModelsPage(): JSX.Element {
 
   // Model weight state (needed for node install status + uninstall cleanup)
   const [installedVariantIds, setInstalledVariantIds] = useState<string[]>([])
+  const [localDataIds, setLocalDataIds] = useState<string[]>([])
   const [downloading, setDownloading] = useState<Record<string, {
     percent: number
     file?: string
@@ -84,15 +85,21 @@ export default function ModelsPage(): JSX.Element {
   // Check each model node individually via filesystem IPC — reliable regardless of API state
   async function refreshInstalledIds(exts: ModelExtension[]) {
     const ids: string[] = []
+    const localIds: string[] = []
     for (const ext of exts) {
       for (const node of ext.nodes) {
-        if (!node.hfRepo) continue
+        if (!nodeHasManagedWeights(node)) continue
         const fullId = `${ext.id}/${node.id}`
-        const ok = await window.electron.model.isDownloaded(fullId, node.downloadCheck)
+        const [ok, hasLocalData] = await Promise.all([
+          window.electron.model.isDownloaded(fullId),
+          window.electron.model.hasLocalData(fullId),
+        ])
         if (ok) ids.push(fullId)
+        if (hasLocalData) localIds.push(fullId)
       }
     }
     setInstalledVariantIds(ids)
+    setLocalDataIds(localIds)
   }
 
   useEffect(() => {
@@ -161,11 +168,11 @@ export default function ModelsPage(): JSX.Element {
   // ── Node install / download controls ──────────────────────────────────────
 
   function handleInstallNode(node: ExtensionNode, fullId: string) {
-    if (!node.hfRepo) return
+    if (!nodeHasManagedWeights(node)) return
     setDownloading((prev) => ({ ...prev, [fullId]: { ...(prev[fullId] ?? { percent: 0 }), paused: false, status: 'Starting…' } }))
-    window.electron.model.download(node.hfRepo!, fullId, node.hfSkipPrefixes, node.hfIncludePrefixes).then((result: { success: boolean; paused?: boolean; cancelled?: boolean }) => {
+    window.electron.model.download(fullId).then((result) => {
       if (!result.success && !result.paused && !result.cancelled) {
-        setGhErr('Download failed')
+        setGhErr(result.error ?? 'Download failed')
         setDownloading((prev) => { const n = { ...prev }; delete n[fullId]; return n })
       }
     })
@@ -174,7 +181,7 @@ export default function ModelsPage(): JSX.Element {
   function handleInstallAll(ext: AnyExtension) {
     if (ext.type !== 'model') return
     for (const node of ext.nodes) {
-      if (!node.hfRepo) continue
+      if (!nodeHasManagedWeights(node)) continue
       const fullId = `${ext.id}/${node.id}`
       if (installedVariantIds.includes(fullId) || downloading[fullId]) continue
       handleInstallNode(node, fullId)
@@ -188,7 +195,9 @@ export default function ModelsPage(): JSX.Element {
 
   async function handleCancelDownload(fullId: string) {
     setDownloading((prev) => { const n = { ...prev }; delete n[fullId]; return n })
-    await window.electron.model.cancelDownload(fullId)
+    const result = await window.electron.model.cancelDownload(fullId)
+    if (!result.success) setGhErr(result.error ?? 'Could not cancel download')
+    await refreshInstalledIds(useExtensionsStore.getState().modelExtensions)
   }
 
   async function handleUninstallNode(fullId: string) {
@@ -228,8 +237,8 @@ export default function ModelsPage(): JSX.Element {
   function openUninstallModal(extId: string) {
     const ext = allExtensions.find((e) => e.id === extId)
     if (ext?.type === 'model') {
-      const installedModels = ext.nodes.filter((n) => installedVariantIds.includes(`${extId}/${n.id}`))
-      setModelsToDelete(new Set(installedModels.map((n) => `${extId}/${n.id}`)))
+      const localModels = ext.nodes.filter((n) => localDataIds.includes(`${extId}/${n.id}`))
+      setModelsToDelete(new Set(localModels.map((n) => `${extId}/${n.id}`)))
     } else {
       setModelsToDelete(new Set())
     }
@@ -237,10 +246,12 @@ export default function ModelsPage(): JSX.Element {
   }
 
   async function handleUninstallExtension(extId: string) {
-    for (const modelId of modelsToDelete) {
-      await window.electron.model.delete(modelId)
-    }
-    const result = await uninstallExt(extId)
+    const result = await deleteModelsThenUninstallExtension(
+      extId,
+      modelsToDelete,
+      (modelId) => window.electron.model.delete(modelId),
+      uninstallExt,
+    )
     if (!result.success) {
       // Keep the dialog open so the failure is visible (locked folder, etc.)
       setUninstallError(result.error ?? 'Could not delete the extension folder.')
@@ -617,6 +628,7 @@ export default function ModelsPage(): JSX.Element {
         <ExtensionDrawer
           ext={selectedExt}
           installedIds={installedVariantIds}
+          localDataIds={localDataIds}
           downloading={downloading}
           loadError={extLoadError(selectedExt)}
           disabled={isBusy}
@@ -636,7 +648,7 @@ export default function ModelsPage(): JSX.Element {
       {uninstallTarget && (() => {
         const ext = allExtensions.find((e) => e.id === uninstallTarget)
         const installedModels = ext?.type === 'model'
-          ? ext.nodes.filter((n) => installedVariantIds.includes(`${uninstallTarget}/${n.id}`))
+          ? ext.nodes.filter((n) => localDataIds.includes(`${uninstallTarget}/${n.id}`))
           : []
 
         return createPortal(

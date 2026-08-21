@@ -24,6 +24,7 @@ export interface ExtensionNode {
   downloadCheck?:   string
   hfSkipPrefixes?:  string[]
   hfIncludePrefixes?: string[]
+  hasModelSources?: boolean
 }
 
 export interface ModelExtension {
@@ -204,8 +205,9 @@ declare global {
         export:         (args: { outputUrl: string; format: string }) => Promise<{ success: boolean; error?: string }>
         listDownloaded: () => Promise<{ id: string; name: string; size_gb: number }[]>
         activeDownloads: () => Promise<{ modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]>
-        isDownloaded:   (modelId: string, downloadCheck?: string) => Promise<boolean>
-        download:       (repoId: string, modelId: string, skipPrefixes?: string[], includePrefixes?: string[]) => Promise<{ success: boolean; error?: string }>
+        isDownloaded:   (modelId: string) => Promise<boolean>
+        hasLocalData:    (modelId: string) => Promise<boolean>
+        download:       (modelId: string) => Promise<{ success: boolean; error?: string; paused?: boolean; cancelled?: boolean }>
         pauseDownload:  (modelId: string) => Promise<{ success: boolean; error?: string }>
         cancelDownload: (modelId: string) => Promise<{ success: boolean; error?: string }>
         delete:         (modelId: string) => Promise<{ success: boolean; error?: string }>

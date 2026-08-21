@@ -13,7 +13,15 @@ import {
   isModelDownloaded,
   listDownloadedModels,
   downloadModelFromHF,
+  downloadModelSourcesFromHF,
 } from './model-downloader'
+import { resolveInstalledModelDownloadPlan } from './model-download-plan'
+import {
+  areModelSourcesDownloaded,
+  modelHasLocalData,
+  normalizeModelSources,
+  resolveModelRoot,
+} from './model-sources'
 import { getSettings, setSettings } from './settings-store'
 import { checkSetupNeeded, markSetupDone, runFullSetup, getVenvPythonExe, ensureSslPatch } from './python-setup'
 import { logger } from './logger'
@@ -265,7 +273,12 @@ const renameWithRetry = (from: string, to: string, label: string) =>
   renameExtensionWithRetry(from, to, label, logger)
 
 export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGetter): void {
-  const activeDownloads = new Map<string, { percent: number; file?: string; fileIndex?: number; totalFiles?: number }>()
+  type ActiveDownload = {
+    progress: { percent: number; file?: string; fileIndex?: number; totalFiles?: number }
+    done: Promise<void>
+    finish: () => void
+  }
+  const activeDownloads = new Map<string, ActiveDownload>()
   // Logging from renderer
   ipcMain.on('log:error', (_event, message: string) => logger.error(`[Renderer] ${message}`))
   ipcMain.handle('log:getPath', () => join(app.getPath('userData'), 'logs', 'modly.log'))
@@ -423,7 +436,21 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   ipcMain.handle('model:delete', async (_, modelId: string): Promise<{ success: boolean; error?: string }> => {
-    const modelDir = join(getSettings(app.getPath('userData')).modelsDir, modelId)
+    if (activeDownloads.has(modelId)) {
+      return { success: false, error: 'Cannot remove model weights while their download is active' }
+    }
+    let modelDir: string
+    try {
+      await resolveInstalledModelDownloadPlan({
+        modelId,
+        userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
+        builtinExtensionsDir: getBuiltinExtensionsDir(),
+        blockedExtensionIds: activeExtensionInstalls,
+      })
+      modelDir = resolveModelRoot(getSettings(app.getPath('userData')).modelsDir, modelId)
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
 
     // Unload the model and wait for confirmation so file handles are released
     try {
@@ -475,28 +502,74 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     return listDownloadedModels(modelsDir)
   })
 
-  ipcMain.handle('model:isDownloaded', (_, modelId: string, downloadCheck?: string): boolean => {
+  ipcMain.handle('model:isDownloaded', async (_, modelId: string): Promise<boolean> => {
     const modelsDir = getSettings(app.getPath('userData')).modelsDir
-    return isModelDownloaded(modelsDir, modelId, downloadCheck)
+    try {
+      const plan = await resolveInstalledModelDownloadPlan({
+        modelId,
+        userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
+        builtinExtensionsDir: getBuiltinExtensionsDir(),
+        blockedExtensionIds: activeExtensionInstalls,
+      })
+      return plan.kind === 'multi-source'
+        ? areModelSourcesDownloaded(modelsDir, modelId, plan.sources)
+        : isModelDownloaded(modelsDir, modelId, plan.downloadCheck)
+    } catch {
+      return false
+    }
+  })
+
+  ipcMain.handle('model:hasLocalData', async (_, modelId: string): Promise<boolean> => {
+    try {
+      await resolveInstalledModelDownloadPlan({
+        modelId,
+        userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
+        builtinExtensionsDir: getBuiltinExtensionsDir(),
+        blockedExtensionIds: activeExtensionInstalls,
+      })
+      return modelHasLocalData(getSettings(app.getPath('userData')).modelsDir, modelId)
+    } catch {
+      return false
+    }
   })
 
   ipcMain.handle('model:activeDownloads', () =>
-    [...activeDownloads.entries()].map(([modelId, progress]) => ({ modelId, ...progress }))
+    [...activeDownloads.entries()].map(([modelId, active]) => ({ modelId, ...active.progress }))
   )
 
   ipcMain.handle('model:download', async (
     event,
-    { repoId, modelId, skipPrefixes, includePrefixes }: { repoId: string; modelId: string; skipPrefixes?: string[]; includePrefixes?: string[] },
+    modelId: string,
   ) => {
     if (activeDownloads.has(modelId)) {
       return { success: false, error: 'Download already in progress' }
     }
-    activeDownloads.set(modelId, { percent: 0 })
+    let finish!: () => void
+    const done = new Promise<void>((resolveDone) => { finish = resolveDone })
+    const active: ActiveDownload = { progress: { percent: 0 }, done, finish }
+    activeDownloads.set(modelId, active)
     try {
-      await downloadModelFromHF(repoId, modelId, (progress) => {
-        activeDownloads.set(modelId, progress)
+      const plan = await resolveInstalledModelDownloadPlan({
+        modelId,
+        userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
+        builtinExtensionsDir: getBuiltinExtensionsDir(),
+        blockedExtensionIds: activeExtensionInstalls,
+      })
+      const onProgress = (progress: typeof active.progress) => {
+        active.progress = progress
         event.sender.send('model:downloadProgress', { modelId, ...progress })
-      }, skipPrefixes, includePrefixes)
+      }
+      if (plan.kind === 'multi-source') {
+        await downloadModelSourcesFromHF(modelId, plan.sources, onProgress)
+      } else {
+        await downloadModelFromHF(
+          plan.repoId,
+          modelId,
+          onProgress,
+          plan.skipPrefixes,
+          plan.includePrefixes,
+        )
+      }
       return { success: true }
     } catch (err: any) {
       const message = err?.message ?? String(err)
@@ -510,7 +583,8 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       }
       return { success: false, error: String(err) }
     } finally {
-      activeDownloads.delete(modelId)
+      if (activeDownloads.get(modelId) === active) activeDownloads.delete(modelId)
+      active.finish()
     }
   })
 
@@ -528,17 +602,24 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   ipcMain.handle('model:cancelDownload', async (_, modelId: string): Promise<{ success: boolean; error?: string }> => {
     try {
+      const active = activeDownloads.get(modelId)
       await axios.post(`${API_BASE_URL}/model/hf-download/cancel`, null, {
         params: { model_id: modelId },
         timeout: 5000,
       })
-      const modelDir = join(getSettings(app.getPath('userData')).modelsDir, modelId)
+      if (active) {
+        await Promise.race([
+          active.done,
+          new Promise<never>((_, reject) => {
+            setTimeout(() => reject(new Error('Timed out waiting for the download to stop')), 30_000)
+          }),
+        ])
+      }
+      const modelDir = resolveModelRoot(getSettings(app.getPath('userData')).modelsDir, modelId)
       await rmAsync(modelDir, { recursive: true, force: true })
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
-    } finally {
-      activeDownloads.delete(modelId)
     }
   })
 
@@ -835,6 +916,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     // extension type
     type?:  'model' | 'process'
     entry?: string
+    model_sources?: unknown
     // Optional top-level fallbacks — applied to each node if not set on the node
     params_schema?:  unknown[]
     param_defaults?: Record<string, unknown>
@@ -851,6 +933,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       download_check?:   string
       hf_skip_prefixes?: string[]
       hf_include_prefixes?: string[]
+      model_sources?: unknown
     }[]
   }
 
@@ -866,20 +949,30 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       builtin,
     }
 
-    const nodes = (parsed.nodes ?? []).map(n => ({
-      id:             n.id,
-      name:           n.name ?? n.id,
-      input:          n.input  ?? 'image' as const,
-      inputs:         n.inputs,
-      inputLabels:    n.input_labels,
-      output:         n.output ?? 'mesh'  as const,
-      paramsSchema:   n.params_schema ?? parsed.params_schema ?? [],
-      paramDefaults:  { ...(parsed.param_defaults ?? {}), ...(n.param_defaults ?? {}) },
-      hfRepo:         n.hf_repo,
-      downloadCheck:  n.download_check,
-      hfSkipPrefixes: n.hf_skip_prefixes,
-      hfIncludePrefixes: n.hf_include_prefixes,
-    }))
+    if (parsed.model_sources !== undefined) {
+      throw new Error('manifest.json: model_sources must be declared on a model node')
+    }
+    const nodes = (parsed.nodes ?? []).map(n => {
+      if (parsed.type === 'process' && n.model_sources !== undefined) {
+        throw new Error('manifest.json: model_sources is supported only for model nodes')
+      }
+      const modelSources = normalizeModelSources(n)
+      return {
+        id:             n.id,
+        name:           n.name ?? n.id,
+        input:          n.input  ?? 'image' as const,
+        inputs:         n.inputs,
+        inputLabels:    n.input_labels,
+        output:         n.output ?? 'mesh'  as const,
+        paramsSchema:   n.params_schema ?? parsed.params_schema ?? [],
+        paramDefaults:  { ...(parsed.param_defaults ?? {}), ...(n.param_defaults ?? {}) },
+        hfRepo:         n.hf_repo,
+        downloadCheck:  n.download_check,
+        hfSkipPrefixes: n.hf_skip_prefixes,
+        hfIncludePrefixes: n.hf_include_prefixes,
+        hasModelSources: modelSources !== undefined,
+      }
+    })
 
     if (parsed.type === 'process') {
       return { ...common, type: 'process' as const, entry: parsed.entry ?? 'processor.js', nodes }
@@ -1450,6 +1543,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   // Uninstall an extension — built-ins cannot be uninstalled
   ipcMain.handle('extensions:uninstall', async (_, extensionId: string) => {
     try {
+      if ([...activeDownloads.keys()].some((modelId) => modelId.split('/', 1)[0] === extensionId)) {
+        return { success: false, error: 'Cannot uninstall an extension while its model download is active' }
+      }
       // Corrupted folders can carry arbitrary names (manual copies, failed
       // unzips), so only enforce root confinement for the deletion path. The
       // strict id pattern still guards the built-in check — a non-conforming

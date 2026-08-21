@@ -155,6 +155,62 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
         self.registry.reload()
         self.assertNotIn(str(extension.resolve()), sys.path)
 
+    def test_declared_sources_block_generation_even_when_generator_overrides_readiness(self) -> None:
+        extension = self._make_extension("multi-source")
+        manifest = {
+            "id": "multi-source",
+            "name": "multi-source",
+            "type": "model",
+            "generator_class": "TestGenerator",
+            "nodes": [{
+                "id": "generate",
+                "model_sources": [
+                    {
+                        "id": "primary",
+                        "provider": "huggingface",
+                        "repo_id": "org/main",
+                        "destination": ".",
+                        "checks": ["main.bin"],
+                    },
+                    {
+                        "id": "encoder",
+                        "provider": "huggingface",
+                        "repo_id": "org/encoder",
+                        "destination": "auxiliary/encoder",
+                        "checks": ["encoder.bin"],
+                    },
+                ],
+            }],
+        }
+        (extension / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (extension / "generator.py").write_text(
+            "\n".join([
+                "from services.generators.base import BaseGenerator",
+                "class TestGenerator(BaseGenerator):",
+                "    def is_downloaded(self): return True",
+                "    def load(self): self._model = object()",
+                "    def generate(self, image_bytes, params, progress_cb=None, cancel_event=None):",
+                "        return self.outputs_dir / 'result.glb'",
+            ]),
+            encoding="utf-8",
+        )
+
+        self.registry.initialize()
+        self.registry._active_id = "multi-source/generate"
+        with self.assertRaisesRegex(RuntimeError, "Model sources are incomplete"):
+            self.registry.get_active()
+        self.assertFalse(self.registry.all_status()[0]["downloaded"])
+
+        model_root = self.models_dir / "multi-source" / "generate"
+        (model_root / "auxiliary" / "encoder").mkdir(parents=True)
+        (model_root / "main.bin").write_bytes(b"main")
+        (model_root / "auxiliary" / "encoder" / "encoder.bin").write_bytes(b"encoder")
+        self.assertIsNotNone(self.registry.get_active())
+        self.assertTrue(self.registry.all_status()[0]["downloaded"])
+        (model_root / "main.bin").unlink()
+        with self.assertRaisesRegex(RuntimeError, "Model sources are incomplete"):
+            self.registry.get_active()
+
     def test_reload_preserves_legacy_path_owned_by_the_host(self) -> None:
         extension = self._make_extension("host-owned-path")
         self._write_manifest(extension, extension_id="host-owned-path")

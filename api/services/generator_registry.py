@@ -25,6 +25,7 @@ from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 from services.generators.base import BaseGenerator
 from services.extension_process import ExtensionProcess, _venv_python
+from services.model_sources import model_sources_are_downloaded, normalize_model_sources
 
 # ------------------------------------------------------------------ #
 # Global paths
@@ -428,6 +429,9 @@ def _discover_extensions(
             ext_id     = manifest["id"]
             class_name = manifest["generator_class"]
 
+            if "model_sources" in manifest:
+                raise ValueError("model_sources must be declared on a model node")
+
             if ext_id != ext_dir.name:
                 message = (
                     f"Extension folder '{ext_dir.name}' declares mismatched "
@@ -523,6 +527,7 @@ def _discover_extensions(
 
             if nodes:
                 for node in nodes:
+                    model_sources = normalize_model_sources(node)
                     node_manifest = {
                         **manifest,
                         "id":               f"{ext_id}/{node['id']}",
@@ -537,6 +542,8 @@ def _discover_extensions(
                         "input":            node.get("input", "image"),
                         "output":           node.get("output", "mesh"),
                     }
+                    if model_sources is not None:
+                        node_manifest["model_sources"] = model_sources
                     full_id = f"{ext_id}/{node['id']}"
                     result[full_id] = (cls_or_None, node_manifest, ext_dir, legacy_context)
                     if subprocess_mode:
@@ -699,8 +706,14 @@ class GeneratorRegistry:
         """Returns the active generator. Downloads and loads if necessary."""
         self._assert_not_quarantined(self._active_id)
         gen = self._generators[self._active_id]
+        downloaded = self._is_downloaded(self._active_id, gen)
+        if "model_sources" in self._manifests[self._active_id] and not downloaded:
+            raise RuntimeError(
+                "Model sources are incomplete. Download this node's weights "
+                "from the Modly Models page before generation."
+            )
         if not gen.is_loaded():
-            if not gen.is_downloaded():
+            if not downloaded:
                 if isinstance(gen, ExtensionProcess):
                     # Let the subprocess handle its own download logic during
                     # load() — some extensions (e.g. mv-adapter) need custom
@@ -743,13 +756,21 @@ class GeneratorRegistry:
     # Status
     # ------------------------------------------------------------------ #
 
+    def _is_downloaded(self, model_id: str, gen: BaseGenerator) -> bool:
+        manifest = self._manifests[model_id]
+        if "model_sources" in manifest:
+            return model_sources_are_downloaded(
+                MODELS_DIR, model_id, manifest["model_sources"]
+            )
+        return gen.is_downloaded()
+
     def active_status(self) -> dict:
         gen      = self._generators[self._active_id]
         manifest = self._manifests[self._active_id]
         return {
             "id":         self._active_id,
             "name":       manifest.get("name", gen.DISPLAY_NAME),
-            "downloaded": gen.is_downloaded(),
+            "downloaded": self._is_downloaded(self._active_id, gen),
             "loaded":     gen.is_loaded(),
         }
 
@@ -765,7 +786,7 @@ class GeneratorRegistry:
                 "vram_gb":     manifest.get("vram_gb", gen.VRAM_GB),
                 "hf_repo":     manifest.get("hf_repo", ""),
                 "tags":        manifest.get("tags", []),
-                "downloaded":  gen.is_downloaded(),
+                "downloaded":  self._is_downloaded(model_id, gen),
                 "loaded":      gen.is_loaded(),
                 "active":      model_id == self._active_id,
             })
