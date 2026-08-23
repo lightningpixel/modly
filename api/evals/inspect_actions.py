@@ -21,6 +21,7 @@ from pathlib import Path
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from services.api_token import local_headers  # noqa: E402
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 HERE = Path(__file__).resolve().parent
@@ -90,7 +91,7 @@ def call(url: str, model: str, user: str, context: dict) -> list[dict]:
     payload = {"messages": [{"role": "user", "content": user}], "provider": {"type": "local"},
                "context": context, "thinking": "off", "model": model}
     actions = []
-    with httpx.stream("POST", f"{url.rstrip('/')}/agent/chat", json=payload, timeout=300.0) as r:
+    with httpx.stream("POST", f"{url.rstrip('/')}/agent/chat", json=payload, timeout=300.0, headers=local_headers()) as r:
         for line in r.iter_lines():
             if not line.startswith("data:"):
                 continue

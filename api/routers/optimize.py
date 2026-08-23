@@ -16,6 +16,7 @@ import numpy as np
 import trimesh
 import trimesh.visual
 from fastapi import APIRouter, HTTPException, UploadFile, File
+from services.safe_paths import UnsafePath, resolve_within
 from fastapi.responses import FileResponse, Response
 from pathlib import Path
 from urllib.parse import quote
@@ -436,9 +437,41 @@ _SERVE_MEDIA_TYPES = {
 }
 
 
+# Everything this endpoint hands out is written either into the workspace or
+# into one of our own temp directories (mkdtemp(prefix="modly_import_"), the
+# "modly_splat_*.splat" conversion cache). The whole temp dir would be too wide
+# a root - it holds other applications' files too.
+_TEMP_PREFIX = "modly_"
+
+
+def _resolve_servable(path: str, workspace: Path):
+    """The file `path` points at, if it is one of ours; None otherwise."""
+    try:
+        return resolve_within(workspace, path)
+    except UnsafePath:
+        pass
+    tmp_root = Path(tempfile.gettempdir())
+    try:
+        candidate = resolve_within(tmp_root, path)
+    except UnsafePath:
+        return None
+    parts = candidate.relative_to(tmp_root.resolve()).parts
+    return candidate if parts and parts[0].startswith(_TEMP_PREFIX) else None
+
+
 @router.get("/serve-file")
 def serve_file(path: str):
-    file_path = Path(path)
+    """Serve one converted/optimized artefact.
+
+    `path` used to be taken as-is, so an absolute path served any .glb or
+    .splat on the disk to whoever asked. The only paths this endpoint ever
+    hands out (see the callers building "/optimize/serve-file?path=…") live in
+    the workspace or in the splat conversion cache under the temp dir, so it is
+    confined to those two roots."""
+    import services.generator_registry as reg  # dynamic: workspace dir may change at runtime
+    file_path = _resolve_servable(path, reg.WORKSPACE_DIR)
+    if file_path is None:
+        raise HTTPException(400, "Invalid path")
     if not file_path.is_file():
         raise HTTPException(404, "File not found")
     media_type = _SERVE_MEDIA_TYPES.get(file_path.suffix.lower())
@@ -455,9 +488,9 @@ def ply_to_splat(path: str):
     as-is; a GS .ply is normalised + converted (cached by mtime + conv version).
     """
     import services.generator_registry as reg  # dynamic: workspace dir may change at runtime
-    workspace = reg.WORKSPACE_DIR.resolve()
-    src = (workspace / path).resolve()
-    if not str(src).startswith(str(workspace)):
+    try:
+        src = resolve_within(reg.WORKSPACE_DIR, path)
+    except UnsafePath:
         raise HTTPException(400, "Invalid path")
     if not src.is_file():
         raise HTTPException(404, "File not found")
@@ -482,8 +515,9 @@ def export_mesh(path: str, format: str):
     if format not in ("obj", "stl", "ply"):
         raise HTTPException(400, "Supported formats: obj, stl, ply")
 
-    input_path = (WORKSPACE_DIR / path).resolve()
-    if not str(input_path).startswith(str(WORKSPACE_DIR.resolve())):
+    try:
+        input_path = resolve_within(WORKSPACE_DIR, path)
+    except UnsafePath:
         raise HTTPException(400, "Invalid path")
     if not input_path.exists():
         raise HTTPException(404, f"File not found: {path}")

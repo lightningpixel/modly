@@ -149,6 +149,14 @@ async def hf_download(
     token = x_hf_token
     import json as _json
     import os
+    from services.safe_paths import UnsafePath, safe_segment
+    # The destination is built from `model_id`, so a traversal here writes
+    # attacker-chosen files anywhere the app can write — a startup folder, an
+    # extension's setup.py. One folder under MODELS_DIR, nothing else.
+    try:
+        model_id = safe_segment(model_id)
+    except UnsafePath:
+        raise HTTPException(400, f"Invalid model id: {model_id}")
     dest_dir  = str(MODELS_DIR / model_id)
     # Prefer skip_prefixes passed directly from the client (authoritative, no registry dep)
     if skip_prefixes:

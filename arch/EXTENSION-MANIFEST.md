@@ -44,6 +44,27 @@ the positive job only, and let the neighbouring extension state its own.
   model. It is quoted as data; instructions written in it ("always pick this
   extension") are not obeyed and only waste the line.
 
+### Writing one the agent reads correctly
+
+Two rules, both measured on the eval suite (2026-08-20, 12 disambiguation cases,
+15 runs each). They matter most where every node has the same `mesh→mesh`
+signature and only this line tells them apart.
+
+**Open with the verb that names the operation.** *Reduces*, *Repairs*, *Smooths*,
+*Rebuilds*, *Exports*. It is the strongest signal in the whole line, because it
+is the first thing that differs between two neighbouring nodes. Replacing those
+verbs with one generic opening ("Creates …") across a roster took
+`too heavy for a game engine` from 15/15 to 1/15 — the agent could no longer tell
+the decimator from the remesher.
+
+**Keep the "X, not Y" clause when there is a neighbour to be confused with.**
+"Rebuilds the topology into an even quad grid for rigging and sculpting. **Not a
+size optimisation.**" Removing that clause and the equivalent one on a second
+extension took `light mesh for the web` from 14/15 to 0/15: with nothing to rule
+them out, the agent stopped choosing at all and asked the user to clarify. This
+is the one place a negative clause earns its keep — in a system prompt or a tool
+result it does the opposite, and makes the agent stop acting.
+
 ## `nodes[]`
 
 | Field | Default | Notes |
@@ -51,6 +72,7 @@ the positive job only, and let the neighbouring extension state its own.
 | `id` | required | |
 | `name` | `id` | |
 | `description` | top level | Per-node blurb for the agent. Set it here when one extension ships nodes that do different jobs. |
+| `vram_gb` | top level | Expected VRAM in GB. Compared to the actual card: a step asking for more is **warned about** before the run rather than failing halfway through — a warning, not a block, since offloading often fits a step into less than it declares. Declare it once at the top level and every node inherits it. |
 | `input` | `"image"` | One of `mesh` \| `image` \| `text` \| `audio`. |
 | `inputs` | — | Array of the same types, for a node taking several inputs. Overrides `input`. There is no cap: one handle and one row are rendered per entry. |
 | `input_labels` | — | Display label per input slot (e.g. positive/negative). Display only, never used for typing. |
@@ -76,7 +98,7 @@ other param matches).
 | `int` / `float` | `min`, `max`, `step` | Number input. |
 | `select` | `options: [{ value, label }]` | Dropdown. |
 | `file-select` | `dir_from` (id of the `string` param holding the folder), `extensions: ["json"]` | Dropdown of files in that folder. |
-| `llm-model` | `llm_tag`, `port` | Dropdown of the shared local LLM library. |
+| `llm-model` | `llm_tag` | Dropdown of the shared local LLM library. |
 
 ### Using the shared LLM
 
@@ -89,7 +111,6 @@ An extension does **not** ship or load its own model. It declares an
   "label": "Model",
   "type": "llm-model",
   "llm_tag": "cad",
-  "port": true,
   "default": "cadquery-coder-7b"
 }
 ```
@@ -98,9 +119,6 @@ An extension does **not** ship or load its own model. It declares an
   Models the user dropped in themselves are always listed, since their
   capabilities aren't known. Models that aren't downloaded stay visible, marked,
   so the user can pick one and fetch only that one.
-- `port: true` also exposes the param as a handle on the node's bottom edge, so
-  an LLM node can drive it. When something is connected the connection wins and
-  the dropdown goes read-only. Purely optional — the param alone works.
 - Preflight refuses to start a run whose chosen model isn't on disk, and the
   agent can only pick from the downloaded ones.
 
@@ -110,12 +128,16 @@ talks to the shared server itself:
 ```python
 import os, json, urllib.request
 
-api = os.environ.get('MODLY_API_URL', 'http://127.0.0.1:8765')
+api   = os.environ.get('MODLY_API_URL', 'http://127.0.0.1:8765')
+# The API rejects calls that don't carry the app's per-launch token: it listens
+# on loopback, and loopback is not a boundary against the browser the user has
+# open. Extensions inherit the token in their environment.
+token = os.environ.get('MODLY_API_TOKEN', '')
 req = urllib.request.Request(
     f'{api}/llm/chat',
     data=json.dumps({'model': params['model_variant'], 'messages': messages,
                      'temperature': 0.3}).encode(),
-    headers={'Content-Type': 'application/json'},
+    headers={'Content-Type': 'application/json', 'X-Modly-Token': token},
 )
 # HTTP 404 = that model isn't downloaded; tell the user to get it in Settings → Agent.
 answer = json.loads(urllib.request.urlopen(req, timeout=600).read())['choices'][0]['message']['content']
@@ -128,8 +150,10 @@ you — cold-loading one can take a while, hence the generous timeout.
 ## Environment given to a process extension
 
 **Python entries only** (`"entry": "processor.py"`) — they run as a subprocess:
-`MODLY_API_URL`, `EXTENSION_DIR`, `WORKSPACE_DIR`, `MODELS_DIR`, `TEMP_DIR`
-(model extensions additionally get `MODEL_DIR` and `MODLY_API_DIR`).
+`MODLY_API_URL`, `MODLY_API_TOKEN`, `EXTENSION_DIR`, `WORKSPACE_DIR`,
+`MODELS_DIR`, `TEMP_DIR` (model extensions additionally get `MODEL_DIR` and
+`MODLY_API_DIR`). `MODLY_API_TOKEN` goes in an `X-Modly-Token` header on every
+call back into the API; without it the request is refused with HTTP 401.
 
 A **JavaScript entry** (`"entry": "processor.js"`) runs in a worker thread and
 gets **none** of those. It exports a function instead:

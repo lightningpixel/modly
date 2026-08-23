@@ -20,10 +20,16 @@ Requires Modly's FastAPI backend to be running on http://localhost:8765.
 
 import asyncio
 import mimetypes
+import sys
+from pathlib import Path as _Path
+
+sys.path.insert(0, str(_Path(__file__).resolve().parent))
 import httpx
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
+
+from services.api_token import local_headers as _headers
 
 API_BASE = "http://localhost:8765"
 
@@ -148,7 +154,7 @@ async def list_tools() -> list[Tool]:
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=60.0, headers=_headers()) as client:
         try:
             result = await _dispatch(client, name, arguments)
         except httpx.ConnectError:

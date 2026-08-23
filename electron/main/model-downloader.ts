@@ -5,6 +5,7 @@
 import { existsSync, readdirSync, statSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { getHfToken } from './hf-token'
+import { API_TOKEN_HEADER, getApiToken } from './api-token'
 
 export interface DownloadProgress {
   percent: number
@@ -132,7 +133,9 @@ export async function downloadModelFromHF(
   // python-bridge pipes that into runtime.log, and `log:readAll` hands that file
   // to the user for bug reports. The token used to ride all the way there.
   const hfToken = getHfToken()   // decrypted cache — settings.json holds the ciphertext
-  const res = await net.fetch(url, hfToken ? { headers: { 'X-HF-Token': hfToken } } : undefined)
+  const headers: Record<string, string> = { [API_TOKEN_HEADER]: getApiToken() }
+  if (hfToken) headers['X-HF-Token'] = hfToken
+  const res = await net.fetch(url, { headers })
   if (!res.ok) throw new Error(`HuggingFace download failed: HTTP ${res.status}`)
   if (!res.body) throw new Error('No response body from HF download stream')
 

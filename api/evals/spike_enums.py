@@ -23,8 +23,12 @@ _DYNAMIC_ENUMS) and re-run the evals to measure the gain.
 import argparse
 import json
 import sys
+from pathlib import Path
 
 import httpx
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from services.api_token import local_headers  # noqa: E402
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -92,7 +96,7 @@ def report(title: str, results: list, ok_pred, detail: str = "") -> bool:
 
 def find_port(api_url: str) -> str | None:
     try:
-        r = httpx.get(f"{api_url.rstrip('/')}/llm/status", timeout=10.0)
+        r = httpx.get(f"{api_url.rstrip('/')}/llm/status", timeout=10.0, headers=local_headers())
         r.raise_for_status()
         st = r.json()
     except Exception as e:  # noqa: BLE001

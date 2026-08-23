@@ -51,7 +51,9 @@ async def generate_from_image(
 
     # Sanitize collection name: strip, forbid path separators and special chars
     collection = collection.strip()
-    if not collection or _re.search(r'[/:*?"<>|\\]', collection):
+    # ".." passes the character test but still names a directory — one level
+    # above the workspace, where a generated mesh has no business landing.
+    if not collection or collection in (".", "..") or _re.search(r'[/:*?"<>|\\]', collection):
         collection = "Default"
 
     # Verify the requested model exists in the registry

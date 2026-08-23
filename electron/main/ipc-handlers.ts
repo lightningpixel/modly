@@ -9,6 +9,8 @@ import * as tar from 'tar'
 import * as os from 'os'
 import { promisify } from 'util'
 import { PythonBridge, API_BASE_URL } from './python-bridge'
+import { isSafeExternalUrl } from './external-links'
+import { containingRoot } from './path-containment'
 import {
   isModelDownloaded,
   listDownloadedModels,
@@ -19,6 +21,7 @@ import { encryptSecret, decryptSecret } from './secure-store'
 import { getHfToken, initHfToken, setHfToken } from './hf-token'
 import { checkSetupNeeded, markSetupDone, runFullSetup, getVenvPythonExe, ensureSslPatch } from './python-setup'
 import { logger } from './logger'
+import { parseExtensionManifest as parseManifest, type ParsedManifest } from './manifest-parser'
 import { getProcessRunner, getPythonProcessRunner, getExtPythonExe, terminateProcessRunner, terminateAllProcessRunners } from './process-runner'
 import { getBuiltinExtensionsDir } from './builtin-sync'
 import { spawn, execFile } from 'child_process'
@@ -642,7 +645,16 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   // Shell
-  ipcMain.handle('shell:openExternal', (_, url: string) => shell.openExternal(url))
+  ipcMain.handle('shell:openExternal', (_, url: string) => {
+    // The renderer is not the only author of these URLs - extension manifests,
+    // the registry and the agent all produce links - and openExternal on a
+    // file: URL runs what it points at.
+    if (!isSafeExternalUrl(url)) {
+      logger.warn(`Refused to open a non-web URL: ${String(url).slice(0, 120)}`)
+      return
+    }
+    return shell.openExternal(url)
+  })
 
   // App info
   // System memory (used/available/total bytes).
@@ -801,6 +813,19 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     await rmAsync(workspacePath(collection, filename.replace(/\.glb$/, '.meta.json')), { force: true })
   })
 
+  // The directories Modly owns and may therefore move or delete on request.
+  // Read per call: the user can repoint them in Settings at any time.
+  const managedRoots = (): string[] => {
+    const userData = app.getPath('userData')
+    const settings = getSettings(userData)
+    return [
+      settings.modelsDir,
+      settings.workspaceDir,
+      settings.extensionsDir,
+      join(userData, 'gen-cache'),
+    ].filter(Boolean)
+  }
+
   // Directory utilities for settings
   ipcMain.handle('fs:listDir', async (_, dirPath: string) => {
     try {
@@ -844,6 +869,13 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   ipcMain.handle('fs:moveDirectory', async (_, { src, dest }: { src: string; dest: string }) => {
+    // This copies a tree and then deletes the original, so an unconstrained
+    // `src` is a recursive delete of any directory on the machine. It exists to
+    // move the app's own data directories when the user changes them in
+    // Settings, and that is all it may reach.
+    if (!containingRoot(managedRoots(), src)) {
+      return { success: false, error: 'Source is outside the directories Modly manages' }
+    }
     try {
       await mkdir(dest, { recursive: true })
       await cp(src, dest, { recursive: true })
@@ -855,21 +887,15 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   ipcMain.handle('fs:deleteDirectory', async (_, dirPath: string) => {
-    const userData = app.getPath('userData')
-    const settings = getSettings(userData)
-    const allowedRoots = [
-      settings.modelsDir,
-      settings.workspaceDir,
-      settings.extensionsDir,
-      join(userData, 'gen-cache'),
-    ]
-    const resolved = join(dirPath)
-    const isAllowed = allowedRoots.some((root) => resolved.startsWith(root))
-    if (!isAllowed) {
+    // Containment, not a string prefix: "<workspace>_backup" starts with the
+    // workspace path without being in it, and a setting that came back empty
+    // made `startsWith('')` true for every path on the disk - the guard was
+    // one blank setting away from being a no-op.
+    if (!containingRoot(managedRoots(), dirPath)) {
       return { success: false, error: 'Path is outside allowed directories' }
     }
     try {
-      await rmAsync(resolved, { recursive: true, force: true })
+      await rmAsync(dirPath, { recursive: true, force: true })
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -903,101 +929,11 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     }
   }
 
-  function isTrustedSource(source: string | undefined, trustedRepos: Set<string>): boolean {
-    if (!source) return false
-    return trustedRepos.has(source.toLowerCase().replace(/\/$/, ''))
-  }
-
-  type ParsedManifest = {
-    id?: string; name?: string; displayName?: string; version?: string
-    description?: string; author?: string | { name?: string }
-    source?: string; generator_class?: string
-    // extension type
-    type?:  'model' | 'process'
-    entry?: string
-    // Optional top-level fallbacks — applied to each node if not set on the node
-    params_schema?:  unknown[]
-    param_defaults?: Record<string, unknown>
-    nodes?: {
-      id:                string
-      name?:             string
-      description?:      string
-      // Declared as plain strings on purpose: this is parsed JSON, so anything
-      // can be in there. coercePortType() is what narrows it to a known type.
-      input?:            string
-      inputs?:           string[]
-      input_labels?:     string[]
-      output?:           string
-      terminal?:         boolean
-      params_schema?:    unknown[]
-      param_defaults?:   Record<string, unknown>
-      hf_repo?:          string
-      download_check?:   string
-      hf_skip_prefixes?: string[]
-      hf_include_prefixes?: string[]
-    }[]
-  }
-
-  // Port types the app knows how to draw and type-check. An unknown string used
-  // to flow straight through and land as `undefined` downstream, which preflight
-  // treats as a wildcard — so a single typo in a manifest silently disabled every
-  // type check on that node. Coerce to a safe default and say so in the log.
-  const DATA_TYPES = ['mesh', 'image', 'text', 'audio'] as const
-  type DataPortType = typeof DATA_TYPES[number]
-
-  function coercePortType(
-    value:    string | undefined,
-    fallback: DataPortType,
-    where:    string,
-  ): DataPortType {
-    if (value === undefined) return fallback
-    if ((DATA_TYPES as readonly string[]).includes(value)) return value as DataPortType
-    logger.error(
-      `[manifest] ${where}: unknown port type "${value}" — expected one of ${DATA_TYPES.join(', ')}. ` +
-      `Falling back to "${fallback}".`,
-    )
-    return fallback
-  }
-
-  function parseExtensionManifest(parsed: ParsedManifest, fallbackId: string, trustedRepos: Set<string>, builtin = false) {
-    const common = {
-      id:          parsed.id          ?? fallbackId,
-      name:        parsed.displayName ?? parsed.name ?? fallbackId,
-      version:     parsed.version,
-      description: parsed.description,
-      author:      typeof parsed.author === 'string' ? parsed.author : parsed.author?.name,
-      trusted:     builtin || isTrustedSource(parsed.source, trustedRepos),
-      source:      parsed.source,
-      builtin,
-    }
-
-    const extLabel = parsed.id ?? fallbackId
-
-    const nodes = (parsed.nodes ?? []).map(n => ({
-      id:             n.id,
-      name:           n.name ?? n.id,
-      // Per node, because the agent reads it per node: one line covering both a
-      // generator and its texture pass describes neither.
-      description:    n.description ?? parsed.description,
-      input:          coercePortType(n.input, 'image', `${extLabel}/${n.id} input`),
-      inputs:         n.inputs?.map((t, i) => coercePortType(t, 'image', `${extLabel}/${n.id} inputs[${i}]`)),
-      inputLabels:    n.input_labels,
-      output:         coercePortType(n.output, 'mesh', `${extLabel}/${n.id} output`),
-      terminal:       n.terminal ?? false,
-      paramsSchema:   n.params_schema ?? parsed.params_schema ?? [],
-      paramDefaults:  { ...(parsed.param_defaults ?? {}), ...(n.param_defaults ?? {}) },
-      hfRepo:         n.hf_repo,
-      downloadCheck:  n.download_check,
-      hfSkipPrefixes: n.hf_skip_prefixes,
-      hfIncludePrefixes: n.hf_include_prefixes,
-    }))
-
-    if (parsed.type === 'process') {
-      return { ...common, type: 'process' as const, entry: parsed.entry ?? 'processor.js', nodes }
-    }
-
-    return { ...common, type: 'model' as const, nodes }
-  }
+  // The parser is pure (electron-free, so it can be tested on a manifest); the
+  // one thing it cannot do on its own is report a malformed field.
+  const parseExtensionManifest = (
+    parsed: ParsedManifest, fallbackId: string, trustedRepos: Set<string>, builtin = false,
+  ) => parseManifest(parsed, fallbackId, trustedRepos, builtin, (m) => logger.error(m))
 
   // Extensions — reads user extensions directory + built-in extensions directory
   ipcMain.handle('extensions:list', async () => {

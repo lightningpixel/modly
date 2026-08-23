@@ -2,10 +2,12 @@ import { app, BrowserWindow, shell, session } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { setupIpcHandlers } from './ipc-handlers'
-import { PythonBridge } from './python-bridge'
+import { API_BASE_URL, PythonBridge } from './python-bridge'
 import { logger, archiveCurrentSession } from './logger'
 import { initAutoUpdater } from './updater'
 import { syncBuiltinExtensions } from './builtin-sync'
+import { API_TOKEN_HEADER, getApiToken, removeApiTokenFile } from './api-token'
+import { isSafeExternalUrl } from './external-links'
 
 let mainWindow: BrowserWindow | null = null
 let pythonBridge: PythonBridge | null = null
@@ -60,8 +62,22 @@ function createWindow(): void {
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    if (isSafeExternalUrl(details.url)) shell.openExternal(details.url)
     return { action: 'deny' }
+  })
+
+  // A new window opens in the browser (above); the app's own window must stay
+  // on the app. Nothing navigates it today, but if anything ever did - a link
+  // with target=_self, a URL dropped onto the window - the page that replaced
+  // it would inherit this window's preload bridge and this session, which the
+  // main process stamps the API token onto. External pages open externally.
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const allowed = is.dev && process.env['ELECTRON_RENDERER_URL']
+      ? url.startsWith(process.env['ELECTRON_RENDERER_URL'])
+      : url.startsWith('file://')
+    if (allowed) return
+    event.preventDefault()
+    if (isSafeExternalUrl(url)) shell.openExternal(url)
   })
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
@@ -86,6 +102,22 @@ process.on('unhandledRejection', (reason) => {
   mainWindow?.webContents.send('app:error', msg)
 })
 
+/**
+ * Stamp the API token onto every request the renderer makes to the backend.
+ *
+ * Done here rather than at each call site: the renderer reaches the API through
+ * plain fetch(), EventSource and <img>/<video> src attributes as well, and none
+ * of those can carry a header of their own. Intercepting the session covers all
+ * of them at once, which is also why the renderer code needs no notion of the
+ * token existing.
+ */
+function attachApiToken(): void {
+  const urls = [`${API_BASE_URL}/*`, `${API_BASE_URL.replace('127.0.0.1', 'localhost')}/*`]
+  session.defaultSession.webRequest.onBeforeSendHeaders({ urls }, (details, callback) => {
+    callback({ requestHeaders: { ...details.requestHeaders, [API_TOKEN_HEADER]: getApiToken() } })
+  })
+}
+
 app.whenReady().then(async () => {
   archiveCurrentSession()
   logger.info(`App started — version ${app.getVersion()}`)
@@ -93,6 +125,8 @@ app.whenReady().then(async () => {
 
   // Clear Chromium disk cache on startup to recover from any corruption
   await session.defaultSession.clearCache()
+
+  attachApiToken()
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
@@ -122,6 +156,9 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', (event) => {
+  // The token is per-launch: a file left behind names a secret that is no
+  // longer valid, and the next launch would have to overwrite it anyway.
+  removeApiTokenFile()
   if (!pythonBridge) return
   event.preventDefault()
   pythonBridge.stop().finally(() => {

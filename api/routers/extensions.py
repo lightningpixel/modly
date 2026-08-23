@@ -29,9 +29,19 @@ async def setup_extension(ext_id: str):
     Runs setup.py with Modly's embedded Python and the detected GPU SM.
     """
     from services.generator_registry import EXTENSIONS_DIR
+    from services.safe_paths import UnsafePath, safe_segment
 
     if EXTENSIONS_DIR is None or not EXTENSIONS_DIR.exists():
         raise HTTPException(400, "EXTENSIONS_DIR not configured")
+
+    # This endpoint EXECUTES the setup.py it finds, so the id must name one
+    # folder directly under EXTENSIONS_DIR and nothing else. A backslash is a
+    # separator to the filesystem but not to the URL router, so the raw id let
+    # `POST /extensions/setup/..nywhere` run any setup.py on the disk.
+    try:
+        ext_id = safe_segment(ext_id)
+    except UnsafePath:
+        raise HTTPException(400, f"Invalid extension id: {ext_id}")
 
     ext_dir  = EXTENSIONS_DIR / ext_id
     setup_py = ext_dir / "setup.py"

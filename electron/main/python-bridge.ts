@@ -8,6 +8,7 @@ import { getBuiltinExtensionsDir } from './builtin-sync'
 import { getHfToken } from './hf-token'
 import { logger } from './logger'
 import { cleanPythonEnv, getVenvPythonExe } from './python-setup'
+import { API_TOKEN_HEADER, getApiToken, writeApiTokenFile } from './api-token'
 
 const API_PORT = 8765
 const API_HOST = '127.0.0.1'
@@ -49,6 +50,11 @@ export class PythonBridge {
 
     await this.killProcessOnPort()
 
+    // Every request from the main process carries the token; the renderer's own
+    // requests get it injected by attachApiToken() in index.ts.
+    axios.defaults.headers.common[API_TOKEN_HEADER] = getApiToken()
+    writeApiTokenFile()
+
     this.process = spawn(pythonExecutable, ['-m', 'uvicorn', 'main:app', '--host', API_HOST, '--port', String(API_PORT)], {
       cwd: apiDir,
       env: {
@@ -70,6 +76,10 @@ export class PythonBridge {
         SELECTED_MODEL_ID:      process.env['SELECTED_MODEL_ID'] ?? '',
         HUGGING_FACE_HUB_TOKEN: this.resolveHfToken(),
         HF_TOKEN:               this.resolveHfToken(),
+        // Turns on the API's auth middleware. Subprocesses the backend spawns
+        // (extension runners) inherit it, which is how an extension calling
+        // back into /llm/chat authenticates itself.
+        MODLY_API_TOKEN:        getApiToken(),
       },
       // On Unix, put the bridge in its own process group so every subprocess
       // it spawns (extension runners, etc.) inherits that group. On shutdown

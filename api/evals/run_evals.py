@@ -28,6 +28,7 @@ import httpx
 # Runnable both as `python evals/run_evals.py` (cwd=api) and `python -m evals.run_evals`.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from evals.grader import grade  # noqa: E402
+from services.api_token import local_headers  # noqa: E402
 
 # Windows consoles default to cp1252, which can't encode the ✓/✗ marks nor
 # accented case names — a crash mid-run would lose the whole score.
@@ -57,7 +58,7 @@ def run_case(url: str, model, provider_type: str, base_url, api_key, case: dict)
     actions: list[dict] = []
     final = ""
     error = None
-    with httpx.stream("POST", f"{url.rstrip('/')}/agent/chat", json=payload, timeout=300.0) as r:
+    with httpx.stream("POST", f"{url.rstrip('/')}/agent/chat", json=payload, timeout=300.0, headers=local_headers()) as r:
         for line in r.iter_lines():
             if not line.startswith("data:"):
                 continue

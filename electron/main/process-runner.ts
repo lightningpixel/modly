@@ -4,6 +4,7 @@ import type { ChildProcess } from 'child_process'
 import { existsSync }  from 'fs'
 import { join }        from 'path'
 import { API_BASE_URL } from './python-bridge'
+import { getApiToken } from './api-token'
 
 // ─── Worker code for JS process extensions ────────────────────────────────────
 
@@ -318,6 +319,9 @@ export class PythonProcessRunner implements IProcessRunner {
         env: {
           ...process.env,
           MODLY_API_URL: API_BASE_URL,
+          // ...and what makes such a call go through: the API refuses requests
+          // that cannot prove they come from a local Modly client.
+          MODLY_API_TOKEN: getApiToken(),
           EXTENSION_DIR: this.extDir,
           WORKSPACE_DIR: this.workspaceDir,
           MODELS_DIR:    this.modelsDir,

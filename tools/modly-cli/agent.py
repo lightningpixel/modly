@@ -62,6 +62,22 @@ def _json_print(data: dict[str, Any], *, compact: bool = False) -> None:
         print(json.dumps(data, indent=2, sort_keys=True))
 
 
+def _auth_headers() -> dict[str, str]:
+    """Prove to the API that this is a local Modly client.
+
+    The backend rejects calls without the per-launch token so that a web page
+    cannot drive the app (api/main.py). The CLI reads it from the environment
+    when Modly spawned it, or from the file the app writes at launch.
+    """
+    token = os.environ.get("MODLY_API_TOKEN")
+    if not token:
+        try:
+            token = (Path.home() / ".modly" / "api-token").read_text(encoding="utf-8").strip()
+        except OSError:
+            token = ""
+    return {"x-modly-token": token} if token else {}
+
+
 def _request_json(
     method: str,
     url: str,
@@ -70,7 +86,7 @@ def _request_json(
     data: bytes | None = None,
     headers: dict[str, str] | None = None,
 ) -> Any:
-    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+    req = urllib.request.Request(url, data=data, method=method, headers={**(headers or {}), **_auth_headers()})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
@@ -88,7 +104,8 @@ def _request_json(
 def _download(url: str, dest: Path, *, timeout: float) -> int:
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp, dest.open("wb") as fh:
+        request = urllib.request.Request(url, headers=_auth_headers())
+        with urllib.request.urlopen(request, timeout=timeout) as resp, dest.open("wb") as fh:
             total = 0
             while True:
                 chunk = resp.read(1024 * 1024)
