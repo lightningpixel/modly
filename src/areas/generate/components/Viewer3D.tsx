@@ -207,8 +207,35 @@ function SceneMeshModel({
     scene.traverse((child) => {
       if (child instanceof THREE.Mesh) {
         (child.geometry as any).computeBoundsTree()
+
+        // A generated GLB arrives with POSITION and TEXCOORD_0 and nothing else
+        // — checked on a real hunyuan3d-paint export. MeshStandardMaterial gets
+        // away with it (three falls back to flat shading, invisible at ~900k
+        // triangles), but MeshMatcapMaterial has no such fallback and rendered
+        // the whole model as one flat grey silhouette. Computed here rather than
+        // in the matcap branch so the mesh is complete whatever mode asks for it.
+        if (!child.geometry.attributes.normal) child.geometry.computeVertexNormals()
+
         const mats = Array.isArray(child.material) ? child.material : [child.material]
-        mats.forEach((m: THREE.Material) => { m.side = THREE.DoubleSide })
+        mats.forEach((m: THREE.Material) => {
+          m.side = THREE.DoubleSide
+
+          // The baked atlas is a scatter of thousands of tiny UV islands whose
+          // neighbours are unrelated surface patches — black fur packed against
+          // the white muzzle, the pink sash, the gold armour. Mipmapping averages
+          // across those borders: measured on a real bake, isolated light texels
+          // in dark areas go from 0.17% in the atlas to 4.46% at mip 2, which is
+          // what the viewer sampled and what showed up as white speckle over the
+          // whole model (4.50% measured on screen). Sampling the full-resolution
+          // level costs aliasing when the model is small on screen, and removes
+          // the speckle at the distance this viewer actually shows things at.
+          const map = (m as THREE.MeshStandardMaterial).map
+          if (map && map.generateMipmaps) {
+            map.generateMipmaps = false
+            map.minFilter = THREE.LinearFilter
+            map.needsUpdate = true
+          }
+        })
       }
     })
     return () => {
@@ -275,8 +302,7 @@ function SceneMeshModel({
           break
         }
         case 'normals':
-          // Ensure vertex normals exist — AI-generated meshes often skip this
-          child.geometry.computeVertexNormals()
+          // Normals are computed on load now, for every mode.
           next = new THREE.MeshNormalMaterial({ side: THREE.DoubleSide })
           break
         case 'matcap':
