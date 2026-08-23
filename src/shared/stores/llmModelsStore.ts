@@ -27,7 +27,12 @@ interface LlmModelsStore {
   loading:       boolean
   error:         string | null
   fetchedApiUrl: string | null
+  /** The card's VRAM in GB, null while unknown or unmeasurable (no NVIDIA GPU).
+   *  Lives here rather than in its own store because every caller that wants it
+   *  already holds this one, and it comes from the same backend. */
+  vramGb:        number | null
   fetchModels:   (apiUrl: string, opts?: { force?: boolean }) => Promise<void>
+  fetchHardware: (apiUrl: string) => Promise<void>
 }
 
 // Module-level so concurrent callers (multiple nodes/components mounting at
@@ -36,12 +41,15 @@ let inFlight: Promise<void> | null = null
 // Identifies the request currently owning `inFlight`, so a superseded one does
 // not clear a newer forced refresh on its way out.
 let inFlightId = 0
+// apiUrl whose hardware has been read, so the probe runs once and not per render.
+let hardwareFetchedFor: string | null = null
 
 export const useLlmModelsStore = create<LlmModelsStore>((set, get) => ({
   models:        [],
   loading:       false,
   error:         null,
   fetchedApiUrl: null,
+  vramGb:        null,
 
   async fetchModels(apiUrl, opts) {
     const state = get()
@@ -73,6 +81,22 @@ export const useLlmModelsStore = create<LlmModelsStore>((set, get) => ({
     inFlight = request
     return request
   },
+
+  async fetchHardware(apiUrl) {
+    // Once per session: the card does not change while the app runs, and this
+    // is called from a hook that renders on every workflow edit.
+    if (hardwareFetchedFor === apiUrl) return
+    hardwareFetchedFor = apiUrl
+    try {
+      const res = await fetch(`${apiUrl}/llm/status`)
+      const data: { vram_gb?: number | null } = await res.json()
+      set({ vramGb: typeof data.vram_gb === 'number' && data.vram_gb > 0 ? data.vram_gb : null })
+    } catch {
+      // Cleared, not retried here: this effect only re-runs when apiUrl changes,
+      // so the next consumer of useLlmModels to mount is what tries again.
+      hardwareFetchedFor = null
+    }
+  },
 }))
 
 /**
@@ -87,6 +111,8 @@ export function useLlmModels(tag?: string): {
   models:  LlmModel[]
   loading: boolean
   error:   string | null
+  /** The card's VRAM in GB, null when unknown. */
+  vramGb:  number | null
   refresh: () => Promise<void>
 } {
   const apiUrl      = useAppStore((s) => s.apiUrl)
@@ -94,8 +120,11 @@ export function useLlmModels(tag?: string): {
   const loading     = useLlmModelsStore((s) => s.loading)
   const error       = useLlmModelsStore((s) => s.error)
   const fetchModels = useLlmModelsStore((s) => s.fetchModels)
+  const vramGb      = useLlmModelsStore((s) => s.vramGb)
+  const fetchHardware = useLlmModelsStore((s) => s.fetchHardware)
 
   useEffect(() => { void fetchModels(apiUrl) }, [apiUrl, fetchModels])
+  useEffect(() => { void fetchHardware(apiUrl) }, [apiUrl, fetchHardware])
 
   // Both memoised because callers put them in dependency arrays. A `refresh`
   // rebuilt on every render made ModelLibraryModal's `useEffect(…, [refresh])`
@@ -108,5 +137,5 @@ export function useLlmModels(tag?: string): {
   )
   const refresh = useCallback(() => fetchModels(apiUrl, { force: true }), [apiUrl, fetchModels])
 
-  return { models: filtered, loading, error, refresh }
+  return { models: filtered, loading, error, vramGb, refresh }
 }

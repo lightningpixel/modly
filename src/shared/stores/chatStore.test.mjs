@@ -144,15 +144,37 @@ test('deleting a background conversation does not disturb the open one', () => {
 
 test('the title is written once and the thread list is left alone after that', () => {
   const store = loadStore(fakeLocalStorage())
-  store.getState().setMessages([userMsg('u1', 'titre auto')])
+  store.getState().setMessages([userMsg('u1', 'auto title')])
   const listAfterTitle = store.getState().conversations
 
-  store.getState().setMessages((prev) => [...prev, userMsg('u2', 'autre chose')])
+  store.getState().setMessages((prev) => [...prev, userMsg('u2', 'something else')])
 
-  assert.equal(store.getState().conversations[0].title, 'titre auto')
+  assert.equal(store.getState().conversations[0].title, 'auto title')
   // Same array reference: a streamed token must not hand every subscriber a new
   // conversation list for a rendering that did not change.
   assert.equal(store.getState().conversations, listAfterTitle)
+})
+
+test('a name typed by the user is not overwritten by the next message', () => {
+  const store = loadStore(fakeLocalStorage())
+  store.getState().setMessages([userMsg('u1', 'auto title')])
+  const id = store.getState().activeId
+
+  store.getState().renameConversation(id, '  Low-poly duck  ')
+  store.getState().setMessages((prev) => [...prev, userMsg('u2', 'something else')])
+
+  assert.equal(store.getState().conversations[0].title, 'Low-poly duck')
+})
+
+test('clearing the name lets the next message derive one again', () => {
+  const store = loadStore(fakeLocalStorage())
+  store.getState().setMessages([userMsg('u1', 'first title')])
+  const id = store.getState().activeId
+
+  store.getState().renameConversation(id, '')
+  store.getState().setMessages((prev) => [...prev, userMsg('u2', 'never mind')])
+
+  assert.equal(store.getState().conversations[0].title, 'first title')
 })
 
 test('what is persisted is the thread list, with the open transcript folded in', () => {

@@ -1,7 +1,6 @@
 import type { Workflow, WFNode } from '@shared/types/electron.d'
 import { getWorkflowExtension, type WorkflowExtension } from './mockExtensions'
-import { isPassthrough, isBranchConsumer, resolveDataSource, nearestUpstreamWaits,
-         isLlmPortHandle, isProviderOnlyLlm, LLM_PORT_PREFIX } from './nodeBehaviors'
+import { isPassthrough, isBranchConsumer, resolveDataSource, nearestUpstreamWaits } from './nodeBehaviors'
 
 export type DataType = 'image' | 'text' | 'mesh' | 'audio'
 
@@ -9,6 +8,20 @@ export interface WorkflowPreflightIssue {
   key: string
   message: string
   nodeId?: string
+  /** Absent means blocking: an issue has to opt out of stopping the run, never
+   *  into it, so a new check can't silently become advisory. */
+  severity?: 'blocking' | 'warning'
+  /** Set only on issues `autoWireWorkflow` can actually resolve — a missing
+   *  edge. Opt-in, so a new check never claims to be repairable by a tool that
+   *  would find nothing to do. What the agent is told to do about an issue
+   *  hangs off this: an unset file is for the user to pick, not for wiring. */
+  autoWirable?: true
+}
+
+/** The issues that must stop a run. Warnings are still shown — they just don't
+ *  stand between the user and the Run button. */
+export function blockingIssues(issues: WorkflowPreflightIssue[]): WorkflowPreflightIssue[] {
+  return issues.filter((issue) => issue.severity !== 'warning')
 }
 
 export function nodeLabel(node: WFNode, allExtensions: WorkflowExtension[]): string {
@@ -24,7 +37,6 @@ export function nodeLabel(node: WFNode, allExtensions: WorkflowExtension[]): str
   if (node.type === 'extensionNode') {
     return getWorkflowExtension(node.data.extensionId ?? '', allExtensions)?.name ?? 'Extension'
   }
-  if (node.type === 'llmNode') return 'LLM'
   return 'Node'
 }
 
@@ -53,7 +65,6 @@ export function getNodeOutputType(node: WFNode, allExtensions: WorkflowExtension
   if (node.type === 'extensionNode') {
     return getWorkflowExtension(node.data.extensionId ?? '', allExtensions)?.output
   }
-  if (node.type === 'llmNode') return 'text'
   return undefined
 }
 
@@ -81,16 +92,49 @@ function llmModelProblem(
   return undefined
 }
 
+/**
+ * The extension steps fed by `sourceId`, walking through passthrough nodes
+ * (a Wait carries its input straight on). Cycles are possible — a While loop
+ * closes one — so visited ids are tracked.
+ */
+function consumerSteps(
+  sourceId: string,
+  workflow: Workflow,
+  nodeMap: Map<string, WFNode>,
+): WFNode[] {
+  const steps: WFNode[] = []
+  const seen  = new Set([sourceId])
+  const queue = [sourceId]
+  while (queue.length > 0) {
+    const id = queue.shift()!
+    for (const edge of workflow.edges) {
+      if (edge.source !== id || seen.has(edge.target)) continue
+      seen.add(edge.target)
+      const target = nodeMap.get(edge.target)
+      if (!target) continue
+      if (target.type === 'extensionNode') steps.push(target)
+      else if (isPassthrough(target.type)) queue.push(target.id)
+    }
+  }
+  return steps
+}
+
 export function validateWorkflowPreflight(
   workflow: Workflow,
   allExtensions: WorkflowExtension[],
   options?: {
     currentMeshUrl?: string | null
+    /** True when the run has an image to fall back on for an Image node that
+     *  carries no file of its own: the one picked in the Generate panel, a blob
+     *  dropped on it, or an image attached to the chat turn — the runner treats
+     *  all three the same (`overrideImageData ?? selectedImageData`, then
+     *  `selectedImagePath`). It rescues a MODEL step only. */
+    hasFallbackImage?: boolean
     llmModels?:      LlmModelRef[]
-    /** Agent's model, used by any LLM node that hasn't picked one — the runner
-     *  falls back to it, so preflight must check it too (its default is a
-     *  catalog id that is NOT downloaded on a fresh install). */
-    defaultLlmModel?: string
+    /** The card's VRAM in GB, when it could be measured. A step declaring more
+     *  than this is warned about before the run rather than discovered as an
+     *  out-of-memory crash halfway through. */
+    vramGb?: number
   },
 ): WorkflowPreflightIssue[] {
   const issues: WorkflowPreflightIssue[] = []
@@ -116,6 +160,33 @@ export function validateWorkflowPreflight(
       })
     }
 
+    // An Image node with nothing chosen used to reach the run engine, which
+    // threw "No input image selected for model node" several steps in. Only
+    // when a step actually consumes it: a leftover Image node wired to nothing,
+    // or feeding only a preview, costs the run nothing.
+    //
+    // The panel's image is a fallback, but a narrow one — the runner reaches for
+    // it only on a MODEL step (`nodeInputPath ?? selectedImagePath`). A process
+    // step takes the strict path and throws "… needs an incoming image
+    // connection" however full the panel is, so one process consumer is enough
+    // to make the empty node a problem.
+    if (
+      node.type === 'imageNode' &&
+      !((node.data.params?.filePath as string | undefined)?.trim())
+    ) {
+      const steps = consumerSteps(node.id, workflow, nodeMap)
+      const everyConsumerFallsBack = steps.every(
+        (step) => getWorkflowExtension(step.data.extensionId ?? '', allExtensions)?.type === 'model',
+      )
+      if (steps.length > 0 && !(options?.hasFallbackImage && everyConsumerFallsBack)) {
+        pushIssue(issues, {
+          key: `${node.id}:no-image-file`,
+          nodeId: node.id,
+          message: `${nodeLabel(node, allExtensions)} needs a file selected.`,
+        })
+      }
+    }
+
     if (node.type === 'forEachNode' && !((node.data.params?.dir as string | undefined)?.trim())) {
       pushIssue(issues, {
         key: `${node.id}:foreach-no-folder`,
@@ -137,41 +208,6 @@ export function validateWorkflowPreflight(
       })
     }
 
-    if (node.type === 'llmNode') {
-      // A provider-only LLM node (wired to another node's model port) configures
-      // a model instead of generating, so it needs no prompt.
-      const providerOnly = isProviderOnlyLlm(node.id, workflow.edges)
-      if (!providerOnly) {
-        const hasIncomingText = workflow.edges.some(
-          (edge) => edge.target === node.id && outputTypes.get(edge.source) === 'text',
-        )
-        const hasPrompt = !!(node.data.params?.prompt as string | undefined)?.trim()
-        if (!hasIncomingText && !hasPrompt) {
-          pushIssue(issues, {
-            key: `${node.id}:llm-no-prompt`,
-            nodeId: node.id,
-            message: `${nodeLabel(node, allExtensions)} needs a prompt or an incoming text connection.`,
-          })
-        }
-      }
-
-      // An unset model falls back to the agent's at run time, so validate that
-      // one — it's the fresh-install case where nothing is downloaded yet.
-      const model = (node.data.params?.model as string | undefined) || options?.defaultLlmModel
-      const problem = llmModelProblem(model, options?.llmModels)
-      if (problem) {
-        pushIssue(issues, {
-          key: `${node.id}:llm-model`,
-          nodeId: node.id,
-          message: problem.reason === 'none'
-            ? `${nodeLabel(node, allExtensions)} needs a model selected.`
-            : problem.reason === 'unknown'
-            ? `${nodeLabel(node, allExtensions)} points at an unknown model "${model}". Pick one from the list.`
-            : `${nodeLabel(node, allExtensions)} uses ${problem.name ?? model}, which isn't downloaded. Get it in Settings → Agent.`,
-        })
-      }
-    }
-
     if (node.type !== 'extensionNode') continue
 
     const ext = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
@@ -184,22 +220,30 @@ export function validateWorkflowPreflight(
       continue
     }
 
-    // Model-provider edges set an `llm-model` param, they're not data inputs.
-    const allIncoming   = workflow.edges.filter((edge) => edge.target === node.id)
-    const llmPortEdges  = allIncoming.filter((edge) => isLlmPortHandle(edge.targetHandle))
-    const incomingEdges = allIncoming.filter((edge) => !isLlmPortHandle(edge.targetHandle))
+    const incomingEdges = workflow.edges.filter((edge) => edge.target === node.id)
     const requiredInputs = (ext.inputs ?? [ext.input]) as DataType[]
+
+    // A step that declares more VRAM than the card has usually fails, and it
+    // fails late — after the earlier steps have already run. A warning, not a
+    // block: offloading and quantization routinely fit a step into less than it
+    // declares, and a manifest that overstates its cost must not make an
+    // extension unusable. Only when both numbers are known: an undeclared cost
+    // or an unmeasurable card stays silent.
+    if (typeof ext.vramGb === 'number' && typeof options?.vramGb === 'number'
+        && options.vramGb > 0 && ext.vramGb > options.vramGb) {
+      pushIssue(issues, {
+        key: `${node.id}:vram`,
+        nodeId: node.id,
+        severity: 'warning',
+        message: `${ext.name} expects about ${ext.vramGb} GB of VRAM, and this card has `
+          + `${options.vramGb} GB. It may run out of memory partway through.`,
+      })
+    }
 
     // Every `llm-model` param must resolve to a model that's actually on disk —
     // otherwise the extension only finds out mid-run, as an HTTP 404 from /llm/chat.
     for (const param of ext.params ?? []) {
       if (param.type !== 'llm-model') continue
-      // Driven by a connected LLM node: that node's own check owns the model, so
-      // flagging it here too would just duplicate the message.
-      const wired = llmPortEdges.some((edge) =>
-        (edge.targetHandle ?? '').slice(LLM_PORT_PREFIX.length) === param.id,
-      )
-      if (wired) continue
       const modelId = (node.data.params?.[param.id] ?? param.default) as string | undefined
       const problem = llmModelProblem(modelId, options?.llmModels)
       if (!problem) continue
@@ -234,6 +278,7 @@ export function validateWorkflowPreflight(
       pushIssue(issues, {
         key: duplicated ? `${node.id}:missing:${slot}:${requiredType}` : `${node.id}:missing:${requiredType}`,
         nodeId: node.id,
+        autoWirable: true,
         message: `${ext.name} needs an incoming ${formatType(requiredType)} connection${which}.`,
       })
     })

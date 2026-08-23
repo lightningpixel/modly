@@ -61,6 +61,14 @@ export function loadModule(entryPath) {
     format: 'cjs',
     jsx: 'automatic',
     external: ['react', 'react-dom', 'react-dom/client', 'react/jsx-runtime'],
+    // The path aliases from tsconfig.web.json — esbuild applies them to
+    // sub-paths too, so `@shared/stores/x` resolves like it does in the app.
+    alias: {
+      '@':       resolve('src'),
+      '@shared': resolve('src/shared'),
+      '@areas':  resolve('src/areas'),
+      '@main':   resolve('electron/main'),
+    },
     write: false,
   })
   writeFileSync(outfile, result.outputFiles[0].text, 'utf8')
@@ -74,8 +82,11 @@ export function loadModule(entryPath) {
 export async function mount(element) {
   const require = createRequire(import.meta.url)
   const { createRoot } = require('react-dom/client')
-  const { act } = require('react-dom/test-utils')
-  const { cloneElement } = require('react')
+  const React = require('react')
+  const { cloneElement } = React
+  // React 18.3 moved `act` onto the React export and deprecated the test-utils
+  // one, which warns on every call.
+  const act = React.act ?? require('react-dom/test-utils').act
 
   // Through globalThis: these are globals this module installed itself in
   // setupDom(), not ambient browser ones.
@@ -95,6 +106,10 @@ export async function mount(element) {
     },
     /** Let effects, promises and state updates settle. */
     flush: async () => { await act(async () => { await Promise.resolve() }) },
+    /** Run something that updates React state — a click, a keypress, a store
+     *  write — and settle. Outside act(), React warns and the assertions run
+     *  against a tree that has not re-rendered yet. */
+    act: async (fn) => { await act(async () => { await fn() }) },
     unmount: async () => {
       await act(async () => { root.unmount() })
       container.remove()

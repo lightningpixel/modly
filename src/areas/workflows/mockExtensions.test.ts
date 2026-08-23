@@ -59,3 +59,22 @@ test('model extensions follow the same rule', () => {
   } as unknown as ModelExtension], [])
   assert.deepEqual(built.map((e) => e.description), ['Node level.', 'Extension level.'])
 })
+
+test('a long description is handed to the canvas whole', () => {
+  // This same string is what the extensions panel renders and what its search
+  // box matches on, so nothing here may shorten it. The agent prompt has its own
+  // 120-character budget and the backend applies it there (`_blurb`).
+  const long = `Turns a photograph into a printable mesh. ${'x'.repeat(200)}`
+  const [built] = buildAllWorkflowExtensions([], [processExt({
+    description: long,
+    nodes: [node('a')],
+  })])
+  assert.equal(built.description, long)
+})
+
+test('a declared VRAM cost travels with the node', () => {
+  const [built] = buildAllWorkflowExtensions([], [processExt({
+    nodes: [node('a', { vramGb: 16 })],
+  })])
+  assert.equal(built.vramGb, 16)
+})

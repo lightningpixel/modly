@@ -26,7 +26,6 @@ const BEHAVIORS: Record<string, NodeBehavior> = {
   waitNode:      { passthrough: true, branchStarter: true },
   outputNode:    { sceneOutput: true, branchConsumer: true },
   extensionNode: { branchConsumer: true },
-  llmNode:       { branchConsumer: true },
 }
 
 export const isPassthrough    = (type: string | undefined): boolean => !!type && !!BEHAVIORS[type]?.passthrough
@@ -35,26 +34,6 @@ export const isSceneOutput    = (type: string | undefined): boolean => !!type &&
 export const isBranchConsumer = (type: string | undefined): boolean => !!type && !!BEHAVIORS[type]?.branchConsumer
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Handle id an LLM node uses to hand its model to another node's `llm-model`
- *  param, instead of producing text. */
-export const LLM_PROVIDER_HANDLE = 'llm'
-/** `llm-<paramId>` — the matching target handle on an extension node. */
-export const LLM_PORT_PREFIX = 'llm-'
-
-export const isLlmPortHandle = (handle: string | null | undefined): boolean =>
-  !!handle && handle.startsWith(LLM_PORT_PREFIX)
-
-/**
- * True when an LLM node only feeds other nodes' model ports — it configures a
- * model, it doesn't generate anything, so the runner must not execute it and
- * preflight must not demand a prompt. A node with no outgoing edge at all stays
- * a normal (dead-end) generation step.
- */
-export function isProviderOnlyLlm(nodeId: string, edges: WFEdge[]): boolean {
-  const outgoing = edges.filter((e) => e.source === nodeId)
-  return outgoing.length > 0 && outgoing.every((e) => e.sourceHandle === LLM_PROVIDER_HANDLE)
-}
 
 /**
  * Walks `sourceId` backwards through passthrough nodes (following each one's

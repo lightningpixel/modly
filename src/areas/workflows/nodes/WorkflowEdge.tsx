@@ -20,17 +20,10 @@ export default function WorkflowEdge({
   // Read the handles directly from the edge store — reliable regardless of EdgeProps version
   const thisEdge     = edges.find((e) => e.id === id)
   const targetHandle = thisEdge?.targetHandle
-  const sourceHandle = thisEdge?.sourceHandle
 
-  // Model-provider link (LLM node → an extension's llm-model param): one colour
-  // end to end, it carries no data type.
-  const isLlmLink = sourceHandle === 'llm' || (targetHandle ?? '').startsWith('llm-')
-
-  const sourceColor = isLlmLink
-    ? HANDLE_COLOR.llm
-    : sourceNode?.type === 'imageNode'
+  const sourceColor = sourceNode?.type === 'imageNode'
     ? HANDLE_COLOR.image
-    : sourceNode?.type === 'textNode' || sourceNode?.type === 'llmNode'
+    : sourceNode?.type === 'textNode'
     ? HANDLE_COLOR.text
     : sourceNode?.type === 'meshNode'
     ? HANDLE_COLOR.mesh
@@ -46,14 +39,10 @@ export default function WorkflowEdge({
     return targetExt?.input
   })()
 
-  const targetColor = isLlmLink
-    ? HANDLE_COLOR.llm
-    : targetNode?.type === 'outputNode'
+  const targetColor = targetNode?.type === 'outputNode'
     ? HANDLE_COLOR.mesh
     : targetNode?.type === 'previewNode'
     ? HANDLE_COLOR.image
-    : targetNode?.type === 'llmNode'
-    ? HANDLE_COLOR.text
     : (HANDLE_COLOR[targetInputType ?? ''] ?? FALLBACK_COLOR)
 
   const [edgePath] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition })

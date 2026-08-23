@@ -78,8 +78,8 @@ export function ModelLibraryModal({ onClose }: { onClose: () => void }): JSX.Ele
   const [error, setError]           = useState<string | null>(null)
 
   // The model list comes from the shared catalog store, so a download or delete
-  // here immediately updates every other picker (LLM node, extension params,
-  // chat) and vice-versa — no independent per-surface fetch.
+  // here immediately updates every other picker (extension params, chat) and
+  // vice-versa — no independent per-surface fetch.
   const { models, refresh: refreshModels } = useLlmModels()
 
   // Downloads live in a module-level store (src/shared/services/llmDownloads.ts)
@@ -213,7 +213,7 @@ export function ModelLibraryModal({ onClose }: { onClose: () => void }): JSX.Ele
           <div>
             <h2 className="text-base font-semibold text-zinc-100 leading-tight">Model library</h2>
             <p className="text-xs text-zinc-500 mt-0.5">
-              Local models shared by the whole app — chat agent, LLM node and extensions.
+              Local models shared by the whole app — chat agent and extensions.
             </p>
           </div>
           <button onClick={onClose} aria-label="Close" className="text-zinc-600 hover:text-zinc-300 transition-colors mt-0.5">

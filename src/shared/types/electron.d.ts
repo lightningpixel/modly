@@ -23,6 +23,10 @@ export interface ExtensionNode {
   output:           'image' | 'text' | 'mesh' | 'audio'
   /** Sink node: renders no output handle (e.g. an exporter that writes to disk). */
   terminal?:        boolean
+  /** Declared VRAM cost in GB, when the manifest states one — inherited from
+   *  the extension level when the node does not. The preflight compares it to
+   *  the real card. */
+  vramGb?:          number
   paramsSchema:     ParamSchema[]
   paramDefaults?:   Record<string, number | string>
   hfRepo?:          string
@@ -67,7 +71,6 @@ export interface ParamSchema {
   // extension receives the chosen model id as a plain string and talks to the
   // shared server itself (POST {MODLY_API_URL}/llm/chat).
   llm_tag?:    string     // optional category filter, e.g. "code" for coder models
-  port?:       boolean    // also expose it as a node handle an LLM node can drive
 }
 
 export interface ProcessExtension {

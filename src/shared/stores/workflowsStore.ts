@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
+import { useAppStore } from './appStore'
 
 interface WorkflowsStore {
   workflows:   Workflow[]
@@ -101,6 +102,12 @@ interface LegacyWorkflow {
 export const NODE_TYPES_WITHOUT_TARGET = new Set(['imageNode', 'textNode', 'meshNode', 'inputNode', 'forEachNode'])
 export const NODE_TYPES_WITHOUT_SOURCE = new Set(['outputNode', 'previewNode'])
 
+// Node types that shipped once and were withdrawn. A saved workflow still holds
+// them, and React Flow has no component left to render one: it would sit there
+// as a ghost the runner skips and preflight cannot even type. Dropping them at
+// load leaves a graph that says what it does.
+export const RETIRED_NODE_TYPES = new Set(['llmNode'])
+
 function sanitizeEdges(nodes: WFNode[], edges: WFEdge[]): WFEdge[] {
   const typeOf = new Map(nodes.map((n) => [n.id, n.type]))
   return edges
@@ -126,7 +133,10 @@ function sanitizeEdges(nodes: WFNode[], edges: WFEdge[]): WFEdge[] {
 function migrateWorkflow(raw: LegacyWorkflow): Workflow {
   // Already migrated
   if (raw.nodes && raw.edges) {
-    return { ...raw, nodes: raw.nodes, edges: sanitizeEdges(raw.nodes, raw.edges) } as Workflow
+    // Their edges need no special handling: sanitizeEdges already drops every
+    // edge with a dangling endpoint.
+    const nodes = raw.nodes.filter((n) => !RETIRED_NODE_TYPES.has(n.type))
+    return { ...raw, nodes, edges: sanitizeEdges(nodes, raw.edges) } as Workflow
   }
 
   // Migrate from old blocks format
@@ -179,6 +189,7 @@ export const useWorkflowsStore = create<WorkflowsStore>((set) => ({
 
   async load() {
     set({ loading: true })
+    let retired = 0
     try {
       const raw  = await window.electron.workflows.list()
       // Dedupe by id: two files on disk can share an internal id (e.g. a copied
@@ -190,6 +201,7 @@ export const useWorkflowsStore = create<WorkflowsStore>((set) => ({
         const wf = migrateWorkflow(entry)
         if (seen.has(wf.id)) continue
         seen.add(wf.id)
+        retired += (entry.nodes ?? []).filter((n) => RETIRED_NODE_TYPES.has(n.type)).length
         list.push(wf)
       }
       set((s) => {
@@ -206,6 +218,17 @@ export const useWorkflowsStore = create<WorkflowsStore>((set) => ({
       })
     } catch {
       set({ loading: false })
+    }
+    // Said once, for the whole library: a node vanishing from a graph the user
+    // built deserves a word. The files on disk keep it until the workflow is
+    // saved again. Outside the try on purpose — a toast that fails must not cost
+    // the user the workflow list that has just been loaded.
+    if (retired > 0) {
+      try {
+        useAppStore.getState().showToast(
+          `Removed ${retired} node${retired > 1 ? 's' : ''} of a type Modly no longer supports.`,
+        )
+      } catch { /* no toast host yet (first load, or a test) — the graphs still loaded */ }
     }
   },
 

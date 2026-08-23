@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useLayoutEffect, useState } from 'react'
-import { Handle, Position, useReactFlow, useEdges } from '@xyflow/react'
+import { Handle, Position, useReactFlow } from '@xyflow/react'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
 import LlmModelSelect from '@shared/components/ui/LlmModelSelect'
 import { buildAllWorkflowExtensions } from '../mockExtensions'
@@ -95,27 +95,17 @@ function FileSelectControl({ param, value, dirValue, onChange }: {
   )
 }
 
-function ParamControl({ param, value, onChange, resolvedParams, drivenByPort }: {
+function ParamControl({ param, value, onChange, resolvedParams }: {
   param:          ParamSchema
   value:          number | string
   onChange:       (v: number | string) => void
   resolvedParams: Record<string, unknown>
-  drivenByPort?:  boolean
 }) {
   if (param.type === 'file-select') {
     const dirValue = String(resolvedParams[param.dir_from ?? ''] ?? '')
     return <FileSelectControl param={param} value={String(value ?? '')} dirValue={dirValue} onChange={onChange} />
   }
   if (param.type === 'llm-model') {
-    // An attached LLM node overrides the param at run time — show that instead
-    // of letting the user edit a value that won't be used.
-    if (drivenByPort) {
-      return (
-        <p className="text-[10px] text-pink-400/90 leading-snug px-0.5 py-1">
-          Driven by the connected LLM node.
-        </p>
-      )
-    }
     return <LlmModelSelect value={String(value ?? '')} tag={param.llm_tag} className={inputCls} onChange={onChange} />
   }
   if (param.type === 'select') {
@@ -157,7 +147,6 @@ function ParamControl({ param, value, onChange, resolvedParams, drivenByPort }: 
 
 export default function ExtensionNode({ id, data, selected }: { id: string; data: WFNodeData; selected?: boolean }) {
   const { updateNodeData } = useReactFlow()
-  const edges   = useEdges()
   const running = useWorkflowRunStore((s) => s.activeNodeId === id)
 
   const { modelExtensions, processExtensions } = useExtensionsStore()
@@ -182,16 +171,6 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
   const ioRowRefs = useRef<(HTMLDivElement | null)[]>([])
   const [handleTops, setHandleTops] = useState<string[]>([])
   const handleTop = handleTops[0] ?? '50%'
-
-  // Model-provider ports: an `llm-model` param declared with `port: true` gets a
-  // handle on the bottom edge (separate from the data flow, like n8n's
-  // ai_languageModel connector) that an LLM node can drive.
-  const llmPorts = (ext?.params ?? []).filter((p) => p.type === 'llm-model' && p.port)
-  const connectedLlmPorts = new Set(
-    edges
-      .filter((e) => e.target === id && (e.targetHandle ?? '').startsWith('llm-'))
-      .map((e) => (e.targetHandle ?? '').slice(4)),
-  )
 
   // Align handles with their respective IO rows after mount
   useLayoutEffect(() => {
@@ -278,19 +257,6 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
           style={{ background: outputColor, width: 14, height: 14, border: '2.5px solid #18181b', top: handleTop }}
         />
       )}
-      {/* Model-provider ports (bottom edge) */}
-      {llmPorts.map((p, i) => (
-        <Handle
-          key={p.id}
-          id={`llm-${p.id}`}
-          type="target"
-          position={Position.Bottom}
-          style={{
-            background: HANDLE_COLOR.llm, width: 12, height: 12, border: '2.5px solid #18181b',
-            left: `${((i + 1) / (llmPorts.length + 1)) * 100}%`,
-          }}
-        />
-      ))}
     </>
   )
 
@@ -326,7 +292,6 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
                       value={val}
                       onChange={(v) => patchParam(param.id, v)}
                       resolvedParams={resolvedParams}
-                      drivenByPort={connectedLlmPorts.has(param.id)}
                     />
                   </div>
                 </div>

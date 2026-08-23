@@ -18,13 +18,11 @@ import { useWorkflowsStore, NODE_TYPES_WITHOUT_TARGET, NODE_TYPES_WITHOUT_SOURCE
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
 import { useAppStore } from '@shared/stores/appStore'
 import { useLlmModels } from '@shared/stores/llmModelsStore'
-import { useAgentStore } from '@shared/stores/agentStore'
 import type { Workflow, WFNode, WFEdge, WFNodeData } from '@shared/types/electron.d'
 import { buildAllWorkflowExtensions } from './mockExtensions'
 import type { WorkflowExtension } from './mockExtensions'
 import { useWorkflowRunStore } from './workflowRunStore'
-import { validateWorkflowPreflight, getNodeOutputType as preflightOutputType } from './preflight'
-import { isLlmPortHandle, LLM_PROVIDER_HANDLE } from './nodeBehaviors'
+import { validateWorkflowPreflight, blockingIssues, getNodeOutputType as preflightOutputType } from './preflight'
 import ExtensionNode    from './nodes/ExtensionNode'
 import ImageNode        from './nodes/ImageNode'
 import TextNode         from './nodes/TextNode'
@@ -34,14 +32,13 @@ import PreviewImageNode from './nodes/PreviewImageNode'
 import WaitNode         from './nodes/WaitNode'
 import WhileNode        from './nodes/WhileNode'
 import ForEachNode      from './nodes/ForEachNode'
-import LLMNode          from './nodes/LLMNode'
 import WorkflowEdge     from './nodes/WorkflowEdge'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const DRAG_KEY      = 'modly/extension-id'
 const DRAG_NODE_KEY = 'modly/node-type'
-const NODE_TYPES = { extensionNode: ExtensionNode, imageNode: ImageNode, textNode: TextNode, outputNode: AddToSceneNode, meshNode: Load3DMeshNode, previewNode: PreviewImageNode, waitNode: WaitNode, whileNode: WhileNode, forEachNode: ForEachNode, llmNode: LLMNode }
+const NODE_TYPES = { extensionNode: ExtensionNode, imageNode: ImageNode, textNode: TextNode, outputNode: AddToSceneNode, meshNode: Load3DMeshNode, previewNode: PreviewImageNode, waitNode: WaitNode, whileNode: WhileNode, forEachNode: ForEachNode }
 
 // Loop-container node types: resizable frames whose children form a loop body.
 // (For Each iterators are plain source nodes, not containers.)
@@ -107,7 +104,6 @@ const PANEL_BUILTIN_NODES = [
   { type: 'waitNode',    label: 'Wait',           color: '#71717a', icon: <><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></> },
   { type: 'whileNode',   label: 'While',          color: '#f59e0b', icon: <><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></> },
   { type: 'forEachNode', label: 'For Each', color: '#38bdf8', icon: <><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></> },
-  { type: 'llmNode',     label: 'LLM',      color: '#fbbf24', icon: <><path d="M9.9 2.8l1.6 4.2 4.2 1.6-4.2 1.6-1.6 4.2-1.6-4.2-4.2-1.6 4.2-1.6z"/><path d="M18 13l1 2.6 2.6 1-2.6 1-1 2.6-1-2.6-2.6-1 2.6-1z"/></> },
 ]
 
 function ExtGroupHeader({ title, author, expanded, onToggle, count }: { title: string; author?: string; expanded: boolean; onToggle: () => void; count: number }) {
@@ -702,8 +698,8 @@ function HelpModal({ onClose }: { onClose: () => void }) {
 // ─── Connection type helpers ──────────────────────────────────────────────────
 
 /** Output type of a node, reusing preflight's single source of truth (which
- *  already covers llmNode and forEachNode — this used to be a partial copy that
- *  returned undefined for them, silently allowing e.g. mesh → LLM). */
+ *  already covers forEachNode — this used to be a partial copy that returned
+ *  undefined for it). */
 function getNodeOutputType(node: Node | undefined, allExts: WorkflowExtension[]): string | undefined {
   if (!node) return undefined
   return preflightOutputType(node as unknown as WFNode, allExts)
@@ -717,7 +713,6 @@ function getNodeInputType(
   if (!node) return undefined
   if (node.type === 'outputNode')  return 'mesh'
   if (node.type === 'previewNode') return 'image'
-  if (node.type === 'llmNode')     return 'text'
   const ext = allExts.find((e) => e.id === (node.data as WFNodeData)?.extensionId)
   if (ext?.inputs && ext.inputs.length > 1 && targetHandle) {
     const idx = parseInt(targetHandle.replace('input-', ''), 10)
@@ -742,11 +737,11 @@ function WorkflowCanvasInner({
   const { screenToFlowPosition, getNode } = useReactFlow()
   const { runState, run: runWorkflow, cancel } = useWorkflowRunStore()
   const currentMeshUrl = useAppStore((s) => s.currentJob?.outputUrl)
+  const selectedImagePath = useAppStore((s) => s.selectedImagePath)
+  const selectedImageData = useAppStore((s) => s.selectedImageData)
   // Shared local-LLM library, so preflight can catch a model that isn't on disk
   // before the run dies on an HTTP 404 deep inside an extension.
-  const { models: llmModels } = useLlmModels()
-  // What an LLM node without an explicit model actually runs with.
-  const defaultLlmModel = useAgentStore((s) => s.localModel)
+  const { models: llmModels, vramGb } = useLlmModels()
   const showToast = useAppStore((s) => s.showToast)
   const isRunning = runState.status === 'running' || runState.status === 'paused'
 
@@ -762,6 +757,7 @@ function WorkflowCanvasInner({
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const preflightToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastToastRef        = useRef<string | null>(null)
   const didMountRef = useRef(false)
 
   // ─── Undo / Redo ──────────────────────────────────────────────────────────
@@ -822,8 +818,12 @@ function WorkflowCanvasInner({
       edges: edges as WFEdge[],
       updatedAt: workflow.updatedAt,
     }
-    return validateWorkflowPreflight(draft, allExtensions, { currentMeshUrl, llmModels, defaultLlmModel })
-  }, [workflow, nodes, edges, allExtensions, currentMeshUrl, llmModels, defaultLlmModel])
+    return validateWorkflowPreflight(draft, allExtensions, {
+      currentMeshUrl,
+      hasFallbackImage: !!selectedImagePath || !!selectedImageData,
+      llmModels, vramGb: vramGb ?? undefined,
+    })
+  }, [workflow, nodes, edges, allExtensions, currentMeshUrl, selectedImagePath, selectedImageData, llmModels, vramGb])
 
   useEffect(() => {
     if (!didMountRef.current) {
@@ -831,9 +831,17 @@ function WorkflowCanvasInner({
       return
     }
     if (preflightToastTimer.current) clearTimeout(preflightToastTimer.current)
-    if (preflightIssues.length === 0) return
+    if (preflightIssues.length === 0) { lastToastRef.current = null; return }
+    // What stops the run comes first: a warning is worth seeing, but never at
+    // the expense of the thing the user has to fix.
+    const first = blockingIssues(preflightIssues)[0] ?? preflightIssues[0]
+    // The array is rebuilt on every edit, so an issue that simply persists — a
+    // VRAM warning, a missing input the user has not got to yet — would toast
+    // the same sentence again on every keystroke. Say it when it changes.
+    if (first.message === lastToastRef.current) return
     preflightToastTimer.current = setTimeout(() => {
-      showToast(preflightIssues[0].message)
+      lastToastRef.current = first.message
+      showToast(first.message)
     }, 250)
     return () => {
       if (preflightToastTimer.current) clearTimeout(preflightToastTimer.current)
@@ -868,21 +876,9 @@ function WorkflowCanvasInner({
   const canRedo = histIdx < historyRef.current.length - 1
 
   const isValidConnection = useCallback((connection: Edge | Connection) => {
-    // Model-provider link: the LLM node's `llm` handle only fits an extension's
-    // `llm-<paramId>` port, and those ports accept nothing else.
-    const fromProvider = connection.sourceHandle === LLM_PROVIDER_HANDLE
-    const toLlmPort    = isLlmPortHandle(connection.targetHandle)
-    if (fromProvider !== toLlmPort) return false
-    // One provider per port: a second edge would make which model wins depend on
-    // edge array order.
-    if (toLlmPort && edges.some((e) =>
-      e.target === connection.target && e.targetHandle === connection.targetHandle)) return false
-
-    if (!fromProvider) {
-      const srcType = getNodeOutputType(getNode(connection.source) as Node, allExtensions)
-      const tgtType = getNodeInputType(getNode(connection.target) as Node, connection.targetHandle, allExtensions)
-      if (srcType && tgtType && srcType !== tgtType) return false  // type mismatch (unknown types allowed)
-    }
+    const srcType = getNodeOutputType(getNode(connection.source) as Node, allExtensions)
+    const tgtType = getNodeInputType(getNode(connection.target) as Node, connection.targetHandle, allExtensions)
+    if (srcType && tgtType && srcType !== tgtType) return false  // type mismatch (unknown types allowed)
     // Reject connections that would create a cycle: if the target can already
     // reach the source, adding source→target closes a loop.
     if (connection.source && connection.target) {
@@ -1164,8 +1160,11 @@ function WorkflowCanvasInner({
 
   const handleRun = useCallback(() => {
     if (isRunning) { cancel(); return }
-    if (preflightIssues.length > 0) {
-      showToast(preflightIssues[0].message)
+    // Warnings are surfaced by the toast effect above and deliberately let the
+    // run through — only a blocking issue stops it here.
+    const blocking = blockingIssues(preflightIssues)
+    if (blocking.length > 0) {
+      showToast(blocking[0].message)
       return
     }
     const wf: Workflow = { ...workflow, nodes: nodes as WFNode[], edges: edges as WFEdge[], updatedAt: new Date().toISOString() }
@@ -1358,7 +1357,6 @@ const MINI_NODE_TINTS: Record<string, { fill: string; stroke: string }> = {
   extensionNode: { fill: 'rgba(167,139,250,0.24)', stroke: '#a78bfa' },
   outputNode:    { fill: 'rgba(56,189,248,0.22)',  stroke: '#38bdf8' },
   previewNode:   { fill: 'rgba(56,189,248,0.22)',  stroke: '#38bdf8' },
-  llmNode:       { fill: 'rgba(251,191,36,0.22)',  stroke: '#fbbf24' },
 }
 const MINI_NODE_DEFAULT_TINT = { fill: 'rgba(113,113,122,0.25)', stroke: '#71717a' }
 

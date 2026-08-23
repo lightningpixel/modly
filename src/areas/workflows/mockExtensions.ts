@@ -1,6 +1,6 @@
 import type { ModelExtension, ProcessExtension } from '@shared/stores/extensionsStore'
 export type { ParamSchema } from '@shared/types/electron.d'
-import type { ParamSchema } from '@shared/types/electron.d'
+import type { ExtensionNode, ParamSchema } from '@shared/types/electron.d'
 
 export interface WorkflowExtension {
   id:              string   // "ext_id/node_id"
@@ -15,6 +15,8 @@ export interface WorkflowExtension {
   inputLabels?:    string[]                                  // display labels per input slot
   output:          'image' | 'text' | 'mesh' | 'audio'
   terminal?:       boolean   // sink node: no output handle (e.g. an exporter)
+  /** Declared VRAM cost in GB, when the manifest states one. */
+  vramGb?:         number
   params:          ParamSchema[]
   builtin:         boolean
   type:            'model' | 'process'
@@ -32,57 +34,46 @@ function applyParamDefaults(
   )
 }
 
+/** One node of one extension, as the canvas sees it. Model and process
+ *  extensions differ only by that `type` — everything else is read the same way,
+ *  so it is read in one place. */
+function toWorkflowExtension(
+  ext:  ModelExtension | ProcessExtension,
+  node: ExtensionNode,
+  type: 'model' | 'process',
+): WorkflowExtension {
+  return {
+    id:              `${ext.id}/${node.id}`,
+    extensionId:     ext.id,
+    extensionName:   ext.name,
+    extensionAuthor: ext.author ?? '',
+    nodeId:          node.id,
+    name:            node.name,
+    // The author's own sentence, per node then per extension. Measured
+    // 2026-08-20: composing it from declared facts instead cost 84% → 73% on
+    // the disambiguation evals, because the opening verb — Reduces, Repairs,
+    // Smooths — is the signal, and a generated line flattens them all to one.
+    description:     node.description ?? ext.description ?? '',
+    input:           node.input,
+    inputs:          node.inputs,
+    inputLabels:     node.inputLabels,
+    output:          node.output,
+    terminal:        node.terminal,
+    vramGb:          node.vramGb,
+    params:          applyParamDefaults(node.paramsSchema as ParamSchema[], node.paramDefaults),
+    builtin:         ext.builtin,
+    type,
+  }
+}
+
 export function buildAllWorkflowExtensions(
   modelExtensions:   ModelExtension[],
   processExtensions: ProcessExtension[],
 ): WorkflowExtension[] {
-  const result: WorkflowExtension[] = []
-
-  for (const ext of processExtensions) {
-    for (const node of ext.nodes) {
-      result.push({
-        id:              `${ext.id}/${node.id}`,
-        extensionId:     ext.id,
-        extensionName:   ext.name,
-        extensionAuthor: ext.author ?? '',
-        nodeId:          node.id,
-        name:            node.name,
-        description:     node.description ?? ext.description ?? '',
-        input:           node.input,
-        inputs:          node.inputs,
-        inputLabels:     node.inputLabels,
-        output:          node.output,
-        terminal:        node.terminal,
-        params:          applyParamDefaults(node.paramsSchema as ParamSchema[], node.paramDefaults),
-        builtin:         ext.builtin,
-        type:            'process',
-      })
-    }
-  }
-
-  for (const ext of modelExtensions) {
-    for (const node of ext.nodes) {
-      result.push({
-        id:              `${ext.id}/${node.id}`,
-        extensionId:     ext.id,
-        extensionName:   ext.name,
-        extensionAuthor: ext.author ?? '',
-        nodeId:          node.id,
-        name:            node.name,
-        description:     node.description ?? ext.description ?? '',
-        input:           node.input,
-        inputs:          node.inputs,
-        inputLabels:     node.inputLabels,
-        output:          node.output,
-        terminal:        node.terminal,
-        params:          applyParamDefaults(node.paramsSchema as ParamSchema[], node.paramDefaults),
-        builtin:         ext.builtin,
-        type:            'model',
-      })
-    }
-  }
-
-  return result
+  return [
+    ...processExtensions.flatMap((ext) => ext.nodes.map((n) => toWorkflowExtension(ext, n, 'process'))),
+    ...modelExtensions.flatMap((ext) => ext.nodes.map((n) => toWorkflowExtension(ext, n, 'model'))),
+  ]
 }
 
 export function getWorkflowExtension(id: string, all: WorkflowExtension[]): WorkflowExtension | undefined {

@@ -68,6 +68,50 @@ test('load migrates legacy block-format workflows into nodes + edges', async () 
   assert.deepEqual({ source: wf.edges[0].source, target: wf.edges[0].target }, { source: 'input-w', target: 'w-blk' })
 })
 
+test('load drops a node type the app no longer ships, and its edges with it', async () => {
+  // The LLM node shipped, then was withdrawn. React Flow has no component left
+  // for it: left in place it sits there as a ghost the runner skips and preflight
+  // cannot type — silently, on a graph the user built.
+  const useStore = loadStore()
+  stubBridge({
+    list: async () => [migrated('w', {
+      nodes: [
+        { id: 'txt', type: 'textNode',      position: { x: 0, y: 0 }, data: { params: {} } },
+        { id: 'llm', type: 'llmNode',       position: { x: 1, y: 0 }, data: { params: { model: 'qwen3-4b' } } },
+        { id: 'cad', type: 'extensionNode', position: { x: 2, y: 0 }, data: { extensionId: 'pack/cad', params: {} } },
+      ],
+      edges: [
+        { id: 'e1', source: 'txt', target: 'llm', targetHandle: 'input-0' },
+        { id: 'e2', source: 'llm', target: 'cad', targetHandle: 'input-0' },
+      ],
+    })],
+  })
+
+  await useStore.getState().load()
+  const wf = useStore.getState().workflows[0]
+
+  assert.deepEqual(wf.nodes.map((n) => n.id), ['txt', 'cad'])
+  // Both edges touched the removed node, so neither can survive — sanitizeEdges
+  // drops a dangling endpoint on its own.
+  assert.deepEqual(wf.edges, [])
+})
+
+test('a workflow without a retired node is passed through untouched', async () => {
+  const useStore = loadStore()
+  const nodes = [
+    { id: 'img', type: 'imageNode',     position: { x: 0, y: 0 }, data: { params: {} } },
+    { id: 'gen', type: 'extensionNode', position: { x: 1, y: 0 }, data: { extensionId: 'pack/gen', params: {} } },
+  ]
+  const edges = [{ id: 'e1', source: 'img', sourceHandle: 'output', target: 'gen', targetHandle: 'input-0' }]
+  stubBridge({ list: async () => [migrated('w', { nodes, edges })] })
+
+  await useStore.getState().load()
+  const wf = useStore.getState().workflows[0]
+
+  assert.deepEqual(wf.nodes.map((n) => n.id), ['img', 'gen'])
+  assert.equal(wf.edges.length, 1)
+})
+
 test('load flips loading back to false when the bridge throws', async () => {
   const useStore = loadStore()
   stubBridge({ list: async () => { throw new Error('disk error') } })

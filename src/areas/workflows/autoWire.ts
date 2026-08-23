@@ -1,6 +1,6 @@
 import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
 import { getWorkflowExtension, type WorkflowExtension } from './mockExtensions'
-import { isPassthrough, resolveDataSource, isLlmPortHandle } from './nodeBehaviors'
+import { isPassthrough, resolveDataSource } from './nodeBehaviors'
 import { getNodeOutputType, nodeLabel, type DataType } from './preflight'
 
 export interface AutoWireResult {
@@ -77,10 +77,7 @@ export function autoWireWorkflow(workflow: Workflow, allExtensions: WorkflowExte
     if (!ext) continue
 
     const inputs = (ext.inputs ?? [ext.input]) as DataType[]
-    // Model-provider edges (LLM node → an `llm-model` param) are not data
-    // inputs: counting one would make this think a required text input is
-    // already satisfied, while preflight kept reporting it as missing.
-    const incoming = () => edges.filter((e) => e.target === node.id && !isLlmPortHandle(e.targetHandle))
+    const incoming = () => edges.filter((e) => e.target === node.id)
 
     // Per SLOT, not per distinct type — the same rule preflight applies. A node
     // declaring ['text','text'] (positive + negative prompt) used to count as

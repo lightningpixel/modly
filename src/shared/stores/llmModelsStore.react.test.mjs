@@ -10,13 +10,20 @@ const React = createRequire(import.meta.url)('react')
  *  a shared instance would make each test depend on the ones before it. */
 const freshHook = () => loadModule('src/shared/stores/llmModelsStore.ts').useLlmModels
 
-/** Counts every request the hook makes, and answers with a fixed catalog. */
+/** Counts requests per endpoint. The hook reads two: the catalog, and the card
+ *  it has to fit in — each is supposed to be read once. */
 function countingFetch() {
   const calls = []
   globalThis.fetch = (url) => {
-    calls.push(String(url))
-    return Promise.resolve({ json: () => Promise.resolve({ models: [{ id: 'qwen3-4b', downloaded: true }] }) })
+    const u = String(url)
+    calls.push(u)
+    const body = u.includes('/llm/status')
+      ? { vram_gb: 12 }
+      : { models: [{ id: 'qwen3-4b', downloaded: true }] }
+    return Promise.resolve({ json: () => Promise.resolve(body) })
   }
+  calls.models = () => calls.filter((u) => u.includes('/llm/models')).length
+  calls.status = () => calls.filter((u) => u.includes('/llm/status')).length
   return calls
 }
 
@@ -30,7 +37,8 @@ test('the hook fetches the catalog once, however many times it renders', async (
   await view.rerender()
   await view.flush()
 
-  assert.equal(calls.length, 1)
+  assert.equal(calls.models(), 1)
+  assert.equal(calls.status(), 1)
   await view.unmount()
 })
 
@@ -76,7 +84,7 @@ test('a consumer that refreshes from an effect settles instead of looping', asyn
   await view.flush()
   await view.flush()
 
-  assert.equal(calls.length, 2)  // the hook's own load, plus one forced refresh
+  assert.equal(calls.models(), 2)  // the hook's own load, plus one forced refresh
   assert.ok(renders < 10, `expected a handful of renders, got ${renders}`)
   await view.unmount()
 })

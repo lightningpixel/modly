@@ -11,12 +11,16 @@ export interface ActionDone {
     face_count?: number
     workflow_id?: string
     workflow_name?: string
+    /** run_workflow: target the workflow created earlier in this same turn —
+     *  the backend cannot know its id, the app stamps it. */
+    created_this_turn?: boolean
     workflow?: Omit<Workflow, 'id' | 'createdAt' | 'updatedAt'>
     set_params?: { step: number; params: Record<string, unknown> }[]
     name?: string
     description?: string
     mode?: string
-    /** export_mesh: workspace-relative source path and target format. */
+    /** export_mesh: workspace-relative source path and target format.
+     *  set_input_image: absolute path of the picture the Image node points at. */
     path?: string
     format?: string
   } | null
@@ -40,7 +44,8 @@ export interface ChatMessage {
  *  its transcript, and the compacted note covering the turns already folded. */
 export interface Conversation {
   id:            string
-  /** Auto-derived from the first user message, then left alone. */
+  /** Auto-derived from the first user message, then left alone — so a name the
+   *  user typed is never overwritten by a later message. */
   title:         string
   messages:      ChatMessage[]
   summary:       string
@@ -88,6 +93,7 @@ interface ChatState {
   newConversation:    () => void
   switchConversation: (id: string) => void
   deleteConversation: (id: string) => void
+  renameConversation: (id: string, title: string) => void
 }
 
 /** Cap on the persisted history, per conversation. Nothing trims the live
@@ -103,12 +109,17 @@ const TITLE_MAX = 40
 const newId = (): string =>
   globalThis.crypto?.randomUUID?.() ?? `c-${Date.now()}-${Math.random().toString(16).slice(2)}`
 
+/** One line, short enough for the picker. Shared so a name the user typed is cut
+ *  exactly like a derived one — with the ellipsis that says it was cut. */
+function shorten(text: string): string {
+  const line = text.trim().replace(/\s+/g, ' ')
+  return line.length > TITLE_MAX ? `${line.slice(0, TITLE_MAX - 1)}…` : line
+}
+
 /** First real user line, shortened — what the picker lists a thread under. */
 function titleFrom(messages: ChatMessage[]): string {
   const first = messages.find((m) => m.role === 'user' && !m.notice && m.content.trim())
-  if (!first) return ''
-  const text = first.content.trim().replace(/\s+/g, ' ')
-  return text.length > TITLE_MAX ? `${text.slice(0, TITLE_MAX - 1)}…` : text
+  return first ? shorten(first.content) : ''
 }
 
 function emptyConversation(): Conversation {
@@ -245,6 +256,13 @@ export const useChatStore = create<ChatState>()(
         const conversations = remaining.length > 0 ? remaining : [emptyConversation()]
         return { conversations, ...open(conversations[0]) }
       }),
+
+      renameConversation: (id, title) => set((s) => ({
+        // Cleared back to empty on purpose: the next message re-derives a title,
+        // which is a better answer than pinning a blank name.
+        conversations: s.conversations.map((c) =>
+          c.id === id ? { ...c, title: shorten(title) } : c),
+      })),
     }),
     {
       name: STORAGE_KEY,

@@ -216,25 +216,6 @@ test('a node requiring the same type twice gets both slots wired', () => {
   assert.equal(new Set(sources).size, 2)
 })
 
-test('a model-provider edge does not count as a satisfied data input', () => {
-  const { autoWireWorkflow } = loadModule()
-  // An LLM node wired to an `llm-model` param outputs 'text', so before the
-  // isLlmPortHandle filter autowire considered the text input satisfied and
-  // skipped it — while preflight kept reporting it missing.
-  const cad = ext({ id: 'pack/cad', nodeId: 'cad', name: 'Text to CAD', input: 'text', output: 'mesh' })
-  const llm = { id: 'llm', type: 'llmNode', position: { x: 200, y: 200 }, data: { params: { model: 'ready-7b' } } }
-  const workflow = wf(
-    [llm, extNode('cad', 'pack/cad')],
-    [{ id: 'e1', source: 'llm', target: 'cad', sourceHandle: 'llm', targetHandle: 'llm-model_variant' }],
-  )
-
-  const { workflow: out, added } = autoWireWorkflow(workflow, [cad])
-  assert.equal(added.length, 1, 'the text input must still be wired')
-  assert.ok(out.edges.some((e) => e.target === 'cad' && e.targetHandle === 'input-0'))
-  // The provider edge is untouched.
-  assert.ok(out.edges.some((e) => e.id === 'e1' && e.targetHandle === 'llm-model_variant'))
-})
-
 test('a slot fed by the wrong type with no correct producer is left alone (no invented input node)', () => {
   const { autoWireWorkflow } = loadModule()
   // The real regression: Image wired straight into a mesh step. Creating a
