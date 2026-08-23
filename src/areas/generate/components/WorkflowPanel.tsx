@@ -10,6 +10,7 @@ import { useAppStore }         from '@shared/stores/appStore'
 import { useExtensionsStore }  from '@shared/stores/extensionsStore'
 import { useNavStore }         from '@shared/stores/navStore'
 import { useWorkflowRunStore } from '@areas/workflows/workflowRunStore'
+import { useLlmModels }        from '@shared/stores/llmModelsStore'
 import { useWaitButton } from '@areas/workflows/useWaitButton'
 import { buildAllWorkflowExtensions, getWorkflowExtension } from '@areas/workflows/mockExtensions'
 import { validateWorkflowPreflight } from '@areas/workflows/preflight'
@@ -463,6 +464,14 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
   }, [setNodes])
 
   const currentMeshUrl = useAppStore((s) => s.currentJob?.outputUrl)
+  const selectedImagePath = useAppStore((s) => s.selectedImagePath)
+  const selectedImageData = useAppStore((s) => s.selectedImageData)
+  // Same inputs the Workflows canvas feeds its preflight. Without them this
+  // panel silently skipped two checks it shares with the canvas: a step
+  // declaring more VRAM than the card has, and an llm-model param pointing at a
+  // model that is not on disk. Both were unreachable here, which is the wrong
+  // place to lose them — this panel is the one that runs the workflow.
+  const { models: llmModels, vramGb } = useLlmModels()
   const showToast = useAppStore((s) => s.showToast)
   const { runState, run, cancel } = useWorkflowRunStore()
   const isRunning = runState.status === 'running' || runState.status === 'paused'
@@ -477,8 +486,12 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
 
   const preflightIssues = useMemo(() => {
     const wf: Workflow = { ...workflow, nodes: nodes as WFNode[], edges: edges as WFEdge[] }
-    return validateWorkflowPreflight(wf, allExtensions, { currentMeshUrl })
-  }, [workflow, nodes, edges, allExtensions, currentMeshUrl])
+    return validateWorkflowPreflight(wf, allExtensions, {
+      currentMeshUrl,
+      hasFallbackImage: !!selectedImagePath || !!selectedImageData,
+      llmModels, vramGb: vramGb ?? undefined,
+    })
+  }, [workflow, nodes, edges, allExtensions, currentMeshUrl, selectedImagePath, selectedImageData, llmModels, vramGb])
 
   const firstPreflightIssue = preflightIssues[0]?.message ?? null
 

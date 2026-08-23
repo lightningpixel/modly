@@ -1,15 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { useOutsideClick } from '@shared/hooks/useOutsideClick'
+import ConversationSidebar from './ConversationSidebar'
 import { appliedSomething } from '@shared/services/agentHistory'
 import { useAppStore } from '@shared/stores/appStore'
 import { useAgentStore, providerBaseUrl } from '@shared/stores/agentStore'
 import { ModelLibraryModal } from '@shared/components/ui/ModelLibraryModal'
 import { useWorkflowsStore } from '@shared/stores/workflowsStore'
 import { useWorkflowRunStore, pauseKind } from '@areas/workflows/workflowRunStore'
-import {
-  sendUserMessage, stopAgent, clearAgentChat,
-  newConversation, switchConversation, deleteConversation,
-} from '@shared/services/agentChat'
+import { sendUserMessage, stopAgent } from '@shared/services/agentChat'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -73,6 +71,7 @@ const TOOL_LABELS: Record<string, string> = {
   create_workflow:       'Created workflow',
   update_workflow:       'Updated workflow',
   set_param:             'Set parameter',
+  set_input_image:       'Set input image',
   delete_workflow:       'Deleted workflow',
   fix_workflow_wiring:   'Connected nodes',
   remember:              'Saved to memory',
@@ -284,88 +283,6 @@ function WorkflowProgressCard({ name }: { name: string }): JSX.Element {
   )
 }
 
-// ─── Conversations menu ───────────────────────────────────────────────────────
-
-/** Start / switch / delete a thread, and empty the open one. Owns its own
- *  open-close state: the panel above only needs to know when the visible
- *  conversation changed (`onLeave`). */
-function ConversationsMenu({ onLeave }: { onLeave: () => void }): JSX.Element {
-  const conversations = useChatStore((s) => s.conversations)
-  const activeId      = useChatStore((s) => s.activeId)
-  const isEmpty       = useChatStore((s) => s.messages.length === 0)
-
-  const [open, setOpen] = useState(false)
-  const ref             = useRef<HTMLDivElement>(null)
-  useOutsideClick(ref, open, () => setOpen(false))
-
-  const leave = (act: () => void) => () => { act(); setOpen(false); onLeave() }
-
-  return (
-    <div className="relative" ref={ref}>
-      <button
-        onClick={() => setOpen((v) => !v)}
-        title="Conversations"
-        className={`transition-colors ${open ? 'text-zinc-300' : 'text-zinc-600 hover:text-zinc-400'}`}
-      >
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-        </svg>
-      </button>
-
-      {open && (
-        <div className="absolute bottom-full mb-2 left-0 z-50 bg-zinc-900 border border-zinc-700/60 rounded-xl shadow-xl overflow-hidden min-w-[220px] max-w-[300px]">
-          <button
-            onClick={leave(newConversation)}
-            className="w-full px-3 py-2 text-left text-[11px] text-accent hover:bg-zinc-800 transition-colors flex items-center gap-2 border-b border-zinc-800"
-          >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-              <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-            New conversation
-          </button>
-
-          <div className="max-h-56 overflow-y-auto">
-            {conversations.map((c) => (
-              <div
-                key={c.id}
-                className={`group flex items-center gap-2 px-3 py-2 hover:bg-zinc-800 transition-colors ${c.id === activeId ? 'text-zinc-100' : 'text-zinc-400'}`}
-              >
-                <button
-                  onClick={leave(() => switchConversation(c.id))}
-                  className="flex-1 min-w-0 text-left text-[11px] truncate"
-                >
-                  {c.title || 'New conversation'}
-                </button>
-                {c.id === activeId && <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" />}
-                {/* Deleting the open thread falls back to the next one, so this
-                  * is never a dead end — the menu can stay open. */}
-                <button
-                  onClick={() => deleteConversation(c.id)}
-                  title="Delete conversation"
-                  className="shrink-0 text-zinc-700 group-hover:text-zinc-500 hover:!text-red-400 transition-colors"
-                >
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-                  </svg>
-                </button>
-              </div>
-            ))}
-          </div>
-
-          {!isEmpty && (
-            <button
-              onClick={leave(clearAgentChat)}
-              className="w-full px-3 py-2 text-left text-[11px] text-zinc-500 hover:text-red-400 hover:bg-zinc-800 transition-colors border-t border-zinc-800"
-            >
-              Clear this conversation
-            </button>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
 // ─── Main component ──────────────────────────────────────────────────────────
 
 export default function ChatPanel(): JSX.Element {
@@ -398,6 +315,7 @@ export default function ChatPanel(): JSX.Element {
   const [showLibrary, setShowLibrary]         = useState(false)
   const [attachments, setAttachments]         = useState<string[]>([]) // data URLs
   const [isDragging, setIsDragging]           = useState(false)
+  const [showHistory, setShowHistory]         = useState(false)
   const [showWfPicker, setShowWfPicker]       = useState(false)
   const wfPickerRef                           = useRef<HTMLDivElement>(null)
   const endRef                                = useRef<HTMLDivElement>(null)
@@ -565,6 +483,26 @@ export default function ChatPanel(): JSX.Element {
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
+      <ConversationSidebar
+        open={showHistory}
+        onClose={() => setShowHistory(false)}
+        onLeave={resetPanelView}
+      />
+
+      {/* Everything about WHICH conversation lives in the drawer — including
+        * starting a new one. Only the way in stays on screen. */}
+      <div className="flex items-center px-2 py-1.5 shrink-0">
+        <button
+          onClick={() => setShowHistory(true)}
+          title="Conversations"
+          className="text-zinc-600 hover:text-zinc-300 transition-colors p-0.5"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" />
+          </svg>
+        </button>
+      </div>
+
       {/* Drag overlay */}
       {isDragging && (
         <div className="absolute inset-0 z-50 flex items-center justify-center rounded-xl border-2 border-dashed border-accent/60 bg-accent/5 pointer-events-none">
@@ -756,7 +694,6 @@ export default function ChatPanel(): JSX.Element {
                 <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="16" /><line x1="8" y1="12" x2="16" y2="12" />
               </svg>
             </button>
-            <ConversationsMenu onLeave={resetPanelView} />
             {/* Thinking toggle */}
             <button
               onClick={() => setThinkingOverride(thinkingMode === 'auto' ? 'on' : thinkingMode === 'on' ? 'off' : 'auto')}

@@ -33,7 +33,8 @@
           "default": "",
           "tooltip": "Destination folder. Leave empty to save in the workspace Exports folder."
         }
-      ]
+      ],
+      "description": "Writes the mesh to a file. GLB keeps the texture and the colours, OBJ keeps them alongside as separate files, and PLY keeps vertex colours. STL stores geometry alone, which is what 3D printing asks for."
     }
   ]
 }

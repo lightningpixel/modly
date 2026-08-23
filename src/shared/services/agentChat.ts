@@ -12,9 +12,10 @@ import { useWorkflowsStore } from '@shared/stores/workflowsStore'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
 import { useChatStore } from '@shared/stores/chatStore'
 import { useLlmModelsStore } from '@shared/stores/llmModelsStore'
+import { wantsToSeeTheImage } from './visionIntent'
 import { useWorkflowRunStore, pauseKind } from '@areas/workflows/workflowRunStore'
 import { buildAllWorkflowExtensions } from '@areas/workflows/mockExtensions'
-import { validateWorkflowPreflight, type WorkflowPreflightIssue } from '@areas/workflows/preflight'
+import { validateWorkflowPreflight, blockingIssues, type WorkflowPreflightIssue } from '@areas/workflows/preflight'
 import { autoWireWorkflow } from '@areas/workflows/autoWire'
 import { markUnappliedTurn } from '@shared/services/agentHistory'
 import type { ChatMessage as Message, ActionDone } from '@shared/stores/chatStore'
@@ -93,7 +94,7 @@ function runStateForAgent(workflows: Workflow[]): Record<string, unknown> | unde
   }
 }
 
-function buildContext(): Record<string, unknown> {
+function buildContext(attachedImage = false): Record<string, unknown> {
   const { currentJob, meshStats } = useAppStore.getState()
   const { workflows, activeId } = useWorkflowsStore.getState()
   const extensions = allExtensions()
@@ -109,6 +110,12 @@ function buildContext(): Record<string, unknown> {
     ctx.currentMeshPath = currentJob.outputUrl.slice('/workspace/'.length)
   }
   if (meshStats?.triangles)  ctx.meshTriangles   = meshStats.triangles
+  // The card's budget. Every generator states its own cost in its description
+  // ("Fast and light, ~4 GB VRAM"), so the agent knew what each step costs and
+  // never what the machine has — asked outright, it answered that it could not
+  // advise because it did not know the GPU. One number closes that.
+  const cardVramGb = useLlmModelsStore.getState().vramGb
+  if (cardVramGb) ctx.gpuVramGb = cardVramGb
   if (activeId)              ctx.activeWorkflowId = activeId
 
   // What is actually wrong with the selected workflow, recomputed every turn.
@@ -116,8 +123,16 @@ function buildContext(): Record<string, unknown> {
   // than from an earlier refusal sitting in its own transcript.
   const active = activeId ? workflows.find((w) => w.id === activeId) : undefined
   if (active) {
-    const issues = validateWorkflowPreflight(active, extensions, preflightOptions())
-    if (issues.length > 0) ctx.wiringIssues = issues.map((i) => i.message)
+    const issues = blockingIssues(validateWorkflowPreflight(active, extensions, preflightOptions(attachedImage)))
+    // Split by who can resolve it. Sent as one list, every issue was answered
+    // with fix_workflow_wiring — including "Image needs a file selected.",
+    // which that tool finds nothing to do about. The model then reported a
+    // wiring it had not performed, twice out of two runs, and launched a run
+    // that failed on the missing image.
+    const wirable = issues.filter((i) => i.autoWirable)
+    const forUser = issues.filter((i) => !i.autoWirable)
+    if (wirable.length > 0) ctx.wiringIssues = wirable.map((i) => i.message)
+    if (forUser.length > 0) ctx.inputIssues  = forUser.map((i) => i.message)
   }
   if (workflows.length > 0)  ctx.workflows       = workflows.map((w) => ({
     id: w.id,
@@ -149,11 +164,16 @@ function buildContext(): Record<string, unknown> {
 
 /** Preflight options for agent-initiated checks — same inputs the Workflows tab
  *  uses, so the agent can't start a run the editor would have blocked. */
-function preflightOptions() {
+function preflightOptions(attachedImage = false) {
+  const app = useAppStore.getState()
   return {
+    // An image attached to this turn reaches the runner as `overrideImageData`
+    // and stands in for an Image node's own file, exactly like the panel's.
+    // Left out, preflight blocked a run that would have worked.
+    hasFallbackImage: attachedImage || !!app.selectedImagePath || !!app.selectedImageData,
     currentMeshUrl:  useAppStore.getState().currentJob?.outputUrl ?? null,
     llmModels:       useLlmModelsStore.getState().models,
-    defaultLlmModel: useAgentStore.getState().localModel,
+    vramGb:          useLlmModelsStore.getState().vramGb ?? undefined,
   }
 }
 
@@ -167,13 +187,15 @@ function preflightOptions() {
  *
  * Returns the graph to act on (the saved, wired one when anything changed),
  * the connections added, and the preflight issues auto-wiring can't solve
- * (missing scene mesh, empty For Each folder, undownloaded LLM model…).
+ * (unpicked Image file, missing scene mesh, empty For Each folder,
+ * undownloaded LLM model…).
  */
 async function wireAndValidate(
   wf: Workflow,
+  attachedImage = false,
 ): Promise<{ workflow: Workflow; added: string[]; issues: WorkflowPreflightIssue[] }> {
   const exts = allExtensions()
-  const issues = validateWorkflowPreflight(wf, exts, preflightOptions())
+  const issues = validateWorkflowPreflight(wf, exts, preflightOptions(attachedImage))
   if (issues.length === 0) return { workflow: wf, added: [], issues }
 
   const { workflow: wired, added } = autoWireWorkflow(wf, exts)
@@ -183,7 +205,7 @@ async function wireAndValidate(
   const res = await store.save({ ...wired, updatedAt: new Date().toISOString() })
   if (!res.success) return { workflow: wf, added: [], issues }
   store.openWorkflow(wf.id)
-  return { workflow: wired, added, issues: validateWorkflowPreflight(wired, exts, preflightOptions()) }
+  return { workflow: wired, added, issues: validateWorkflowPreflight(wired, exts, preflightOptions(attachedImage)) }
 }
 
 /**
@@ -201,29 +223,46 @@ function blockedHint(issues: WorkflowPreflightIssue[]): string {
 }
 
 async function handleAction(action: ActionDone, overrideImageData?: string) {
+  const attachedImage = !!overrideImageData
   const { updateCurrentJob, pushMeshUrl } = useAppStore.getState()
-  const { workflows, save: saveWorkflow, openWorkflow } = useWorkflowsStore.getState()
+  const { workflows, activeId, save: saveWorkflow, openWorkflow } = useWorkflowsStore.getState()
 
   if (action.payload?.type === 'mesh_update' && action.payload.url) {
     updateCurrentJob({ outputUrl: action.payload.url })
     pushMeshUrl(action.payload.url)
   }
-  if (action.payload?.type === 'run_workflow' && action.payload.workflow_id) {
-    const wf = workflows.find((w) => w.id === action.payload!.workflow_id)
+  if (action.payload?.type === 'run_workflow') {
+    // `created_this_turn` is the backend saying "the one you just created": its
+    // id is stamped here, after the create action, so the backend never sees it.
+    // create_workflow opened it, which makes the active workflow the answer —
+    // but only if saving it succeeded. A failed save leaves the previous
+    // selection active, and running THAT is the very mistake this path exists to
+    // prevent, so the name has to agree before anything starts.
+    const wf = action.payload.created_this_turn
+      ? workflows.find((w) => w.id === activeId && w.name === action.payload!.workflow_name)
+      : workflows.find((w) => w.id === action.payload!.workflow_id)
+    if (!wf && action.payload.created_this_turn) {
+      pushNotice(`'${action.payload.workflow_name}' could not be opened, so nothing was started.`)
+      return
+    }
     if (wf) {
       // Same wiring gate as the Workflows/Generate pages — except the agent
       // path connects the missing inputs itself rather than sending the user
       // back to the editor to drag them.
-      const { workflow: ready, added, issues } = await wireAndValidate(wf)
+      const { workflow: ready, added, issues } = await wireAndValidate(wf, attachedImage)
       if (added.length > 0) pushNotice(`Connected in '${wf.name}': ${added.join(' · ')}`)
-      if (issues.length > 0) {
+      // Warnings are worth saying out loud, and worth running anyway.
+      const advisory = issues.filter((i) => i.severity === 'warning')
+      if (advisory.length > 0) pushNotice(advisory.map((i) => i.message).join('\n'))
+      const blocking = blockingIssues(issues)
+      if (blocking.length > 0) {
         chat().setMessages((prev) => [...prev, {
           id: `sys-${Date.now()}`,
           role: 'assistant',
           content:
             `The workflow '${wf.name}' was not started — fix this first:\n`
-            + issues.map((i) => `- ${i.message}`).join('\n')
-            + blockedHint(issues),
+            + blocking.map((i) => `- ${i.message}`).join('\n')
+            + blockedHint(blocking),
         }])
         return
       }
@@ -268,6 +307,35 @@ async function handleAction(action: ActionDone, overrideImageData?: string) {
         ? `Exported as ${action.payload.format.toUpperCase()}.`
         : `Export cancelled${res.error ? `: ${res.error}` : '.'}`,
     )
+  }
+  if (action.payload?.type === 'set_input_image' && action.payload.workflow_id && action.payload.path) {
+    // The Image node stores the path the run reads plus a data URI the canvas
+    // shows, exactly as its own Browse button does — the agent picking the file
+    // has to leave the node in the same state as a user picking it.
+    const path = action.payload.path
+    const wf = workflows.find((w) => w.id === action.payload!.workflow_id)
+    const target = wf?.nodes.find((n) => n.type === 'imageNode')
+    if (!wf || !target) {
+      pushNotice(`'${wf?.name ?? 'That workflow'}' has no Image node to point at a file.`)
+      return
+    }
+    try {
+      const base64 = await window.electron.fs.readFileBase64(path)
+      const ext = path.split('.').pop()?.toLowerCase() ?? ''
+      const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : ext === 'webp' ? 'image/webp' : 'image/png'
+      const updated: Workflow = {
+        ...wf,
+        updatedAt: new Date().toISOString(),
+        nodes: wf.nodes.map((n) => (n.id === target.id
+          ? { ...n, data: { ...n.data, params: { ...n.data.params, filePath: path, preview: `data:${mime};base64,${base64}` } } }
+          : n)),
+      }
+      const res = await saveWorkflow(updated)
+      if (res.success) openWorkflow(wf.id)
+      else pushNotice(`Could not save '${wf.name}': ${res.error ?? 'unknown error'}`)
+    } catch {
+      pushNotice(`Could not read '${path}'. Pick the picture in the Image slot instead.`)
+    }
   }
   if (action.payload?.type === 'delete_workflow' && action.payload.workflow_id) {
     const name = action.payload.name ?? action.payload.workflow_id
@@ -330,17 +398,18 @@ async function handleAction(action: ActionDone, overrideImageData?: string) {
 // for models that don't support vision (see agent.py's vision_ok handling).
 let _preVisionChatModel: string | null | undefined = undefined
 
-/** Images need a vision model: auto-switch to the best downloaded VL model
- *  when an image is sent while a text-only local model is selected, reverting
- *  automatically once the conversation goes back to text-only turns. */
-async function resolveModelForSend(hasImage: boolean): Promise<string> {
-  if (!hasImage && _preVisionChatModel !== undefined) {
+/** Looking at an image needs a vision model: auto-switch to the best downloaded
+ *  VL model when the turn asks to see one and a text-only local model is
+ *  selected, reverting automatically once the conversation moves on. */
+async function resolveModelForSend(hasImage: boolean, wantsToLook: boolean): Promise<string> {
+  const needsVision = hasImage && wantsToLook
+  if (!needsVision && _preVisionChatModel !== undefined) {
     chat().setChatModel(_preVisionChatModel)
     _preVisionChatModel = undefined
   }
 
   const model = effectiveModel()
-  if (useAgentStore.getState().provider !== 'local' || !hasImage) return model
+  if (useAgentStore.getState().provider !== 'local' || !needsVision) return model
   try {
     const res = await fetch(`${apiUrl()}/llm/models?downloaded=true`)
     const data: { models?: { id: string; tags?: string[]; size_bytes?: number }[] } = await res.json()
@@ -352,7 +421,7 @@ async function resolveModelForSend(hasImage: boolean): Promise<string> {
     if (vl) {
       if (_preVisionChatModel === undefined) _preVisionChatModel = chat().chatModel
       chat().setChatModel(vl.id)
-      pushNotice(`Image attached — switched to ${vl.id} so the assistant can see it.`)
+      pushNotice(`Switched to ${vl.id} so the assistant can look at the image.`)
       return vl.id
     }
     pushNotice('No vision model downloaded — the assistant cannot see the image (it is still used as workflow input). Download one from the Vision tab of the Model Library.')
@@ -409,7 +478,11 @@ async function runTurn(msgs: Message[], extraContext: Record<string, unknown> = 
   }
 
   try {
-    const context = { ...buildContext(), ...extraContext }
+    // An image on this turn is a fallback input for the run, so preflight has
+    // to see it — otherwise `inputIssues` reports a missing image the runner
+    // already has in hand.
+    const turnHasImage = msgs.some((m) => m.role === 'user' && !!m.imageDataUrls?.length)
+    const context = { ...buildContext(turnHasImage), ...extraContext }
     const { summary, compactedUpTo } = chat()
 
     // Older messages are covered by the compacted summary — send only the note + recent turns
@@ -603,7 +676,8 @@ async function latestRunImageDataUrl(): Promise<string | null> {
 /** Tell the agent the run is paused, attaching the latest intermediate image when possible. */
 async function notifyPause(text: string) {
   const img = await latestRunImageDataUrl()
-  const sendModel = await resolveModelForSend(!!img)
+  // Reviewing the intermediate render is precisely a request to look at it.
+  const sendModel = await resolveModelForSend(!!img, true)
   await callAgent(chat().messages, {
     workflowCompletion: text,
     ...(img ? { workflowImages: [img.split(',')[1]] } : {}),
@@ -733,7 +807,7 @@ export async function sendUserMessage(text: string, attachments: string[] = []) 
   // the panel, and resolveModelForSend can spend a /llm/models round trip, during
   // which the user's text had simply vanished from the screen.
   chat().setMessages((prev) => [...prev, userMsg])
-  const sendModel = await resolveModelForSend(attachments.length > 0)
+  const sendModel = await resolveModelForSend(attachments.length > 0, wantsToSeeTheImage(text))
   await callAgent([...chat().messages], {}, sendModel)
 }
 
