@@ -14,10 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # 24, not the 20 the build jobs use: `npm run test:node` passes
-      # --experimental-strip-types (Node >= 22.6) and relies on the test runner
-      # expanding `src/**/*.test.mjs` itself, which Node 20 does not do — the job
-      # would have failed outright, or silently skipped every src/ test.
+      # `npm run test:node` passes --experimental-strip-types, which needs
+      # Node >= 22.6, and leaves `src/**/*.test.mjs` for the test runner itself
+      # to expand. On a Node without either, the job fails outright or silently
+      # skips every src/ test, so this one is pinned well above the floor.
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
