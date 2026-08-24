@@ -13,7 +13,7 @@ import { useWorkflowRunStore } from '@areas/workflows/workflowRunStore'
 import { useLlmModels }        from '@shared/stores/llmModelsStore'
 import { useWaitButton } from '@areas/workflows/useWaitButton'
 import { buildAllWorkflowExtensions, getWorkflowExtension } from '@areas/workflows/mockExtensions'
-import { validateWorkflowPreflight } from '@areas/workflows/preflight'
+import { validateWorkflowPreflight, blockingIssues } from '@areas/workflows/preflight'
 import type { WorkflowExtension } from '@areas/workflows/mockExtensions'
 import type { Workflow, WFNode, WFEdge, ParamSchema } from '@shared/types/electron.d'
 import ChatPanel from './ChatPanel'
@@ -493,7 +493,15 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
     })
   }, [workflow, nodes, edges, allExtensions, currentMeshUrl, selectedImagePath, selectedImageData, llmModels, vramGb])
 
-  const firstPreflightIssue = preflightIssues[0]?.message ?? null
+  // A warning is worth showing and never worth stopping the run for — the same
+  // split the Workflows canvas makes. Without it a VRAM warning disabled the
+  // Generate button outright, which is the one thing it was written not to do.
+  const blockingIssue = useMemo(
+    () => blockingIssues(preflightIssues)[0]?.message ?? null,
+    [preflightIssues],
+  )
+  // What stops the run comes first; an advisory only shows when nothing does.
+  const firstPreflightIssue = blockingIssue ?? preflightIssues[0]?.message ?? null
 
   // Ordered nodes for params list — only those marked showInGenerate
   const sortedNodes = useMemo(
@@ -507,8 +515,8 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
   )
 
   const handleGenerate = useCallback(() => {
-    if (firstPreflightIssue) {
-      showToast(firstPreflightIssue)
+    if (blockingIssue) {
+      showToast(blockingIssue)
       return
     }
     // Persist the edited params so they survive remounts and are the values actually used.
@@ -520,7 +528,7 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
     }
     useWorkflowsStore.getState().save(wf)
     run(wf, allExtensions)
-  }, [firstPreflightIssue, nodes, edges, workflow, allExtensions, run, showToast])
+  }, [blockingIssue, nodes, edges, workflow, allExtensions, run, showToast])
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
@@ -582,7 +590,7 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
             Stop
           </button>
         ) : (
-          <button onClick={handleGenerate} disabled={Boolean(firstPreflightIssue)}
+          <button onClick={handleGenerate} disabled={Boolean(blockingIssue)}
             className="w-full py-2.5 rounded-lg text-sm font-semibold bg-accent hover:bg-accent-dark disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors">
             Generate 3D Model
           </button>
