@@ -16,6 +16,8 @@ import { buildAllWorkflowExtensions, getWorkflowExtension } from '@areas/workflo
 import { validateWorkflowPreflight, blockingIssues } from '@areas/workflows/preflight'
 import type { WorkflowExtension } from '@areas/workflows/mockExtensions'
 import type { Workflow, WFNode, WFEdge, ParamSchema } from '@shared/types/electron.d'
+import { PICKER_LABELS, openParamPicker, resolvePickerIntent } from '@shared/utils/paramPicker'
+import { PickerIcon } from '@shared/components/ui'
 import ChatPanel from './ChatPanel'
 
 type PanelMode = 'basic' | 'chat'
@@ -127,17 +129,17 @@ function ParamField({ param, value, onChange }: {
     )
   }
   if (param.type === 'string') {
+    const intent = resolvePickerIntent(param)
     return (
       <div className="flex items-center gap-1">
         <input type="text" value={value as string} placeholder={param.tooltip ?? ''}
           onChange={(e) => onChange(e.target.value)} className={`${inputCls} flex-1`} />
         <button onClick={async () => {
-          const p = await window.electron.fs.selectDirectory()
+          const p = await openParamPicker(param, window.electron.fs)
           if (p) onChange(p)
-        }} className="shrink-0 flex items-center justify-center w-6 h-6 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-400 hover:text-zinc-200 transition-colors">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-          </svg>
+        }} title={PICKER_LABELS[intent]} aria-label={PICKER_LABELS[intent]}
+          className="shrink-0 flex items-center justify-center w-6 h-6 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-400 hover:text-zinc-200 transition-colors">
+          <PickerIcon intent={intent} />
         </button>
       </div>
     )
@@ -448,9 +450,10 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
   allExtensions: ReturnType<typeof buildAllWorkflowExtensions>
 }) {
   const [nodes, setNodes] = useNodesState(workflow.nodes as FlowNode[])
-  const [edges]           = useEdgesState(workflow.edges as FlowEdge[])
+  const [edges, setEdges] = useEdgesState(workflow.edges as FlowEdge[])
   const { updateNodeData }               = useReactFlow()
   const { navigate }                     = useNavStore()
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Direct patch into controlled nodes state — no React Flow store dependency
   const patchNode = useCallback<PatchFn>((nodeId, patch) => {
@@ -462,6 +465,48 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
       useWorkflowRunStore.getState().setLiveNodeParams(nodeId, patch.params as Record<string, unknown>)
     }
   }, [setNodes])
+
+  // ─── Tab sync ──────────────────────────────────────────────────────────────
+  const lastSyncedAtRef = useRef<string>(workflow.updatedAt)
+  const didMountRef = useRef(false)
+
+  // Sync local state when Workflows tab saves to the store (Workflows→Generate)
+  useEffect(() => {
+    if (workflow.updatedAt === lastSyncedAtRef.current) return
+    setNodes(workflow.nodes as FlowNode[])
+    setEdges(workflow.edges as FlowEdge[])
+    lastSyncedAtRef.current = workflow.updatedAt
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on updatedAt only; adding nodes/edges would resync on every local edit
+  }, [workflow.updatedAt])
+
+  // Persist to the store and claim the echo so the sync effect above does not
+  // treat our own write as an external change. The claim is optimistic — the store
+  // is updated before save() resolves — and is rolled back when the write fails, so
+  // a failed save never silently replaces the canvas with the last persisted version.
+  const saveAndClaim = useCallback((updated: Workflow) => {
+    const prevSyncedAt = lastSyncedAtRef.current
+    lastSyncedAtRef.current = updated.updatedAt
+    void useWorkflowsStore.getState().save(updated).then((res) => {
+      if (!res.success) lastSyncedAtRef.current = prevSyncedAt
+    })
+  }, [])
+
+  // Debounced save to the store when local state changes (Generate→Workflows)
+  // No cleanup return — lets the timer fire even if user navigates away
+  useEffect(() => {
+    if (!didMountRef.current) { didMountRef.current = true; return }
+    if (saveTimer.current) clearTimeout(saveTimer.current)
+    saveTimer.current = setTimeout(() => {
+      saveTimer.current = null
+      saveAndClaim({
+        ...workflow,
+        nodes: nodes as WFNode[],
+        edges: edges as WFEdge[],
+        updatedAt: new Date().toISOString(),
+      })
+    }, 500)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- debounce on editable state; latest workflow read in the timeout
+  }, [nodes, edges])
 
   const currentMeshUrl = useAppStore((s) => s.currentJob?.outputUrl)
   const selectedImagePath = useAppStore((s) => s.selectedImagePath)
@@ -520,15 +565,17 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
       return
     }
     // Persist the edited params so they survive remounts and are the values actually used.
+    // Drop the pending debounce — this save supersedes it.
+    if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null }
     const wf: Workflow = {
       ...workflow,
       nodes: nodes as WFNode[],
       edges: edges as WFEdge[],
       updatedAt: new Date().toISOString(),
     }
-    useWorkflowsStore.getState().save(wf)
+    saveAndClaim(wf)
     run(wf, allExtensions)
-  }, [blockingIssue, nodes, edges, workflow, allExtensions, run, showToast])
+  }, [blockingIssue, nodes, edges, workflow, allExtensions, run, showToast, saveAndClaim])
 
   return (
     <div className="flex flex-col flex-1 min-h-0">

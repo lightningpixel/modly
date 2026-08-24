@@ -318,6 +318,9 @@ export class PythonProcessRunner implements IProcessRunner {
         // extension call back into Modly — e.g. POST /llm/chat for the shared LLM.
         env: {
           ...process.env,
+          // Force UTF-8 stdio so Unicode prints from process extensions do not
+          // crash under legacy Windows codepages (cp1252/cp932).
+          PYTHONUTF8: '1',
           MODLY_API_URL: API_BASE_URL,
           // ...and what makes such a call go through: the API refuses requests
           // that cannot prove they come from a local Modly client.

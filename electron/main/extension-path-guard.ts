@@ -59,6 +59,12 @@ export const EXT_STAGING_PREFIX = '.modly-staging-'
 // Marker file inside an extension folder while its setup is still running —
 // presence after a crash means the install never completed.
 export const EXT_INCOMPLETE_MARKER = '.modly-incomplete'
+// Reserved basename for registration-pending state. Active transactions append
+// "-<extension-id>-<timestamp>" and live beside extension folders so linked
+// source trees are never mutated.
+export const EXT_REGISTRATION_PENDING_MARKER = '.modly-registration-pending'
+// Reserved basename for the matching validated transaction commit marker.
+export const EXT_VALIDATED_MARKER = '.modly-registration-validated'
 
 export function isInternalExtensionDirName(name: string): boolean {
   return name.startsWith('.')

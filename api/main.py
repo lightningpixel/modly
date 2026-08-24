@@ -10,6 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi import HTTPException
 
+from services.stdio_utf8 import ensure_utf8_stdio
+ensure_utf8_stdio()  # must run before any print/logging hits the pipe
+
 from routers import generation, model, optimize, status, settings, extensions, export, workflow_runs, agent, llm
 
 
@@ -34,7 +37,7 @@ logging.getLogger("uvicorn.access").addFilter(_StatusFilter())
 
 app = FastAPI(
     title="Modly API",
-    version="0.4.0",
+    version="0.4.1",
     lifespan=lifespan,
 )
 

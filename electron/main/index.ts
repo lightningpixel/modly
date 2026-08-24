@@ -8,6 +8,8 @@ import { initAutoUpdater } from './updater'
 import { syncBuiltinExtensions } from './builtin-sync'
 import { API_TOKEN_HEADER, getApiToken, removeApiTokenFile } from './api-token'
 import { isSafeExternalUrl } from './external-links'
+import { reconcileInterruptedExtensionInstalls } from './extension-install-recovery'
+import { getSettings } from './settings-store'
 
 let mainWindow: BrowserWindow | null = null
 let pythonBridge: PythonBridge | null = null
@@ -134,6 +136,15 @@ app.whenReady().then(async () => {
 
   // Sync built-in extensions from app resources to userData
   syncBuiltinExtensions()
+
+  // Finish or roll back interrupted extension swaps before the backend scans
+  // the extensions directory. This must complete before PythonBridge starts.
+  const extensionsDir = getSettings(app.getPath('userData')).extensionsDir
+  try {
+    await reconcileInterruptedExtensionInstalls(extensionsDir, logger)
+  } catch (err) {
+    logger.error(`[ext-recovery] Startup reconciliation failed: ${String(err)}`)
+  }
 
   // Start Python FastAPI backend
   pythonBridge = new PythonBridge()

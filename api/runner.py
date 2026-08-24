@@ -44,6 +44,12 @@ if MODLY_API_DIR and MODLY_API_DIR not in sys.path:
 if str(EXT_DIR) not in sys.path:
     sys.path.insert(0, str(EXT_DIR))
 
+# Match the UTF-8 pipe readers on the parent side even when the OS locale
+# is a legacy codepage (cp1252/cp932 on Windows). Without this, any Unicode
+# print() from a generator (e.g. tqdm output) crashes the worker.
+from services.stdio_utf8 import ensure_utf8_stdio
+ensure_utf8_stdio()
+
 
 # ------------------------------------------------------------------ #
 # Protocol helpers

@@ -129,6 +129,9 @@ async def _run_generation(job_id: str, image_bytes: bytes, params: dict, collect
     job.status = "running"
 
     def progress_cb(pct: int, step: str = "") -> None:
+        # Monotonic: the loading phase walks the bar up on a background thread and
+        # extensions then report their own 0->100 scale, so an unguarded assignment
+        # yanks the bar backwards on the first generation progress message.
         if pct > job.progress:
             job.progress = pct
         if step:

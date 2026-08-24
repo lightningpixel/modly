@@ -70,9 +70,16 @@ export function buildAllWorkflowExtensions(
   modelExtensions:   ModelExtension[],
   processExtensions: ProcessExtension[],
 ): WorkflowExtension[] {
+  // A corrupted folder (manifest gone, unparseable, or an install that never
+  // finished) still appears in the store so the Extensions page can offer to
+  // repair it, but its `nodes` are not to be trusted — it must not put a node
+  // on the canvas.
+  const usable = <T extends { corrupted?: boolean }>(list: T[]): T[] =>
+    list.filter((ext) => !ext.corrupted)
+
   return [
-    ...processExtensions.flatMap((ext) => ext.nodes.map((n) => toWorkflowExtension(ext, n, 'process'))),
-    ...modelExtensions.flatMap((ext) => ext.nodes.map((n) => toWorkflowExtension(ext, n, 'model'))),
+    ...usable(processExtensions).flatMap((ext) => ext.nodes.map((n) => toWorkflowExtension(ext, n, 'process'))),
+    ...usable(modelExtensions).flatMap((ext) => ext.nodes.map((n) => toWorkflowExtension(ext, n, 'model'))),
   ]
 }
 

@@ -217,11 +217,13 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
 
       installFromLocal: (): Promise<{
         success: boolean; error?: string; cancelled?: boolean
+        needsRepair?: boolean
         extensionId?: string
         extension?: unknown
         localPath?: string
       }> => ipcRenderer.invoke('extensions:installFromLocal') as Promise<{
         success: boolean; error?: string; cancelled?: boolean
+        needsRepair?: boolean
         extensionId?: string
         extension?: unknown
         localPath?: string

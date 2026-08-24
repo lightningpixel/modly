@@ -53,6 +53,8 @@ export interface ModelExtension {
   manifestError?: 'missing' | 'invalid' | 'incomplete'
 }
 
+export type PickerIntent = 'folder' | 'image' | 'mesh' | 'text'
+
 export interface ParamSchema {
   id:       string
   label:    string
@@ -64,6 +66,10 @@ export interface ParamSchema {
   step?:    number
   tooltip?: string
   show_if?: Record<string, string | number | (string | number)[]>
+  // string: which native dialog the browse button opens (default: 'folder')
+  pickerIntent?:  PickerIntent
+  /** snake_case alias of pickerIntent, for manifests that follow show_if/dir_from. */
+  picker_intent?: PickerIntent
   // file-select: dropdown of the files inside the folder held by another param
   dir_from?:   string     // id of the (string) param holding the folder path
   extensions?: string[]   // file extensions to list (e.g. ["json"])
@@ -313,6 +319,7 @@ declare global {
           success:      boolean
           error?:       string
           cancelled?:   boolean
+          needsRepair?: boolean
           extensionId?: string
           extension?:   AnyExtension
           localPath?:   string

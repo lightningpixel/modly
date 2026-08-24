@@ -1,19 +1,24 @@
 import asyncio
 import subprocess
 import sys
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 
 router = APIRouter(tags=["extensions"])
 
 
 @router.post("/reload")
-async def reload_extensions():
+async def reload_extensions(payload: dict | None = Body(default=None)):
     """
     Re-scans the extensions/ folder and reloads the registry without restarting FastAPI.
     Unloads all currently loaded generators before reloading.
     """
     from services.generator_registry import generator_registry
-    generator_registry.reload()
+    validation_capability = None
+    if isinstance(payload, dict):
+        candidate = payload.get("validationCapability")
+        if isinstance(candidate, dict):
+            validation_capability = candidate
+    generator_registry.reload(validation_capability)
     return {
         "reloaded": True,
         "models":   list(generator_registry._generators.keys()),
