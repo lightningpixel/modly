@@ -266,8 +266,29 @@ async function handleAction(action: ActionDone, overrideImageData?: string) {
         }])
         return
       }
+      // The store refuses a second run while one is in flight. Setting
+      // pendingWorkflow anyway would wait on a status transition that never
+      // comes — and a stuck pendingWorkflow disables the chat input for the rest
+      // of the session (see the 'idle' branch of the run subscription).
+      const runStatus = useWorkflowRunStore.getState().runState.status
+      if (runStatus === 'running' || runStatus === 'paused') {
+        pushNotice(
+          `'${wf.name}' was not started — another workflow is still in the runner. `
+          + 'Stop it or let it finish, then ask again.',
+        )
+        return
+      }
       useWorkflowRunStore.getState().run(ready, allExtensions(), overrideImageData)
       chat().setAgentState({ pendingWorkflow: { id: ready.id, name: ready.name } })
+    } else {
+      // The id comes from the backend's copy of the workflow list, so landing
+      // here means it was deleted between the turn's context and this reply.
+      // The tool result already reads "Executing workflow '…'": staying silent
+      // leaves that sentence standing over a run that never started.
+      pushNotice(
+        `'${action.payload!.workflow_name ?? action.payload!.workflow_id}' was not started — `
+        + 'it no longer exists. Ask again with a workflow from the current list.',
+      )
     }
   }
   if (action.payload?.type === 'continue_workflow') {

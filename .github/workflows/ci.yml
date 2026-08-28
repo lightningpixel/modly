@@ -74,8 +74,8 @@ jobs:
       - name: Build & Package (Linux)
         run: npx electron-vite build && npx electron-builder --linux --publish never
 
-  # Même build que release.yml (arm64, signature ad-hoc via after-pack.js),
-  # sans publication : vérifie juste que le packaging macOS ne casse pas.
+  # Same build as release.yml (arm64, ad-hoc signature via after-pack.js) without
+  # publishing: this only checks that macOS packaging still works.
   build-macos:
     runs-on: macos-latest
     steps:

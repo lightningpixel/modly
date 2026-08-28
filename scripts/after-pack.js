@@ -1,17 +1,17 @@
 // @ts-check
-// Signature ad-hoc du bundle macOS.
+// Ad-hoc signature for the macOS bundle.
 //
-// Sans licence Apple Developer (99 $/an) on ne peut ni signer avec un Developer
-// ID ni notariser. Mais sur Apple Silicon, un binaire SANS AUCUNE signature
-// refuse de se lancer (ce n'est pas un simple avertissement Gatekeeper).
-// La signature ad-hoc (`--sign -`) est gratuite et lève ce blocage.
+// Without an Apple Developer licence ($99/year) we can neither sign with a
+// Developer ID nor notarize. But on Apple Silicon a binary with NO signature at
+// all refuses to launch — this is not a mere Gatekeeper warning. An ad-hoc
+// signature (`--sign -`) is free and lifts that block.
 //
-// Ce hook tourne APRÈS le packaging et AVANT la fabrication du DMG, donc la
-// signature est bien embarquée dans l'app distribuée. Comme `identity: null`
-// désactive la signature interne d'electron-builder, rien ne l'écrase ensuite.
+// This hook runs AFTER packaging and BEFORE the DMG is built, so the signature
+// ends up inside the app we ship. `identity: null` turns off electron-builder's
+// own signing, so nothing overwrites it afterwards.
 //
-// L'utilisateur verra quand même Gatekeeper au premier lancement
-// ("développeur non vérifié") : clic droit > Ouvrir, ou `xattr -cr` sur l'app.
+// The user still meets Gatekeeper on first launch ("unverified developer"):
+// right-click > Open, or `xattr -cr` on the app.
 
 const path = require('path')
 const { execFileSync } = require('child_process')
@@ -24,18 +24,18 @@ exports.default = async function afterPack(context) {
     `${context.packager.appInfo.productFilename}.app`
   )
 
-  // --deep est déprécié par Apple pour la signature réelle, mais reste la façon
-  // standard d'ad-hoc signer récursivement les binaires imbriqués (Electron
-  // Framework, helpers). Échouer ici doit casser le build : un DMG arm64 non
-  // signé ne se lance pas, autant le savoir en CI plutôt que chez l'utilisateur.
+  // Apple deprecates --deep for real signing, but it is still the standard way
+  // to ad-hoc sign nested binaries recursively (Electron Framework, helpers).
+  // Failing here must break the build: an unsigned arm64 DMG does not launch, so
+  // we would rather find out in CI than on a user's machine.
   execFileSync('codesign', ['--force', '--deep', '--sign', '-', appPath], {
     stdio: 'inherit'
   })
 
-  // Vérifie que la signature est bien posée et que l'app est jugée valide.
+  // Confirm the signature landed and the app is considered valid.
   execFileSync('codesign', ['--verify', '--verbose=2', appPath], {
     stdio: 'inherit'
   })
 
-  console.log(`[after-pack] Signature ad-hoc appliquée : ${appPath}`)
+  console.log(`[after-pack] Ad-hoc signature applied: ${appPath}`)
 }

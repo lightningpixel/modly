@@ -1,6 +1,6 @@
 import type { Workflow, WFNode } from '@shared/types/electron.d'
 import { getWorkflowExtension, type WorkflowExtension } from './mockExtensions'
-import { isPassthrough, isBranchConsumer, resolveDataSource, nearestUpstreamWaits } from './nodeBehaviors'
+import { isPassthrough, isBranchConsumer, resolveDataSource, nearestUpstreamWaits, edgeSlot } from './nodeBehaviors'
 
 export type DataType = 'image' | 'text' | 'mesh' | 'audio'
 
@@ -261,14 +261,11 @@ export function validateWorkflowPreflight(
     // Per SLOT, not per distinct type. A node declaring inputs ['text','text']
     // (positive + negative prompt) counted as fully wired with a single text
     // edge, so a run started with slot 1 empty and the extension silently
-    // received one prompt. Slot 0 accepts an untagged edge because the single-
-    // input case has always been wired without a targetHandle.
+    // received one prompt. See edgeSlot for how an untagged edge is placed.
     requiredInputs.forEach((requiredType, slot) => {
-      const filled = incomingEdges.some((edge) => {
-        if (outputTypes.get(edge.source) !== requiredType) return false
-        const handle = edge.targetHandle ?? ''
-        return handle === `input-${slot}` || (slot === 0 && !handle.startsWith('input-'))
-      })
+      const filled = incomingEdges.some((edge) => (
+        outputTypes.get(edge.source) === requiredType && edgeSlot(edge.targetHandle) === slot
+      ))
       if (filled) return
       // The slot only enters the key when the same type is declared more than
       // once — otherwise a node's issue key would change shape for every

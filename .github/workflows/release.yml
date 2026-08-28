@@ -65,14 +65,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ─── macOS build (arm64) ─────────────────────────────────────────────────────
-  # Build non signé / non notarisé (pas de licence Apple Developer). Le hook
-  # scripts/after-pack.js applique une signature ad-hoc, requise pour que l'app
-  # se lance sur Apple Silicon. Au premier lancement l'utilisateur doit faire
-  # clic droit > Ouvrir (Gatekeeper : "développeur non vérifié").
+  # Unsigned / un-notarized build (no Apple Developer licence). The
+  # scripts/after-pack.js hook applies an ad-hoc signature, which the app needs
+  # to launch on Apple Silicon. On first launch the user has to right-click >
+  # Open (Gatekeeper: "unverified developer").
   #
-  # macos-latest est un runner arm64 — pas de build pour les Mac Intel.
-  # latest-mac.yml n'est volontairement pas publié : l'auto-update est désactivé
-  # sur darwin (electron-updater exige une signature Developer ID).
+  # macos-latest is an arm64 runner — no build for Intel Macs.
+  # latest-mac.yml is deliberately not published: auto-update is disabled on
+  # darwin (electron-updater requires a Developer ID signature).
   build-macos:
     needs: create-release
     runs-on: macos-latest

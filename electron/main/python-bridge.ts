@@ -14,6 +14,21 @@ const API_PORT = 8765
 const API_HOST = '127.0.0.1'
 export const API_BASE_URL = `http://${API_HOST}:${API_PORT}`
 
+/**
+ * The main process's client for the local API.
+ *
+ * Every main-process call to the backend goes through this instance, never
+ * through the bare `axios` default: the token must reach 127.0.0.1 and nothing
+ * else. Setting it on `axios.defaults.headers.common` used to attach it to
+ * every outbound request the main process made, so downloading an extension
+ * handed the token to api.github.com and to whatever host the tarball redirect
+ * landed on — the one secret keeping a web page from driving the app.
+ */
+export const localApi = axios.create({
+  baseURL: API_BASE_URL,
+  headers: { [API_TOKEN_HEADER]: getApiToken() },
+})
+
 export class PythonBridge {
   private process: ChildProcess | null = null
   private ready = false
@@ -50,9 +65,8 @@ export class PythonBridge {
 
     await this.killProcessOnPort()
 
-    // Every request from the main process carries the token; the renderer's own
-    // requests get it injected by attachApiToken() in index.ts.
-    axios.defaults.headers.common[API_TOKEN_HEADER] = getApiToken()
+    // Main-process requests carry the token through the localApi instance above;
+    // the renderer's own requests get it injected by attachApiToken() in index.ts.
     writeApiTokenFile()
 
     this.process = spawn(pythonExecutable, ['-m', 'uvicorn', 'main:app', '--host', API_HOST, '--port', String(API_PORT)], {
@@ -200,7 +214,7 @@ export class PythonBridge {
     for (let i = 0; i < maxRetries; i++) {
       if (!this.process) throw new Error('FastAPI process exited unexpectedly during startup')
       try {
-        await axios.get(`${API_BASE_URL}/health`, { timeout: 2000 })
+        await localApi.get('/health', { timeout: 2000 })
         this.ready = true
         console.log('[PythonBridge] FastAPI is ready')
         return

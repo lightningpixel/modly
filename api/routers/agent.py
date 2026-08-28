@@ -21,6 +21,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from services import agent_memory, llm_server
+from services.api_token import local_headers
 from services.llm_server import llama_pool
 
 log = logging.getLogger("modly.agent")
@@ -1539,10 +1540,13 @@ async def execute_tool(
     `prior_results` holds this turn's earlier tool results, so a guard can let a
     second, deliberate attempt through instead of blocking it for good.
     """
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    # The middleware in main.py rejects unauthenticated calls, and these go back
+    # into our own API: without the header every mesh tool below answers 401.
+    async with httpx.AsyncClient(timeout=60.0, headers=local_headers()) as client:
         try:
             if name == "unload_models":
-                await client.post(f"{MODLY_API}/model/unload-all")
+                r = await client.post(f"{MODLY_API}/model/unload-all")
+                r.raise_for_status()
                 return "All 3D generation models have been unloaded from VRAM.", None
 
             elif name == "decimate_mesh":
@@ -1933,6 +1937,18 @@ async def execute_tool(
                 )
 
             elif name == "run_workflow":
+                # The app runs one workflow at a time and drops a second request,
+                # so a payload sent now would go nowhere while the model — holding
+                # a tool result that says "Executing…" — tells the user it started.
+                # Measured: the chat showed "successfully initiated and is now
+                # running" directly above the app's own "was not started" notice.
+                # Same class as the preflight guard below: answer with what is true.
+                run_state = context.get("runState") or {}
+                if run_state.get("status") in ("running", "paused"):
+                    running_name = run_state.get("workflowName")
+                    busy = f"'{running_name}' is already in the runner." if running_name \
+                        else "A workflow is already in the runner."
+                    return f"{busy} Tell the user to stop it or let it finish, then run this one.", None
                 # "Generate a 3D model from this image" is one turn: create, then
                 # run. But the id of a workflow created this turn is stamped by
                 # the app AFTER this reply, so it cannot be in `context` — the

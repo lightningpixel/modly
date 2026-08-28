@@ -4,7 +4,7 @@ import { useAppStore } from '@shared/stores/appStore'
 import { getWorkflowExtension } from './mockExtensions'
 import type { WorkflowExtension } from './mockExtensions'
 import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
-import { isBranchStarter, isSceneOutput, resolveDataSource, reachesSceneOutput, nearestUpstreamWaits } from './nodeBehaviors'
+import { isBranchStarter, isSceneOutput, resolveDataSource, reachesSceneOutput, nearestUpstreamWaits, edgeSlot } from './nodeBehaviors'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -328,8 +328,13 @@ async function executeExtensionNode(
       else if (src.filePath !== undefined)  nodeInputPath     = src.filePath
       if (src.text !== undefined && src.text.trim().length > 0) {
         nodeInputText = src.text
-        const slot = /^input-(\d+)$/.exec(edge.targetHandle ?? '')
-        if (slot) nodeInputTexts[Number(slot[1])] = src.text
+        // Placed by the same rule preflight and auto-wiring use. This copy used
+        // to accept `input-N` only: an untagged edge — how the agent's builder
+        // wires its chain — left texts[0] empty, so on a ['text','text'] node
+        // the negative prompt auto-wired onto input-1 became the one driving
+        // the generator (see mainText below).
+        const slot = edgeSlot(edge.targetHandle)
+        if (slot !== undefined) nodeInputTexts[slot] = src.text
       }
     }
   } else {
@@ -379,9 +384,14 @@ async function executeExtensionNode(
         ? norm.slice(workspaceDir.length).replace(/^\//, '')
         : norm
     }
-    if (nodeInputText !== undefined && nodeInputText.trim().length > 0) {
-      extraParams.prompt = nodeInputText
-      extraParams.text   = nodeInputText
+    // On a multi-text node the slots carry meaning — input-0 is the positive
+    // prompt, input-1 the negative one — while nodeInputText is just whichever
+    // text edge came last in workflow.edges. Wiring the negative prompt second
+    // would otherwise drive the generator with it.
+    const mainText = nodeInputTexts[0] ?? nodeInputText
+    if (mainText !== undefined && mainText.trim().length > 0) {
+      extraParams.prompt = mainText
+      extraParams.text   = mainText
     }
 
     const fd = new FormData()
@@ -650,6 +660,16 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
     pausedGroup:      [],
 
     async run(workflow, allExtensions, overrideImageData?) {
+      // The runner's cancel flag, context and active job id are module-scoped, so
+      // a second run would reset them under the first one's feet: Stop would then
+      // only reach whichever job id was written last and the other loop would keep
+      // going. 'paused' counts as in flight — the run is suspended at a Wait node
+      // with _ctx.current still holding its context, which continueRun() reads to
+      // resume; starting over would hand it the wrong workflow. This is the same
+      // pair the Run buttons use to show Stop, and callers gate on it too, but the
+      // store owns the invariant.
+      const status = get().runState.status
+      if (status === 'running' || status === 'paused') return
       _cancel.current = false
       _pauseRequested.current = false
       // Enter 'running' before anything can fail. The For Each pre-checks below

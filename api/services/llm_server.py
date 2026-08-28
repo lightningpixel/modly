@@ -781,10 +781,22 @@ class LlamaPool:
                 slot = self._slots.get(model_id)
                 if slot is not None and slot._alive():
                     break
-                # Also for a dead slot respawned in place, so reviving one
-                # cannot push the pool past the limit. Only alive slots that are
-                # not answering a request are eviction candidates, so this never
-                # evicts our own — nor anyone's live stream.
+                if slot is not None and slot.port not in self._loading_ports:
+                    # A slot whose process died on its own — an OOM partway
+                    # through a generation — stays in _slots: the reaper and the
+                    # limit check both walk live slots only. Its port is then
+                    # missing from `used_ports` below, so the NEXT model is
+                    # handed the very port this object still names, and reviving
+                    # this model would reuse it: _kill_stale_server() kills the
+                    # live server sitting there and the two take turns evicting
+                    # each other. Drop the corpse so a free port is picked.
+                    slot.unload()
+                    self._slots.pop(model_id, None)
+                    slot = None
+                # Also on the way to replacing a slot that died, so reviving a
+                # model cannot push the pool past the limit. Only alive slots
+                # that are not answering a request are eviction candidates, so
+                # this never evicts our own — nor anyone's live stream.
                 self._enforce_limit_locked(reserve=1, incoming_mb=incoming_mb)
                 remaining = deadline - time.monotonic()
                 if (not self._over_capacity_locked(incoming_mb)
@@ -966,7 +978,15 @@ class LlamaPool:
             for mid, slot in list(self._slots.items()):
                 if not self._evictable_locked(slot):
                     continue  # answering right now, or being loaded — never idle
-                if slot._alive() and now - slot._last_used > IDLE_TTL_SECONDS:
+                # A dead process is not idle, it is finished: nothing to reap,
+                # but leaving it in _slots keeps its port spoken for by an object
+                # nothing can revive safely (see ensure()), and holds its log
+                # file open for the rest of the session.
+                if not slot._alive():
+                    slot.unload()
+                    self._slots.pop(mid, None)
+                    continue
+                if now - slot._last_used > IDLE_TTL_SECONDS:
                     slot.unload()
                     self._slots.pop(mid, None)
 

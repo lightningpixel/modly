@@ -1,6 +1,6 @@
 import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
 import { getWorkflowExtension, type WorkflowExtension } from './mockExtensions'
-import { isPassthrough, resolveDataSource } from './nodeBehaviors'
+import { isPassthrough, resolveDataSource, edgeSlot } from './nodeBehaviors'
 import { getNodeOutputType, nodeLabel, type DataType } from './preflight'
 
 export interface AutoWireResult {
@@ -84,10 +84,7 @@ export function autoWireWorkflow(workflow: Workflow, allExtensions: WorkflowExte
     // wired after one text edge, so auto-wiring could never satisfy preflight
     // and an agent-driven run stayed blocked with nothing left to fix.
     inputs.forEach((requiredType, slot) => {
-      const onSlot = () => incoming().filter((e) => {
-        const handle = e.targetHandle ?? ''
-        return handle === `input-${slot}` || (slot === 0 && !handle.startsWith('input-'))
-      })
+      const onSlot = () => incoming().filter((e) => edgeSlot(e.targetHandle) === slot)
       const filled = onSlot().some((e) => outputTypes.get(e.source) === requiredType)
       if (filled) return
 

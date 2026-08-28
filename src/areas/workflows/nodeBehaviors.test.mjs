@@ -23,7 +23,7 @@ function loadModule() {
 
 const {
   isPassthrough, isBranchStarter, isSceneOutput, isBranchConsumer,
-  resolveDataSource, nearestUpstreamWaits, reachesSceneOutput,
+  resolveDataSource, nearestUpstreamWaits, reachesSceneOutput, edgeSlot,
 } = loadModule()
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -106,4 +106,27 @@ test('reachesSceneOutput is false when no path reaches an output', () => {
   const nodes = mapOf(node('proc', 'extensionNode'), node('img', 'imageNode'))
   const edges = [edge('proc', 'img')]
   assert.equal(reachesSceneOutput('proc', edges, nodes), false)
+})
+
+// ─── Input slots ─────────────────────────────────────────────────────────────
+
+test('edgeSlot reads the handle a multi-input edge lands on', () => {
+  assert.equal(edgeSlot('input-0'), 0)
+  assert.equal(edgeSlot('input-1'), 1)
+  assert.equal(edgeSlot('input-12'), 12)
+})
+
+test('an edge with no handle lands on slot 0', () => {
+  // Every workflow saved before multi-input existed, and every chain the agent
+  // builds, wires without a targetHandle. The runner's own copy of this rule
+  // left that case out: on a ['text','text'] node the positive prompt never
+  // reached texts[0] and the negative one drove the generator.
+  assert.equal(edgeSlot(undefined), 0)
+  assert.equal(edgeSlot(null), 0)
+  assert.equal(edgeSlot(''), 0)
+})
+
+test('a handle that is not an input slot lands nowhere', () => {
+  assert.equal(edgeSlot('input-'), undefined)
+  assert.equal(edgeSlot('input-x'), undefined)
 })

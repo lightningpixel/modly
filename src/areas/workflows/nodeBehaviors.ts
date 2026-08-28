@@ -107,3 +107,24 @@ export function reachesSceneOutput(
   }
   return false
 }
+
+/**
+ * Which input slot an incoming edge lands on, or undefined when it names none.
+ *
+ * An extension node draws one target handle per declared input, `input-0`,
+ * `input-1`, … An edge carrying no handle at all predates them: every workflow
+ * saved before multi-input existed, and the agent's own graph builder
+ * (_build_workflow_graph in api/routers/agent.py) still wires its chain that
+ * way. Those address slot 0.
+ *
+ * Shared because the rule was written out three times — preflight, auto-wiring
+ * and the runner — and the runner's copy left out the untagged case: on a
+ * ['text','text'] node built by the agent, the positive prompt never reached
+ * texts[0] and the negative one drove the generator.
+ */
+export function edgeSlot(targetHandle: string | null | undefined): number | undefined {
+  const handle = targetHandle ?? ''
+  const match  = /^input-(\d+)$/.exec(handle)
+  if (match) return Number(match[1])
+  return handle.startsWith('input-') ? undefined : 0
+}

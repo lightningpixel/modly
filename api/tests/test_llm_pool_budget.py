@@ -207,6 +207,78 @@ class ReaperTests(unittest.TestCase):
         self.assertFalse(starting.unloaded)
 
 
+class CrashedSlotTests(unittest.TestCase):
+    """A llama-server that dies on its own — an OOM partway through a generation —
+    leaves its slot object behind. It used to stay in the pool for good: the
+    reaper and the limit check both walk live slots only. Its port then looked
+    free, the next model was handed the same one, and reviving the crashed model
+    reused the dead object's port: _kill_stale_server() killed the live server
+    sitting there and the two took turns evicting each other."""
+
+    def setUp(self) -> None:
+        self.pool = llm_server.LlamaPool()
+        self._orig_max = llm_server.resolve_max_models
+        self._orig_budget = llm_server.vram_budget_mb
+        llm_server.resolve_max_models = lambda: 2
+        llm_server.vram_budget_mb = lambda: 0  # no GPU detected: count rule only
+
+    def tearDown(self) -> None:
+        llm_server.resolve_max_models = self._orig_max
+        llm_server.vram_budget_mb = self._orig_budget
+
+    def test_the_reaper_drops_a_crashed_slot(self):
+        dead = _FakeSlot(last_used=0.0, vram_mb=4200, port=llm_server.SERVER_PORT)
+        dead.unloaded = True  # the process is gone, so _alive() is False
+        self.pool._slots["dead"] = dead
+        # One second old: not idle by any TTL — it is finished, not resting.
+        self.pool._reap_once(now=1.0)
+        self.assertEqual(list(self.pool._slots), [])
+
+    def test_reviving_a_crashed_model_does_not_take_a_live_slots_port(self):
+        created: list = []
+
+        class _StubManager:
+            def __init__(self, port: int) -> None:
+                self.port = port
+                self.vram_mb = 0
+                self.busy_count = 0
+                self._last_used = 0.0
+                self._alive_flag = False
+                created.append(self)
+
+            def _alive(self) -> bool:
+                return self._alive_flag
+
+            def hold(self) -> None:
+                self.busy_count += 1
+
+            def release(self) -> None:
+                self.busy_count -= 1
+
+            def unload(self) -> None:
+                self._alive_flag = False
+
+            def ensure(self, model_id, spec) -> None:
+                self._alive_flag = True
+
+        dead = _StubManager(llm_server.SERVER_PORT)
+        live = _StubManager(llm_server.SERVER_PORT)
+        live._alive_flag = True
+        live._last_used = 1.0
+        self.pool._slots = {"dead": dead, "live": live}
+
+        original = llm_server.LlamaServerManager
+        llm_server.LlamaServerManager = _StubManager
+        try:
+            slot = self.pool.ensure("dead", {"vram_mb": 4200})
+        finally:
+            llm_server.LlamaServerManager = original
+
+        self.assertNotEqual(slot.port, live.port)
+        self.assertTrue(live._alive_flag)   # the live server was left alone
+        self.assertIs(self.pool._slots["dead"], slot)
+
+
 class BusyContextTests(unittest.TestCase):
     def test_busy_counts_nest_and_stamp_last_used(self):
         slot = llm_server.LlamaServerManager(port=1)
