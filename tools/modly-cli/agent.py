@@ -62,13 +62,31 @@ def _json_print(data: dict[str, Any], *, compact: bool = False) -> None:
         print(json.dumps(data, indent=2, sort_keys=True))
 
 
-def _auth_headers() -> dict[str, str]:
-    """Prove to the API that this is a local Modly client.
+def _origin(url: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}".lower()
+
+
+# The one origin the API token may be sent to. Replaced in main() with whatever
+# --base-url (or the serve host/port) resolves to.
+_api_origin = _origin(DEFAULT_BASE_URL)
+
+
+def _auth_headers(url: str) -> dict[str, str]:
+    """Prove to Modly's API that this is a local client — to Modly's API only.
 
     The backend rejects calls without the per-launch token so that a web page
     cannot drive the app (api/main.py). The CLI reads it from the environment
     when Modly spawned it, or from the file the app writes at launch.
+
+    Scoped to one origin because the helpers below do not only talk to Modly:
+    the comfy commands drive a ComfyUI server the user points anywhere with
+    --comfy-url. Sending the token there would hand the secret that keeps a
+    browser out of the app to a third-party host, which is what attaching it to
+    every outbound request cost the main process (see python-bridge.ts).
     """
+    if _origin(url) != _api_origin:
+        return {}
     token = os.environ.get("MODLY_API_TOKEN")
     if not token:
         try:
@@ -86,7 +104,7 @@ def _request_json(
     data: bytes | None = None,
     headers: dict[str, str] | None = None,
 ) -> Any:
-    req = urllib.request.Request(url, data=data, method=method, headers={**(headers or {}), **_auth_headers()})
+    req = urllib.request.Request(url, data=data, method=method, headers={**(headers or {}), **_auth_headers(url)})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
@@ -104,7 +122,7 @@ def _request_json(
 def _download(url: str, dest: Path, *, timeout: float) -> int:
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
-        request = urllib.request.Request(url, headers=_auth_headers())
+        request = urllib.request.Request(url, headers=_auth_headers(url))
         with urllib.request.urlopen(request, timeout=timeout) as resp, dest.open("wb") as fh:
             total = 0
             while True:
@@ -1383,6 +1401,14 @@ def main(argv: list[str] | None = None) -> int:
     args = None
     try:
         args = parser.parse_args(argv)
+        # Where Modly's API actually is for this invocation, so _auth_headers can
+        # tell it apart from the ComfyUI host. `serve` names it with --host/--port
+        # rather than --base-url.
+        global _api_origin
+        base = getattr(args, "base_url", None)
+        if not base and getattr(args, "host", None) and getattr(args, "port", None):
+            base = f"http://{args.host}:{args.port}"
+        _api_origin = _origin(base or DEFAULT_BASE_URL)
         return int(args.func(args))
     except ModlyCliError as exc:
         _json_print({"ok": False, "code": exc.code, "message": exc.message, "error": exc.message}, compact=getattr(args, "compact", False) if args else False)

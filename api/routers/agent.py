@@ -552,6 +552,18 @@ def _extension_errors() -> dict:
 
 
 def _tool_is_relevant(name: str, context: dict) -> bool:
+    if name == "run_workflow":
+        # Offered when the app has no workflow yet too, as long as there is
+        # something to build one from. "Generate a 3D model from this image" is
+        # ONE turn — create_workflow, then run_workflow — and this list is built
+        # once, before the create. Gated on `workflows` alone the run tool was
+        # missing from the very turn that creates the first workflow, so the
+        # created_this_turn path in execute_tool could never fire on a fresh
+        # install: the model built the workflow and had no way to start it.
+        # With neither a workflow nor one created this turn, the tool answers
+        # with _resolve_ctx_workflow's "no workflow selected" — an answer, not a
+        # wrong run.
+        return bool(context.get("workflows") or context.get("extensions"))
     if name in _WORKFLOW_TOOLS:
         return bool(context.get("workflows"))
     if name in _MESH_TOOLS:
@@ -1960,6 +1972,25 @@ async def execute_tool(
                 # it just made, so the payload says "that one" instead.
                 created = context.get("_created_workflow")
                 if created and _targets_the_new_workflow(arguments, created, context):
+                    # Nobody has preflighted this graph: it was built after
+                    # `context` was, so the inputIssues guard below describes the
+                    # workflow the user HAD selected, not this one. The single
+                    # check that can be made here is the one that actually fails
+                    # — an Image step with no picture to read. Measured in the
+                    # running app, 2 turns out of 2: the chat said "It is now
+                    # running." directly above the app's own "was not started —
+                    # Image needs a file selected." `is False` and not a falsy
+                    # test: a caller that sends no app state at all (a bare API
+                    # call) knows nothing about the panel, and must not be
+                    # refused on a fact it never claimed.
+                    if context.get("_created_needs_image") and context.get("hasInputImage") is False:
+                        return (
+                            f"'{created}' is one picture short of running: its Image step has "
+                            f"nothing to read — none is selected in the panel and none came with "
+                            f"this message. Tell the user where to pick one, then run it once "
+                            f"they have.",
+                            None,
+                        )
                     return (
                         f"Executing '{created}', the workflow just created…",
                         {"type": "run_workflow", "created_this_turn": True, "workflow_name": created},
@@ -2073,8 +2104,16 @@ async def execute_tool(
                 # Says how to run it, because the next thing asked of a freshly
                 # created workflow is almost always "now run it", and its id does
                 # not exist yet: run_workflow with no argument is what works.
-                lines = [f"Created workflow '{wf['name']}' — input: {input_type}.{note} "
-                         f"It is now the selected workflow, ready to run."]
+                # "ready to run" was read back to the user verbatim on a
+                # workflow that could not start for want of a picture (measured
+                # twice in the running app), so it is only said when it is true.
+                ready = (
+                    "It is now the selected workflow. It needs a picture first: the user picks "
+                    "one in the panel or attaches it to a message, then it runs."
+                    if input_type == "image" and context.get("hasInputImage") is False else
+                    "It is now the selected workflow, ready to run."
+                )
+                lines = [f"Created workflow '{wf['name']}' — input: {input_type}.{note} {ready}"]
                 lines += bridge_notes
                 lines += _format_steps(steps, extensions)
                 return "\n".join(lines), payload
@@ -2944,6 +2983,12 @@ async def agent_chat(request: AgentChatRequest):
                             # later call in the same turn can only name it. See
                             # _targets_the_new_workflow.
                             request.context["_created_workflow"] = payload["workflow"].get("name")
+                            # …and whether it starts from a picture, which is what
+                            # run_workflow needs to know before promising a run.
+                            request.context["_created_needs_image"] = any(
+                                n.get("type") == "imageNode"
+                                for n in payload["workflow"].get("nodes") or []
+                            )
                         actions_done.append({"tool": name, "result": result_text, "payload": payload})
                         yield _sse({"type": "action", "tool": name, "result": result_text, "payload": payload})
                         content = result_text

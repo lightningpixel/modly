@@ -282,11 +282,23 @@ class ToolGatingTests(unittest.TestCase):
 
     def test_workflow_tools_hidden_without_workflows(self):
         offered = _names(agent._tools_for({"extensions": [{"id": "e"}]}))
-        self.assertNotIn("run_workflow", offered)
         self.assertNotIn("update_workflow", offered)
+        self.assertNotIn("get_workflow_details", offered)
         # Creating one and looking around must stay possible with no workflows.
         self.assertIn("create_workflow", offered)
         self.assertIn("list_workflows", offered)
+
+    def test_run_workflow_survives_an_empty_app(self):
+        # The list is built once per turn, before create_workflow runs. Gating
+        # the run tool on `workflows` took it out of the one turn that creates
+        # the first workflow, so execute_tool's created_this_turn path — run the
+        # one just created — could never fire on a fresh install.
+        self.assertIn("run_workflow", _names(agent._tools_for({"extensions": [{"id": "e"}]})))
+
+    def test_run_workflow_stays_hidden_with_nothing_to_run(self):
+        # No workflow and nothing to build one from: there is nothing to start.
+        offered = _names(agent._tools_for({"currentMeshPath": "a/b.glb"}))
+        self.assertNotIn("run_workflow", offered)
 
     def test_workflow_tools_appear_with_workflows(self):
         offered = _names(agent._tools_for(self.WF_CTX))
@@ -1118,6 +1130,34 @@ class RunAfterCreateTests(unittest.TestCase):
         _text, payload = self._run({"workflow_id": "wf-1"}, ctx)
         self.assertEqual(payload["workflow_id"], "wf-1")
         self.assertNotIn("created_this_turn", payload)
+
+    def test_a_created_image_workflow_with_no_picture_is_not_promised(self):
+        # Measured in the running app, 2 turns out of 2: the model read
+        # "Executing…" and told the user "It is now running.", directly above the
+        # app's own "was not started — Image needs a file selected." Nothing has
+        # preflighted a workflow built this turn, so this is the one check that
+        # can be made here.
+        ctx = {**self.CTX, "_created_needs_image": True, "hasInputImage": False}
+        text, payload = self._run({}, ctx)
+        self.assertIsNone(payload)
+        self.assertIn("one picture short", text)
+        self.assertIn("pick one", text)
+
+    def test_a_created_image_workflow_runs_when_a_picture_is_there(self):
+        ctx = {**self.CTX, "_created_needs_image": True, "hasInputImage": True}
+        _text, payload = self._run({}, ctx)
+        self.assertTrue(payload["created_this_turn"])
+
+    def test_a_created_text_workflow_needs_no_picture(self):
+        ctx = {**self.CTX, "_created_needs_image": False, "hasInputImage": False}
+        _text, payload = self._run({}, ctx)
+        self.assertTrue(payload["created_this_turn"])
+
+    def test_a_caller_that_sends_no_app_state_is_not_refused(self):
+        # A bare API call knows nothing about the panel. Absent is not "empty".
+        ctx = {**self.CTX, "_created_needs_image": True}
+        _text, payload = self._run({}, ctx)
+        self.assertTrue(payload["created_this_turn"])
 
 
 class AsksForANewWorkflowTests(unittest.TestCase):

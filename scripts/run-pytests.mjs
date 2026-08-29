@@ -6,7 +6,13 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
-const apiDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'api')
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
+// Every Python suite in the repo. tools/modly-cli had 34 tests that nothing ran:
+// `npm test` is what CI runs, and it only ever discovered api/tests.
+const suites = [
+  { cwd: join(repoRoot, 'api'),                start: 'tests' },
+  { cwd: join(repoRoot, 'tools', 'modly-cli'), start: '.'     },
+]
 
 const candidates = [
   ['python3', []],
@@ -30,8 +36,11 @@ if (!found) {
 }
 
 const [cmd, prefix] = found
-const result = spawnSync(cmd, [...prefix, '-m', 'unittest', 'discover', '-s', 'tests'], {
-  cwd: apiDir,
-  stdio: 'inherit',
-})
-process.exit(result.status ?? 1)
+for (const { cwd, start } of suites) {
+  const result = spawnSync(cmd, [...prefix, '-m', 'unittest', 'discover', '-s', start], {
+    cwd,
+    stdio: 'inherit',
+  })
+  if (result.status !== 0) process.exit(result.status ?? 1)
+}
+process.exit(0)

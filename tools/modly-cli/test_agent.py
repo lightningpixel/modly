@@ -28,6 +28,36 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(buf.getvalue(), '{"nested":{"x":1},"ok":true}\n')
 
 
+class AuthHeaderTests(unittest.TestCase):
+    """The token is what keeps a browser from driving the local app. These
+    helpers also talk to a ComfyUI server the user points anywhere with
+    --comfy-url, so it must reach Modly's origin and no other."""
+
+    def setUp(self) -> None:
+        self._origin = agent._api_origin
+        agent._api_origin = agent._origin("http://127.0.0.1:8765")
+
+    def tearDown(self) -> None:
+        agent._api_origin = self._origin
+
+    def test_the_token_reaches_modlys_own_api(self) -> None:
+        with patch.dict(os.environ, {"MODLY_API_TOKEN": "tok"}):
+            self.assertEqual(
+                agent._auth_headers("http://127.0.0.1:8765/health"),
+                {"x-modly-token": "tok"},
+            )
+
+    def test_the_token_never_reaches_the_comfy_host(self) -> None:
+        with patch.dict(os.environ, {"MODLY_API_TOKEN": "tok"}):
+            for url in (
+                "http://127.0.0.1:8188/prompt",              # default ComfyUI, same machine
+                "http://192.168.1.50:8188/view?filename=a",  # a ComfyUI on the network
+                "https://comfy.example.test/history/1",
+            ):
+                with self.subTest(url=url):
+                    self.assertEqual(agent._auth_headers(url), {})
+
+
 class CommandTests(unittest.TestCase):
     def test_status_combines_health_and_model(self) -> None:
         calls: list[tuple[str, str]] = []

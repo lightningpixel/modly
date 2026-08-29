@@ -116,6 +116,12 @@ function buildContext(attachedImage = false): Record<string, unknown> {
   // advise because it did not know the GPU. One number closes that.
   const cardVramGb = useLlmModelsStore.getState().vramGb
   if (cardVramGb) ctx.gpuVramGb = cardVramGb
+  // Whether anything at all can feed an Image step: the panel's picture, a blob
+  // dropped on it, or an image attached to this turn — the runner treats the
+  // three the same. `inputIssues` below already folds this in, but only for the
+  // workflow the user has selected; a workflow the agent BUILDS mid-turn has
+  // been preflighted by nobody, and this is the one fact it needs about it.
+  ctx.hasInputImage = preflightOptions(attachedImage).hasFallbackImage
   if (activeId)              ctx.activeWorkflowId = activeId
 
   // What is actually wrong with the selected workflow, recomputed every turn.
