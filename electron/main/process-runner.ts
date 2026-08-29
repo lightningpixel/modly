@@ -54,6 +54,12 @@ export interface ProcessInput {
   text?:     string
   /** Per-slot texts for multi-text-input nodes (index = target handle slot). */
   texts?:    (string | undefined)[]
+  /**
+   * Every mesh wired into the node, in slot order, the primary included. An
+   * extension taking several meshes reads its secondaries here (modly-combine
+   * documents this contract); `filePath` stays the lowest connected slot.
+   */
+  files?:    string[]
   nodeId?:   string
 }
 

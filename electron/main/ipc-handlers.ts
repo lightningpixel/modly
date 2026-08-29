@@ -1,4 +1,4 @@
-import { ipcMain, BrowserWindow, dialog, app, shell } from 'electron'
+import { ipcMain, BrowserWindow, Notification, dialog, app, shell } from 'electron'
 import { buildSync } from 'esbuild'
 import { autoUpdater } from 'electron-updater'
 import { join } from 'path'
@@ -316,6 +316,29 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
   ipcMain.on('window:close', () => getWindow()?.close())
   ipcMain.handle('window:isMaximized', () => getWindow()?.isMaximized() ?? false)
+
+  // Native OS notification (Windows toast / macOS Notification Center / Linux),
+  // for events the user wants to know about even when the window is minimized or
+  // behind other apps — e.g. a generation or workflow run finishing. Routed through
+  // the main process rather than the renderer's own Notification API so it works
+  // the same way regardless of focus and carries the app's own icon.
+  ipcMain.handle('notifications:show', (_event, title: string, body: string) => {
+    if (!Notification.isSupported()) return { success: false, error: 'Notifications not supported' }
+    const notification = new Notification({
+      title,
+      body,
+      icon: join(__dirname, '../../resources/icons/icon.png'),
+    })
+    notification.on('click', () => {
+      const win = getWindow()
+      if (!win) return
+      if (win.isMinimized()) win.restore()
+      win.show()
+      win.focus()
+    })
+    notification.show()
+    return { success: true }
+  })
 
   // Setup handlers — skipped in dev (uses .venv instead of python-embed)
   ipcMain.handle('setup:check', async () => {

@@ -107,6 +107,12 @@ export interface ProcessInput {
   text?:     string
   /** Per-slot texts for multi-text-input nodes (index = target handle slot). */
   texts?:    (string | undefined)[]
+  /**
+   * Every mesh wired into the node, in slot order, the primary included. An
+   * extension taking several meshes reads its secondaries here (modly-combine
+   * documents this contract); `filePath` stays the lowest connected slot.
+   */
+  files?:    string[]
   nodeId?:   string
 }
 
@@ -181,6 +187,9 @@ declare global {
         isMaximized:       () => Promise<boolean>
         onMaximizeChange:  (cb: (isMaximized: boolean) => void) => void
         offMaximizeChange: () => void
+      }
+      notifications: {
+        show: (title: string, body: string) => Promise<{ success: boolean; error?: string }>
       }
       ui: {
         setZoomFactor: (factor: number) => void

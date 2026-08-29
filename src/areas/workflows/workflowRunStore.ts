@@ -2,9 +2,11 @@ import { create } from 'zustand'
 import axios, { AxiosInstance } from 'axios'
 import { useAppStore } from '@shared/stores/appStore'
 import { getWorkflowExtension } from './mockExtensions'
+import { showCompletionNotification } from '@shared/utils/notification'
 import type { WorkflowExtension } from './mockExtensions'
 import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
-import { isBranchStarter, isSceneOutput, resolveDataSource, reachesSceneOutput, nearestUpstreamWaits, edgeSlot } from './nodeBehaviors'
+import { isBranchStarter, isSceneOutput, resolveDataSource, reachesSceneOutput, nearestUpstreamWaits } from './nodeBehaviors'
+import { resolveNodeInputs, extraImageParams, mainText, missingInput } from './nodeInputs'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -310,40 +312,12 @@ async function executeExtensionNode(
     return realId ? nodeOutputs.get(realId) : undefined
   }
 
-  let nodeInputPath:     string | undefined
-  let nodeInputText:     string | undefined
-  let nodeInputMeshPath: string | undefined
-  // Per-slot texts for multi-text-input nodes (e.g. positive/negative prompts).
-  // Indexed by target handle: input-0 → texts[0], input-1 → texts[1].
-  const nodeInputTexts: (string | undefined)[] = []
-
   const incomingEdges = workflow.edges.filter((e) => e.target === node.id)
+  const inputs = resolveNodeInputs(ext?.inputs, incomingEdges, resolveSource)
 
-  if (ext?.inputs && ext.inputs.length > 1) {
-    for (const edge of incomingEdges) {
-      const src = resolveSource(edge.source)
-      if (!src) continue
-      if (src.outputType === 'mesh')        nodeInputMeshPath = src.filePath
-      else if (src.outputType === 'image')  nodeInputPath     = src.filePath
-      else if (src.filePath !== undefined)  nodeInputPath     = src.filePath
-      if (src.text !== undefined && src.text.trim().length > 0) {
-        nodeInputText = src.text
-        // Placed by the same rule preflight and auto-wiring use. This copy used
-        // to accept `input-N` only: an untagged edge — how the agent's builder
-        // wires its chain — left texts[0] empty, so on a ['text','text'] node
-        // the negative prompt auto-wired onto input-1 became the one driving
-        // the generator (see mainText below).
-        const slot = edgeSlot(edge.targetHandle)
-        if (slot !== undefined) nodeInputTexts[slot] = src.text
-      }
-    }
-  } else {
-    for (const edge of incomingEdges) {
-      const src = resolveSource(edge.source)
-      if (src?.filePath !== undefined) nodeInputPath = src.filePath
-      if (src?.text !== undefined && src.text.trim().length > 0) nodeInputText = src.text
-    }
-  }
+  let nodeInputPath = inputs.filePath
+  let nodeInputText = inputs.text
+  const nodeInputMeshPath = inputs.meshPath
 
   const isModelNode = ext?.type === 'model'
 
@@ -384,14 +358,13 @@ async function executeExtensionNode(
         ? norm.slice(workspaceDir.length).replace(/^\//, '')
         : norm
     }
-    // On a multi-text node the slots carry meaning — input-0 is the positive
-    // prompt, input-1 the negative one — while nodeInputText is just whichever
-    // text edge came last in workflow.edges. Wiring the negative prompt second
-    // would otherwise drive the generator with it.
-    const mainText = nodeInputTexts[0] ?? nodeInputText
-    if (mainText !== undefined && mainText.trim().length > 0) {
-      extraParams.prompt = mainText
-      extraParams.text   = mainText
+    const prompt = mainText(inputs)
+    if (prompt !== undefined && prompt.trim().length > 0) {
+      extraParams.prompt = prompt
+      extraParams.text   = prompt
+    }
+    if (inputs.extraImages.length > 0) {
+      extraParams.extra_image_paths = inputs.extraImages
     }
 
     const fd = new FormData()
@@ -436,14 +409,17 @@ async function executeExtensionNode(
       useAppStore.getState().updateCurrentJob({ status: 'generating', progress: st.progress, step: st.step })
     }
   } else {
-    if (ext?.input === 'mesh'  && !nodeInputPath) throw new Error(`${ext.name} needs an incoming mesh connection`)
-    if (ext?.input === 'image' && !nodeInputPath) throw new Error(`${ext.name} needs an incoming image connection`)
-    if (ext?.input === 'audio' && !nodeInputPath) throw new Error(`${ext.name} needs an incoming audio connection`)
-    if (ext?.input === 'text'  && !nodeInputText) throw new Error(`${ext.name} needs an incoming text connection`)
+    const missing = missingInput(ext?.input, inputs)
+    if (missing) throw new Error(`${ext?.name ?? 'This node'} needs an incoming ${missing} connection`)
 
     const parts  = (node.data.extensionId ?? '').split('/')
     const extId  = parts[0]
     const nid    = parts[1] ?? ''
+    // Freshest params, plus the schema defaults an untouched control never sent.
+    // A multi-image process node re-run inside a loop therefore picks up edits
+    // made while paused rather than the snapshot captured at run start.
+    const processParams: Record<string, unknown> = { ...effectiveParams, ...extraImageParams(inputs) }
+
     // The runner only exposes one in-flight run per extension id, so cancelling
     // by extension id is unambiguous.
     _activeProcessExtId.current = extId
@@ -453,12 +429,16 @@ async function executeExtensionNode(
       result = await window.electron.extensions.runProcess(
         extId,
         {
-          filePath: nodeInputPath,
+          filePath: nodeInputMeshPath ?? nodeInputPath,
           text:     nodeInputText,
-          texts:    nodeInputTexts.length > 0 ? nodeInputTexts : undefined,
+          texts:    inputs.texts.length > 0 ? inputs.texts : undefined,
+          // Slot-ordered meshes, primary included. Only the last mesh slot used
+          // to survive (it overwrote filePath), so a second mesh node wired in
+          // the editor reached the extension as nothing at all.
+          files:    inputs.meshFiles.length > 0 ? inputs.meshFiles : undefined,
           nodeId:   nid,
         },
-        effectiveParams,
+        processParams,
       )
     } finally {
       _activeProcessExtId.current = null
@@ -647,6 +627,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
       },
     }))
     useAppStore.getState().updateCurrentJob({ status: 'done', progress: 100, outputUrl })
+    void showCompletionNotification('Workflow run complete')
   }
 
   return {

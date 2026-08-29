@@ -5,7 +5,14 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from routers.generation import _cancel_events, _cancelled, _jobs, _run_generation
+from routers.generation import (
+    VALID_REMESH_MODES,
+    _cancel_events,
+    _cancelled,
+    _jobs,
+    _run_generation,
+    sanitize_collection,
+)
 from schemas.generation import JobStatus
 from services.generator_registry import generator_registry
 
@@ -27,17 +34,15 @@ async def create_run_from_image(
     background_tasks: BackgroundTasks,
     image: UploadFile = File(...),
     model_id: str = Form("sf3d"),
+    # Where the result is filed. The legacy /generate/from-image already accepts this; the
+    # canonical endpoint hardcoded "Default", so a run driven over REST/MCP landed in a folder
+    # the Library does not index and stayed invisible in the app (#238). Same field, same
+    # sanitizer, so both surfaces route output the same way.
+    collection: str = Form("Default"),
     params: str = Form("{}"),
 ):
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(400, "File must be an image")
-
-    try:
-        generator_registry.get_generator(model_id)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-
-    generator_registry.switch_model(model_id)
 
     try:
         model_params = json.loads(params)
@@ -51,13 +56,29 @@ async def create_run_from_image(
         **model_params,
     }
 
+    # Same constraint /generate/from-image enforces on this field, checked before touching
+    # the registry below for the same reason that endpoint checks it first: switch_model()
+    # unloads whatever generator is currently active, and a request rejected for a bad
+    # remesh value should not pay for -- or force a reload after -- evicting it.
+    if full_params["remesh"] not in VALID_REMESH_MODES:
+        raise HTTPException(400, "remesh must be 'quad', 'triangle', or 'none'")
+
+    collection = sanitize_collection(collection)
+
+    try:
+        generator_registry.get_generator(model_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    generator_registry.switch_model(model_id)
+
     job_id = str(uuid.uuid4())
     image_bytes = await image.read()
 
     _jobs[job_id] = JobStatus(job_id=job_id, status="pending", progress=0)
     _cancel_events[job_id] = threading.Event()
 
-    background_tasks.add_task(_run_generation, job_id, image_bytes, full_params, "Default")
+    background_tasks.add_task(_run_generation, job_id, image_bytes, full_params, collection)
 
     return {"run_id": job_id, "status": "pending"}
 

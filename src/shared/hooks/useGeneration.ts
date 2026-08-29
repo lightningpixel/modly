@@ -1,6 +1,7 @@
 import { useCallback, useRef } from 'react'
 import { useAppStore } from '@shared/stores/appStore'
 import { useApi } from './useApi'
+import { showCompletionNotification } from '@shared/utils/notification'
 
 export function useGeneration() {
   const { currentJob, setCurrentJob, updateCurrentJob, generationOptions, selectedImageData, pushMeshUrl, clearMeshHistory } = useAppStore()
@@ -78,6 +79,7 @@ export function useGeneration() {
       if (result.status === 'done') {
         updateCurrentJob({ status: 'done', progress: 100, outputUrl: result.outputUrl, originalOutputUrl: result.outputUrl })
         if (result.outputUrl) pushMeshUrl(result.outputUrl)
+        void showCompletionNotification('Generation complete')
         break
       }
 

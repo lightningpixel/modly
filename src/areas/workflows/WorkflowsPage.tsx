@@ -23,6 +23,7 @@ import { buildAllWorkflowExtensions } from './mockExtensions'
 import type { WorkflowExtension } from './mockExtensions'
 import { useWorkflowRunStore } from './workflowRunStore'
 import { validateWorkflowPreflight, blockingIssues, getNodeOutputType as preflightOutputType } from './preflight'
+import { slotInputType } from './nodeInputs'
 import ExtensionNode    from './nodes/ExtensionNode'
 import ImageNode        from './nodes/ImageNode'
 import TextNode         from './nodes/TextNode'
@@ -714,11 +715,7 @@ function getNodeInputType(
   if (node.type === 'outputNode')  return 'mesh'
   if (node.type === 'previewNode') return 'image'
   const ext = allExts.find((e) => e.id === (node.data as WFNodeData)?.extensionId)
-  if (ext?.inputs && ext.inputs.length > 1 && targetHandle) {
-    const idx = parseInt(targetHandle.replace('input-', ''), 10)
-    return ext.inputs[isNaN(idx) ? 0 : idx] ?? ext.input
-  }
-  return ext?.input
+  return slotInputType(ext, targetHandle)
 }
 
 // ─── Workflow canvas (inner, requires ReactFlowProvider) ──────────────────────
