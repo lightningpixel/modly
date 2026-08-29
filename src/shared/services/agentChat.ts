@@ -45,13 +45,13 @@ function allExtensions() {
 }
 
 /** Model actually used for the next request: chat-picker override or Settings default. */
-export function effectiveModel(): string {
+function effectiveModel(): string {
   const { provider, localModel, external } = useAgentStore.getState()
   return chat().chatModel ?? (provider === 'local' ? localModel : (external[provider]?.model ?? ''))
 }
 
 /** Thinking mode for the next request: brain-icon override or Settings default. */
-export function effectiveThinking(): ThinkingMode {
+function effectiveThinking(): ThinkingMode {
   return chat().thinkingOverride ?? useAgentStore.getState().defaultThinking
 }
 

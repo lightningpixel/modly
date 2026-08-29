@@ -13,8 +13,6 @@ export default tseslint.config(
       'api/**',
       'arch/**',
       'docs/**',
-      // Agent tooling vendored into the repo by `orvix init`, not our source.
-      '.claude/hooks/**',
       '**/*.test.mjs'
     ]
   },
