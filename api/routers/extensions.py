@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import platform as platform_module
 import re
 import subprocess
 import sys
@@ -50,22 +52,30 @@ async def setup_extension(ext_id: str):
         # No setup.py → legacy extension, nothing to do
         return {"status": "skipped", "reason": "no setup.py"}
 
-    # Detect GPU compute capability
-    gpu_sm     = _detect_gpu_sm()
-    gfx_target = _detect_gfx_target()
+    # Detect GPU compute capability. NVIDIA keeps detection priority, exactly
+    # like electron/main/gpu-detect.ts: a Ryzen APU beside an NVIDIA dGPU must
+    # resolve to CUDA on both code paths.
+    gpu_sm, cuda_version = _detect_nvidia_gpu()
+    gfx_target           = "" if gpu_sm else _detect_gfx_target()
+    flavor               = "cuda" if gpu_sm else ("rocm" if gfx_target else "cpu")
 
-    # Pass arguments as JSON so setup.py sees torch_flavor. Note this endpoint is
-    # a fallback: Electron normally runs setup.py itself, and only that path gets
-    # the ROCm index rewriting for extensions that ignore torch_flavor.
+    # Pass arguments as JSON so setup.py sees torch_flavor. The keys mirror
+    # runExtensionSetup in electron/main/ipc-handlers.ts exactly — setup.py
+    # scripts read the same contract whichever side launched them. Note this
+    # endpoint is a fallback: Electron normally runs setup.py itself, and only
+    # that path gets the ROCm index rewriting for extensions that ignore
+    # torch_flavor.
     args = json.dumps({
-        "python_exe":   sys.executable,
-        "ext_dir":      str(ext_dir),
-        "gpu_sm":       gpu_sm,
-        "cuda_version": 0,
-        "accelerator":  "rocm" if gfx_target else ("cuda" if gpu_sm else "cpu"),
-        "torch_flavor": "rocm" if gfx_target else ("cuda" if gpu_sm else "cpu"),
-        "gfx_target":   gfx_target,
-        "platform":     sys.platform,
+        "python_exe":      sys.executable,
+        "ext_dir":         str(ext_dir),
+        "gpu_sm":          gpu_sm,
+        "cuda_version":    cuda_version,
+        "accelerator":     flavor,
+        "torch_flavor":    flavor,
+        "gfx_target":      gfx_target,
+        "torch_index_url": _rocm_index_url() if flavor == "rocm" else "",
+        "platform":        sys.platform,
+        "arch":            _node_arch(),
     })
 
     # Run setup.py using Modly's embedded Python (sys.executable)
@@ -97,25 +107,76 @@ async def extension_errors():
     return generator_registry.load_errors()
 
 
-def _detect_gpu_sm() -> int:
+def _detect_nvidia_gpu() -> tuple[int, int]:
     """
-    Returns GPU compute capability as integer (e.g. 86 for SM 8.6), or 0 if no GPU.
+    Returns (compute capability, max CUDA version) — e.g. (86, 124) — or (0, 0)
+    when there is no NVIDIA GPU.
 
-    Returns 0 on ROCm too. PyTorch's HIP build answers the whole torch.cuda API,
-    so get_device_capability() happily reports (12, 0) for a gfx1200 Radeon —
-    indistinguishable from an sm_120 Blackwell, which would send setup.py to the
-    CUDA 12.8 index. AMD cards are identified by _detect_gfx_target() instead.
+    Asks nvidia-smi rather than torch: this process runs in Modly's main venv,
+    which has no torch at all (see api/requirements.txt), so a torch import
+    always failed here and silently reported every machine as CPU-only. Asking
+    the driver also sidesteps the ROCm ambiguity — PyTorch's HIP build answers
+    the whole torch.cuda API, reporting (12, 0) for a gfx1200 Radeon exactly
+    like an sm_120 Blackwell. Mirrors parseNvidiaSmi in
+    electron/main/gpu-detect.ts, including the driver → CUDA version table.
     """
     try:
-        import torch
-        if torch.version.hip:
-            return 0
-        if torch.cuda.is_available():
-            major, minor = torch.cuda.get_device_capability(0)
-            return major * 10 + minor
-    except Exception:
-        pass
-    return 0
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=compute_cap,driver_version", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0, 0
+    if result.returncode != 0:
+        return 0, 0
+
+    line = result.stdout.strip().splitlines()[0].strip() if result.stdout.strip() else ""
+    if not line:
+        return 0, 0
+    parts = [part.strip() for part in line.split(",")]
+
+    try:
+        sm = round(float(parts[0]) * 10)
+    except (ValueError, IndexError):
+        sm = 86
+    try:
+        driver_major = int((parts[1] if len(parts) > 1 else "0").split(".")[0])
+    except ValueError:
+        driver_major = 0
+
+    cuda_version = 118  # safe minimum
+    for threshold, version in (
+        (570, 128), (560, 126), (555, 125), (550, 124),
+        (545, 123), (535, 122), (530, 121), (525, 120), (520, 118),
+    ):
+        if driver_major >= threshold:
+            cuda_version = version
+            break
+    return sm, cuda_version
+
+
+def _rocm_index_url() -> str:
+    """The pip index a ROCm torch install must come from. Mirrors
+    resolveRocmTorchSpec in electron/main/gpu-detect.ts."""
+    override = os.environ.get("MODLY_ROCM_INDEX", "").strip()
+    if override:
+        return override
+    if sys.platform == "win32":
+        return "https://repo.amd.com/rocm/whl-multi-arch/"
+    return "https://download.pytorch.org/whl/rocm7.2"
+
+
+def _node_arch() -> str:
+    """platform.machine() mapped onto Node's process.arch vocabulary, so
+    setup.py sees the same values whichever side launched it."""
+    machine = platform_module.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        return "x64"
+    if machine in ("aarch64", "arm64"):
+        return "arm64"
+    return machine
 
 
 def _detect_gfx_target() -> str:
@@ -140,13 +201,18 @@ def _detect_gfx_target() -> str:
     except OSError:
         return ""
 
+    # Among GPU nodes the largest simd_count wins, mirroring parseKfdGfxTarget
+    # in electron/main/gpu-detect.ts: on an APU + dGPU machine the APU commonly
+    # gets the lower node number, and the discrete card has more SIMDs.
+    best_target, best_simd = "", 0
     for node in nodes:
         try:
             text = (node / "properties").read_text()
         except OSError:
             continue
         # Node 0 is the CPU node (simd_count 0) and carries no compute target.
-        if _prop(text, "simd_count") <= 0:
+        simd_count = _prop(text, "simd_count")
+        if simd_count <= 0:
             continue
         # major*10000 + minor*100 + step, minor and step read as hex digits.
         version = _prop(text, "gfx_target_version")
@@ -155,5 +221,6 @@ def _detect_gfx_target() -> str:
         major, minor, step = version // 10000, (version % 10000) // 100, version % 100
         if major <= 0 or minor > 15 or step > 15:
             continue
-        return f"gfx{major}{minor:x}{step:x}"
-    return ""
+        if simd_count > best_simd:
+            best_target, best_simd = f"gfx{major}{minor:x}{step:x}", simd_count
+    return best_target

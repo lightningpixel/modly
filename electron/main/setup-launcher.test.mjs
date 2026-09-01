@@ -41,8 +41,9 @@ function findPython() {
 
 const PYTHON = findPython()
 
-// The launcher's _is_pip_command looks for "pip" in the first three tokens, so
-// the stub is named pip.py — matching how extensions invoke "<venv>/bin/pip".
+// The launcher's _is_pip_command matches pip's executable spellings ahead of
+// the subcommand, so the stub is named pip.py — matching how extensions invoke
+// "<venv>/bin/pip".
 const FAKE_PIP = `
 import json, sys
 with open(sys.argv[1], "w") as handle:
@@ -51,13 +52,21 @@ with open(sys.argv[1], "w") as handle:
 
 /**
  * Runs a pip command through the launcher and returns the argv the stub
- * actually received, i.e. the command after every rewrite.
+ * actually received, i.e. the command after every rewrite. `invoke` picks how
+ * the stand-in setup.py issues the call — the shapes real extensions use.
  */
-function runThroughLauncher(pipArgs, env = {}) {
+function runThroughLauncher(pipArgs, env = {}, invoke = 'run') {
   const dir     = mkdtempSync(join(tmpdir(), 'modly-launcher-run-'))
   const fakePip = join(dir, 'pip.py')
   const capture = join(dir, 'captured.json')
   writeFileSync(fakePip, FAKE_PIP, 'utf8')
+
+  const invocations = {
+    run:        'subprocess.run(CMD, check=True)',
+    run_kwarg:  'subprocess.run(args=CMD, check=True)',
+    popen:      'proc = subprocess.Popen(CMD)\nassert proc.wait() == 0',
+    check_call: 'subprocess.check_call(CMD)',
+  }
 
   // Stands in for the extension's setup.py: issues one pip call, exactly as the
   // real ones do, and lets the launcher's patched subprocess handle it.
@@ -65,7 +74,8 @@ function runThroughLauncher(pipArgs, env = {}) {
   writeFileSync(setupPy, [
     'import subprocess, sys',
     `PIP = ${JSON.stringify([fakePip, capture])}`,
-    `subprocess.run([sys.executable] + PIP + ${JSON.stringify(pipArgs)}, check=True)`,
+    `CMD = [sys.executable] + PIP + ${JSON.stringify(pipArgs)}`,
+    invocations[invoke],
   ].join('\n'), 'utf8')
 
   const result = spawnSync(PYTHON, ['-c', SETUP_LAUNCHER_SOURCE, setupPy, '{}'], {
@@ -211,6 +221,110 @@ test('shim is inert on a CUDA machine', { skip: !PYTHON }, () => {
     MODLY_TORCH_SPECS: '[]',
   })
   assert.deepEqual(argv, original)
+})
+
+test('ROCm shim covers subprocess.Popen and the args= keyword too', { skip: !PYTHON }, () => {
+  // Extension setup.py scripts stream pip output through Popen, or spell the
+  // command as run(args=[...]); both bypassed the patch when it only wrapped
+  // run/check_call/check_output positionally.
+  for (const invoke of ['popen', 'run_kwarg', 'check_call']) {
+    const { argv } = runThroughLauncher(
+      ['install', 'torch==2.6.0', '--index-url', 'https://download.pytorch.org/whl/cu124'],
+      ROCM_ENV,
+      invoke,
+    )
+    assert.deepEqual(argv, [
+      'install',
+      '--index-url', 'https://download.pytorch.org/whl/rocm7.2',
+      'torch', 'torchvision',
+    ], `invocation shape "${invoke}" escaped the ROCm redirect`)
+  }
+})
+
+test('ROCm shim matches "python -u -m pip install" too', { skip: !PYTHON }, () => {
+  // hunyuan3d-style scripts call pip through the interpreter; "pip" is then the
+  // fourth token, which the old first-three-tokens check missed.
+  const dir     = mkdtempSync(join(tmpdir(), 'modly-launcher-m-'))
+  const capture = join(dir, 'captured.json')
+  writeFileSync(join(dir, 'pip.py'), [
+    'import json, os, sys',
+    'with open(os.environ["MODLY_TEST_CAPTURE"], "w") as handle:',
+    '    json.dump(sys.argv[1:], handle)',
+  ].join('\n'), 'utf8')
+
+  const setupPy = join(dir, 'setup.py')
+  writeFileSync(setupPy, [
+    'import subprocess, sys',
+    'subprocess.run([sys.executable, "-u", "-m", "pip", "install", "torch==2.6.0",',
+    '                "--index-url", "https://download.pytorch.org/whl/cu124"], check=True)',
+  ].join('\n'), 'utf8')
+
+  const result = spawnSync(PYTHON, ['-c', SETUP_LAUNCHER_SOURCE, setupPy, '{}'], {
+    encoding: 'utf8',
+    env: { ...process.env, ...ROCM_ENV, MODLY_TEST_CAPTURE: capture, PYTHONPATH: dir },
+  })
+  assert.equal(result.status, 0, `launcher failed:\n${result.stderr}`)
+
+  assert.deepEqual(JSON.parse(readFileSync(capture, 'utf8')), [
+    'install',
+    '--index-url', 'https://download.pytorch.org/whl/rocm7.2',
+    'torch', 'torchvision',
+  ])
+})
+
+test('ROCm shim demotes a foreign primary index instead of keeping it primary', { skip: !PYTHON }, () => {
+  // pip resolves a duplicated --index-url last-wins: a kept foreign primary
+  // index could shadow the injected ROCm one and silently hand torch back to
+  // CUDA/CPU wheels. Demoted to an extra index, its other packages stay
+  // reachable while ROCm stays primary.
+  const { argv } = runThroughLauncher(
+    ['install', 'torch==2.6.0', '--index-url', 'https://pypi.org/simple'],
+    ROCM_ENV,
+  )
+
+  assert.deepEqual(argv, [
+    'install',
+    '--index-url', 'https://download.pytorch.org/whl/rocm7.2',
+    'torch', 'torchvision',
+    '--extra-index-url', 'https://pypi.org/simple',
+  ])
+})
+
+test('ROCm shim keeps PyPI reachable when the extension chose ROCm itself', { skip: !PYTHON }, () => {
+  // The keeps-rocm-index branch needs the PyPI rescue just as much: the ROCm
+  // index answers 403 for trimesh/diffusers.
+  const { argv } = runThroughLauncher(
+    ['install', 'torch', 'trimesh', '--index-url', 'https://download.pytorch.org/whl/rocm7.2'],
+    ROCM_ENV,
+  )
+
+  assert.deepEqual(argv, [
+    'install',
+    '--extra-index-url', 'https://pypi.org/simple',
+    'torch', 'torchvision',
+    'trimesh',
+    '--index-url', 'https://download.pytorch.org/whl/rocm7.2',
+  ])
+})
+
+test('ROCm shim recognises AMD\'s Windows index as already-ROCm', { skip: !PYTHON }, () => {
+  // repo.amd.com carries no "/whl/rocm" path segment; it must still count as a
+  // ROCm index or the shim would inject a second, conflicting --index-url.
+  const winEnv = {
+    ...ROCM_ENV,
+    MODLY_TORCH_INDEX_URL: 'https://repo.amd.com/rocm/whl-multi-arch/',
+    MODLY_TORCH_SPECS: JSON.stringify(['torch[device-gfx1200]==2.11.0+rocm7.14.0']),
+  }
+  const { argv } = runThroughLauncher(
+    ['install', 'torch==2.6.0', '--index-url', 'https://repo.amd.com/rocm/whl-multi-arch/'],
+    winEnv,
+  )
+
+  assert.deepEqual(argv, [
+    'install',
+    'torch[device-gfx1200]==2.11.0+rocm7.14.0',
+    '--index-url', 'https://repo.amd.com/rocm/whl-multi-arch/',
+  ])
 })
 
 test('--no-cache-dir is still stripped alongside the ROCm rewrite', { skip: !PYTHON }, () => {

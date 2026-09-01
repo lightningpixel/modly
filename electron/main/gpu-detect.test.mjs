@@ -50,6 +50,19 @@ test('parseKfdGfxTarget skips the CPU node and reads the first GPU', () => {
   assert.equal(mod.parseKfdGfxTarget([cpuNode, gpuNode]), 'gfx1200')
 })
 
+test('parseKfdGfxTarget prefers the discrete GPU over an APU', () => {
+  // Ryzen 7840 (gfx1103, 24 SIMDs) + RX 7900 XTX (gfx1100, 384 SIMDs): the APU
+  // gets the lower node number, but gfx1103 has no published wheels — the card
+  // with more SIMDs is the one the user bought for this.
+  const cpuNode = 'cpu_cores_count 16\nsimd_count 0\ngfx_target_version 0\n'
+  const apuNode = 'cpu_cores_count 0\nsimd_count 24\ngfx_target_version 110003\n'
+  const dgpuNode = 'cpu_cores_count 0\nsimd_count 384\ngfx_target_version 110000\n'
+
+  assert.equal(mod.parseKfdGfxTarget([cpuNode, apuNode, dgpuNode]), 'gfx1100')
+  // Order must not matter
+  assert.equal(mod.parseKfdGfxTarget([cpuNode, dgpuNode, apuNode]), 'gfx1100')
+})
+
 test('parseKfdGfxTarget returns null without a usable GPU node', () => {
   assert.equal(mod.parseKfdGfxTarget([]), null)
   assert.equal(mod.parseKfdGfxTarget(['simd_count 0\ngfx_target_version 0\n']), null)
@@ -206,6 +219,16 @@ test('detectGpuInfo forced to rocm overrides MPS on Apple Silicon', async () => 
     arch: 'arm64',
   })
   assert.equal(info.accelerator, 'rocm')
+})
+
+test('detectGpuInfo forced to cuda overrides MPS on Apple Silicon', async () => {
+  // The override has to beat every probe, the darwin/arm64 default included.
+  const info = await mod.detectGpuInfo({
+    env: { MODLY_TORCH_FLAVOR: 'cuda' },
+    platform: 'darwin',
+    arch: 'arm64',
+  })
+  assert.equal(info.accelerator, 'cuda')
 })
 
 test('detectGpuInfo forced to cpu short-circuits everything', async () => {

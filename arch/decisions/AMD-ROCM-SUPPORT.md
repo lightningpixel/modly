@@ -67,8 +67,9 @@ rather than by the index URL, which means Windows needs the compute target
   CUDA-only. Reporting a synthesised capability instead would break both.
   PyTorch's HIP build answers the whole `torch.cuda` API, so
   `get_device_capability()` reports `(12, 0)` for a gfx1200 Radeon —
-  indistinguishable from an sm_120 Blackwell. `api/routers/extensions.py` guards
-  on `torch.version.hip` for this reason.
+  indistinguishable from an sm_120 Blackwell. `api/routers/extensions.py` asks
+  `nvidia-smi` rather than torch for this reason (and because Modly's main venv
+  carries no torch at all).
 - **Compute-target discovery is platform-specific.** Linux reads
   `gfx_target_version` from the kernel's KFD topology, which needs no ROCm
   install and no external binary. Windows has no equivalent, so it maps PCI

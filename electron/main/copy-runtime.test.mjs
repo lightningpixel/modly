@@ -30,6 +30,13 @@ function loadModule() {
 
 const { copyRuntimeTree } = loadModule()
 
+// makeRuntime() below needs symlinkSync, which on Windows requires Developer
+// Mode (or elevation) — and the AppImage failure mode this file guards is
+// Linux-only anyway.
+const symlinkOpts = {
+  skip: process.platform === 'win32' && 'symlinks require Developer Mode on Windows',
+}
+
 /** Builds a miniature of the bundled runtime: a real binary plus relative links. */
 function makeRuntime(root) {
   mkdirSync(join(root, 'bin'), { recursive: true })
@@ -41,7 +48,7 @@ function makeRuntime(root) {
   symlinkSync('libpython3.11.so.1.0', join(root, 'lib', 'libpython3.11.so'))
 }
 
-test('copyRuntimeTree keeps relative symlinks relative', async () => {
+test('copyRuntimeTree keeps relative symlinks relative', symlinkOpts, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'modly-runtime-'))
   const source = join(dir, 'mount', 'python-embed')
   const dest   = join(dir, 'stable', 'python-embed')
@@ -61,7 +68,7 @@ test('copyRuntimeTree keeps relative symlinks relative', async () => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-test('the copy survives the source being deleted', async () => {
+test('the copy survives the source being deleted', symlinkOpts, async () => {
   // This is the actual failure mode: the AppImage mount disappears between
   // launches, and every venv built from the copy dies with it.
   const dir = mkdtempSync(join(tmpdir(), 'modly-runtime-'))
@@ -78,7 +85,7 @@ test('the copy survives the source being deleted', async () => {
   assert.ok(existsSync(join(dest, 'lib', 'libpython3.11.so')), 'libpython3.11.so is dangling')
 })
 
-test('copyRuntimeTree copies regular files and directory structure', async () => {
+test('copyRuntimeTree copies regular files and directory structure', symlinkOpts, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'modly-runtime-'))
   const source = join(dir, 'mount', 'python-embed')
   const dest   = join(dir, 'stable', 'python-embed')

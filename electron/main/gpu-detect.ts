@@ -125,15 +125,21 @@ export function formatGfxTarget(version: number): string | null {
 
 /**
  * Picks the compute target out of the KFD topology node `properties` files.
- * Node 0 is the CPU node (simd_count 0) and is skipped; the first real GPU wins.
+ * Node 0 is the CPU node (simd_count 0) and is skipped. Among GPU nodes the
+ * largest simd_count wins: on an APU + dGPU machine the APU commonly gets the
+ * lower node number, and its gfx target (e.g. gfx1103) often has no published
+ * wheels — the discrete card is always the one with more SIMDs.
  */
 export function parseKfdGfxTarget(nodeProperties: string[]): string | null {
+  let best: { target: string; simdCount: number } | null = null
   for (const text of nodeProperties) {
-    if (readKfdProperty(text, 'simd_count') <= 0) continue
+    const simdCount = readKfdProperty(text, 'simd_count')
+    if (simdCount <= 0) continue
     const target = formatGfxTarget(readKfdProperty(text, 'gfx_target_version'))
-    if (target) return target
+    if (!target) continue
+    if (!best || simdCount > best.simdCount) best = { target, simdCount }
   }
-  return null
+  return best?.target ?? null
 }
 
 function readKfdProperty(text: string, key: string): number {
@@ -344,12 +350,20 @@ export async function detectGpuInfo(options: DetectOptions = {}): Promise<GpuInf
   if (forced === 'cpu') return cpuInfo()
 
   if (forced === 'rocm') {
-    const gfxTarget = await resolveGfxTarget(env, platform)
+    const { gfxTarget } = await resolveGfxTarget(env, platform)
     if (!gfxTarget && platform === 'win32') {
       log('[gpu-detect] ROCm forced on Windows but no compute target found — set MODLY_ROCM_GFX (e.g. gfx1200)')
       return cpuInfo()
     }
     return rocmInfo(gfxTarget, platform, env)
+  }
+
+  // A forced flavour wins over every probe, the Apple-Silicon MPS default
+  // included; nvidia-smi still runs so the CUDA path learns its real
+  // sm/cudaVersion instead of the conservative zeros.
+  if (forced === 'cuda') {
+    const nvidia = await queryNvidiaSmi()
+    return nvidia ? { ...nvidia, accelerator: 'cuda' } : { sm: 0, cudaVersion: 0, accelerator: 'cuda' }
   }
 
   if (platform === 'darwin' && arch === 'arm64') {
@@ -360,31 +374,34 @@ export async function detectGpuInfo(options: DetectOptions = {}): Promise<GpuInf
   // CUDA behaviour changes.
   const nvidia = await queryNvidiaSmi()
   if (nvidia) return { ...nvidia, accelerator: 'cuda' }
-  if (forced === 'cuda') return { sm: 0, cudaVersion: 0, accelerator: 'cuda' }
 
-  const gfxTarget = await resolveGfxTarget(env, platform)
+  const { gfxTarget, amdAdapters } = await resolveGfxTarget(env, platform)
   if (gfxTarget) {
     log(`[gpu-detect] AMD GPU detected — compute target ${gfxTarget}`)
     return rocmInfo(gfxTarget, platform, env)
   }
 
-  if (platform === 'win32') {
-    const { amdAdapters } = resolveWindowsGfxTarget(await queryWindowsVideoControllers())
-    if (amdAdapters.length > 0) {
-      log(
-        `[gpu-detect] AMD GPU found (${amdAdapters.join(', ')}) but its ROCm compute target is unknown. ` +
-        'Falling back to CPU — set MODLY_ROCM_GFX (e.g. gfx1201) to force one.',
-      )
-    }
+  if (amdAdapters.length > 0) {
+    log(
+      `[gpu-detect] AMD GPU found (${amdAdapters.join(', ')}) but its ROCm compute target is unknown. ` +
+      'Falling back to CPU — set MODLY_ROCM_GFX (e.g. gfx1201) to force one.',
+    )
   }
 
   return cpuInfo()
 }
 
-async function resolveGfxTarget(env: NodeJS.ProcessEnv, platform: string): Promise<string | null> {
+/**
+ * Also hands back the AMD adapters the Windows probe saw, so the caller can
+ * report an unmapped card without spawning a second PowerShell round-trip.
+ */
+async function resolveGfxTarget(
+  env: NodeJS.ProcessEnv,
+  platform: string,
+): Promise<{ gfxTarget: string | null; amdAdapters: string[] }> {
   const override = env['MODLY_ROCM_GFX']?.trim()
-  if (override) return override
-  if (platform === 'linux') return readKfdGfxTarget()
-  if (platform === 'win32') return resolveWindowsGfxTarget(await queryWindowsVideoControllers()).gfxTarget
-  return null
+  if (override) return { gfxTarget: override, amdAdapters: [] }
+  if (platform === 'linux') return { gfxTarget: readKfdGfxTarget(), amdAdapters: [] }
+  if (platform === 'win32') return resolveWindowsGfxTarget(await queryWindowsVideoControllers())
+  return { gfxTarget: null, amdAdapters: [] }
 }
