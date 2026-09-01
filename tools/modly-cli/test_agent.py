@@ -262,6 +262,13 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(payload["code"], "UNEXPECTED_ERROR")
         self.assertEqual(payload["message"], "boom")
 
+    def test_main_converts_argparse_errors_to_json(self) -> None:
+        with redirect_stdout(io.StringIO()) as buf:
+            self.assertEqual(agent.main(["health", "--bogus"]), 1)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["code"], "INVALID_ARGUMENTS")
+        self.assertIn("--bogus", payload["message"])
+
     def test_generate_from_workflow_downloads_direct_asset_without_modly_health(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             output = Path(td) / "robot.glb"

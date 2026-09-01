@@ -1180,8 +1180,13 @@ def _add_serve_options(parser: argparse.ArgumentParser, *, include_start: bool =
     parser.add_argument("--print-command", action="store_true", help="Print resolved command/env without starting")
 
 
+class JsonArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise ModlyCliError(message, code="INVALID_ARGUMENTS")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = JsonArgumentParser(
         prog="modly-cli",
         description="Tiny stdlib-only CLI for agents calling a running Modly desktop API.",
     )
@@ -1335,6 +1340,13 @@ def main(argv: list[str] | None = None) -> int:
         return int(args.func(args))
     except ModlyCliError as exc:
         _json_print({"ok": False, "code": exc.code, "message": exc.message, "error": exc.message}, compact=getattr(args, "compact", False) if args else False)
+        return 1
+    except SystemExit as exc:
+        code = exc.code
+        if code in (None, 0):
+            return 0
+        message = str(code)
+        _json_print({"ok": False, "code": "INVALID_ARGUMENTS", "message": message, "error": message}, compact=getattr(args, "compact", False) if args else False)
         return 1
     except KeyboardInterrupt:
         _json_print({"ok": False, "code": "INTERRUPTED", "message": "interrupted", "error": "interrupted"}, compact=getattr(args, "compact", False) if args else False)

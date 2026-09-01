@@ -727,7 +727,7 @@ function WorkflowCanvasInner({
 }: {
   workflow:         Workflow
   allExtensions:    WorkflowExtension[]
-  onSave:           (w: Workflow) => void
+  onSave:           (w: Workflow) => Promise<{ success: boolean; error?: string }>
   panelOpen:        boolean
   onTogglePanel:    () => void
   onOpen:           () => void
@@ -750,6 +750,8 @@ function WorkflowCanvasInner({
   const [pendingDropPos, setPendingDropPos] = useState<{ x: number; y: number } | null>(null)
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const flushSaveRef = useRef<(() => void) | null>(null)
+  const autosaveMountedRef = useRef(false)
   const preflightToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const didMountRef = useRef(false)
 
@@ -758,7 +760,8 @@ function WorkflowCanvasInner({
   const historyRef  = useRef<Snapshot[]>([{ nodes: workflow.nodes as Node[], edges: workflow.edges as Edge[] }])
   const histIdxRef  = useRef(0)
   const [histIdx, setHistIdx] = useState(0)
-  const skipPushRef = useRef(true) // skip the initial autosave-triggered push
+  const skipPushRef    = useRef(true) // skip the initial autosave-triggered push
+  const lastSavedAtRef = useRef<string>(workflow.updatedAt)
 
   // Re-sync when workflow switches
   useEffect(() => {
@@ -771,19 +774,43 @@ function WorkflowCanvasInner({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- re-sync only when the workflow switches; adding nodes/edges would reset the editor on every change
   }, [workflow.id])
 
-  // Auto-save + history push debounced
+  // Re-sync when Generate tab (or another external source) saves param changes
+  useEffect(() => {
+    if (workflow.updatedAt === lastSavedAtRef.current) return
+    setNodes(workflow.nodes as Node[])
+    setEdges(workflow.edges as Edge[])
+    skipPushRef.current = true
+    lastSavedAtRef.current = workflow.updatedAt
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on updatedAt only; adding nodes/edges would resync on every local edit
+  }, [workflow.updatedAt])
+
+  // Persist and claim the echo so the sync effect above does not treat our own
+  // write as an external change. The claim is optimistic — the store is updated
+  // before save() resolves — and is rolled back when the write fails, so a failed
+  // save never silently replaces the canvas with the last persisted version.
+  const saveAndClaim = useCallback((updated: Workflow) => {
+    const prevSavedAt = lastSavedAtRef.current
+    lastSavedAtRef.current = updated.updatedAt
+    void onSave(updated).then((res) => {
+      if (!res.success) lastSavedAtRef.current = prevSavedAt
+    })
+  }, [onSave])
+
+  // Auto-save + history push debounced.
   useEffect(() => {
     if (saveTimer.current) clearTimeout(saveTimer.current)
-    saveTimer.current = setTimeout(() => {
-      const updated: Workflow = {
+
+    const flush = (pushHistory: boolean) => {
+      saveTimer.current    = null
+      flushSaveRef.current = null
+      saveAndClaim({
         ...workflow,
         nodes: nodes as WFNode[],
         edges: edges as WFEdge[],
         updatedAt: new Date().toISOString(),
-      }
-      onSave(updated)
+      })
 
-      if (!skipPushRef.current) {
+      if (pushHistory && !skipPushRef.current) {
         const next = historyRef.current.slice(0, histIdxRef.current + 1)
         next.push({ nodes, edges })
         if (next.length > 50) next.shift()
@@ -793,10 +820,24 @@ function WorkflowCanvasInner({
         setHistIdx(newIdx)
       }
       skipPushRef.current = false
-    }, 500)
-    return () => { if (saveTimer.current) clearTimeout(saveTimer.current) }
+    }
+
+    // Only arm the unmount flush once the user has actually edited something,
+    // so merely opening and leaving the tab does not trigger a pointless write.
+    if (autosaveMountedRef.current) flushSaveRef.current = () => flush(false)
+    else autosaveMountedRef.current = true
+    saveTimer.current = setTimeout(() => flush(true), 500)
+    // No cleanup: the next edit clears the timer above, and the unmount effect
+    // below flushes a pending save so switching tabs never drops an edit.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- debounce on editable state; latest workflow/onSave read in the timeout
   }, [nodes, edges])
+
+  // Switching tabs unmounts this page — flush the pending autosave instead of
+  // dropping it, otherwise an edit made within the debounce window is lost.
+  useEffect(() => () => {
+    if (saveTimer.current) clearTimeout(saveTimer.current)
+    flushSaveRef.current?.()
+  }, [])
 
   const preflightIssues = useMemo(() => {
     const draft: Workflow = {
@@ -1139,10 +1180,12 @@ function WorkflowCanvasInner({
       showToast(preflightIssues[0].message)
       return
     }
+    // Drop the pending debounce — this save supersedes it.
+    if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; flushSaveRef.current = null }
     const wf: Workflow = { ...workflow, nodes: nodes as WFNode[], edges: edges as WFEdge[], updatedAt: new Date().toISOString() }
-    onSave(wf)
+    saveAndClaim(wf)
     runWorkflow(wf, allExtensions)
-  }, [workflow, nodes, edges, onSave, allExtensions, isRunning, runWorkflow, cancel, preflightIssues, showToast])
+  }, [workflow, nodes, edges, saveAndClaim, allExtensions, isRunning, runWorkflow, cancel, preflightIssues, showToast])
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden">

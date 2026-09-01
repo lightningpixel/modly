@@ -38,6 +38,7 @@ export function buildAllWorkflowExtensions(
   const result: WorkflowExtension[] = []
 
   for (const ext of processExtensions) {
+    if (ext.corrupted) continue
     for (const node of ext.nodes) {
       result.push({
         id:              `${ext.id}/${node.id}`,
@@ -59,6 +60,7 @@ export function buildAllWorkflowExtensions(
   }
 
   for (const ext of modelExtensions) {
+    if (ext.corrupted) continue
     for (const node of ext.nodes) {
       result.push({
         id:              `${ext.id}/${node.id}`,

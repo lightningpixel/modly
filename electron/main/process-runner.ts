@@ -180,6 +180,9 @@ export class PythonProcessRunner implements IProcessRunner {
     return new Promise((resolve, reject) => {
       const proc = spawn(this.pythonExe, [this.scriptPath], {
         stdio: ['pipe', 'pipe', 'pipe'],
+        // Force UTF-8 stdio so Unicode prints from process extensions do not
+        // crash under legacy Windows codepages (cp1252/cp932).
+        env: { ...process.env, PYTHONUTF8: '1' },
       })
 
       // Send input as a single JSON line on stdin

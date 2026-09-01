@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import axios, { AxiosInstance } from 'axios'
 import { useAppStore } from '@shared/stores/appStore'
 import { getWorkflowExtension } from './mockExtensions'
+import { showCompletionNotification } from '@shared/utils/notification'
 import type { WorkflowExtension } from './mockExtensions'
 import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
 import { isBranchStarter, isSceneOutput, resolveDataSource, reachesSceneOutput, nearestUpstreamWaits } from './nodeBehaviors'
@@ -311,20 +312,38 @@ async function executeExtensionNode(
   // Per-slot texts for multi-text-input nodes (e.g. positive/negative prompts).
   // Indexed by target handle: input-0 → texts[0], input-1 → texts[1].
   const nodeInputTexts: (string | undefined)[] = []
+  // Every image beyond the first resolved slot, for extensions that take several
+  // (e.g. a texture node taking a mesh plus multiple reference images).
+  const extraImagePaths: string[] = []
 
   const incomingEdges = workflow.edges.filter((e) => e.target === node.id)
 
   if (ext?.inputs && ext.inputs.length > 1) {
+    const inputTypes  = ext.inputs
+    // Resolved by target handle first, then typed by that slot's declared input --
+    // not by the arrival order of `incomingEdges`, which does not match slot order.
+    const inputPaths  = new Array<string | undefined>(inputTypes.length).fill(undefined)
+
     for (const edge of incomingEdges) {
       const src = resolveSource(edge.source)
       if (!src) continue
-      if (src.outputType === 'mesh')        nodeInputMeshPath = src.filePath
-      else if (src.outputType === 'image')  nodeInputPath     = src.filePath
-      else if (src.filePath !== undefined)  nodeInputPath     = src.filePath
+      const slotMatch = /^input-(\d+)$/.exec(edge.targetHandle ?? '')
+      const slot = slotMatch ? Number(slotMatch[1]) : 0
+      if (src.filePath !== undefined && slot < inputTypes.length) inputPaths[slot] = src.filePath
       if (src.text !== undefined && src.text.trim().length > 0) {
         nodeInputText = src.text
-        const slot = /^input-(\d+)$/.exec(edge.targetHandle ?? '')
-        if (slot) nodeInputTexts[Number(slot[1])] = src.text
+        if (slotMatch) nodeInputTexts[slot] = src.text
+      }
+    }
+
+    for (let i = 0; i < inputTypes.length; i++) {
+      const fp = inputPaths[i]
+      if (!fp) continue
+      if (inputTypes[i] === 'mesh') {
+        nodeInputMeshPath = fp
+      } else if (inputTypes[i] === 'image') {
+        if (!nodeInputPath) nodeInputPath = fp
+        else extraImagePaths.push(fp)
       }
     }
   } else {
@@ -369,6 +388,9 @@ async function executeExtensionNode(
     if (nodeInputText !== undefined && nodeInputText.trim().length > 0) {
       extraParams.prompt = nodeInputText
       extraParams.text   = nodeInputText
+    }
+    if (extraImagePaths.length > 0) {
+      extraParams.extra_image_paths = extraImagePaths
     }
 
     const schemaDefaults = Object.fromEntries(
@@ -426,15 +448,27 @@ async function executeExtensionNode(
     const parts  = (node.data.extensionId ?? '').split('/')
     const extId  = parts[0]
     const nid    = parts[1] ?? ''
+
+    // Freshest params (liveParams), same as the model-node branch above, so a
+    // multi-image process node re-run inside a loop also picks up edits made while
+    // paused rather than the snapshot captured at run start.
+    const processParams: Record<string, unknown> = { ...liveParams }
+    if (nodeInputMeshPath && nodeInputPath) {
+      // Texture node: mesh is filePath, all images in extra_image_paths
+      processParams.extra_image_paths = [nodeInputPath, ...extraImagePaths]
+    } else if (extraImagePaths.length > 0) {
+      processParams.extra_image_paths = extraImagePaths
+    }
+
     const result = await window.electron.extensions.runProcess(
       extId,
       {
-        filePath: nodeInputPath,
+        filePath: nodeInputMeshPath ?? nodeInputPath,
         text:     nodeInputText,
         texts:    nodeInputTexts.length > 0 ? nodeInputTexts : undefined,
         nodeId:   nid,
       },
-      liveParams as Record<string, unknown>,
+      processParams,
     )
     if (!result.success) throw new Error(result.error ?? 'Process extension failed')
     nodeInputPath = result.result?.filePath ?? nodeInputPath
@@ -586,6 +620,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
       },
     }))
     useAppStore.getState().updateCurrentJob({ status: 'done', progress: 100, outputUrl })
+    void showCompletionNotification('Workflow run complete')
   }
 
   return {

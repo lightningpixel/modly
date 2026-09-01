@@ -31,6 +31,12 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
       offMaximizeChange: () => ipcRenderer.removeAllListeners('window:maximizeChanged'),
     },
 
+    // Native OS notifications (Windows toast / macOS Notification Center / Linux)
+    notifications: {
+      show: (title: string, body: string): Promise<{ success: boolean; error?: string }> =>
+        ipcRenderer.invoke('notifications:show', title, body) as Promise<{ success: boolean; error?: string }>,
+    },
+
     // Renderer UI (zoom whole page — scales every px/rem consistently)
     ui: { setZoomFactor: (factor: number) => webFrame.setZoomFactor(factor) },
 
@@ -209,11 +215,13 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
 
       installFromLocal: (): Promise<{
         success: boolean; error?: string; cancelled?: boolean
+        needsRepair?: boolean
         extensionId?: string
         extension?: unknown
         localPath?: string
       }> => ipcRenderer.invoke('extensions:installFromLocal') as Promise<{
         success: boolean; error?: string; cancelled?: boolean
+        needsRepair?: boolean
         extensionId?: string
         extension?: unknown
         localPath?: string

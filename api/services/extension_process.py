@@ -73,8 +73,17 @@ class ExtensionProcess:
         env["MODELS_DIR"]    = str(MODELS_DIR)
         env["WORKSPACE_DIR"] = str(WORKSPACE_DIR)
         env["MODLY_API_DIR"] = str(Path(__file__).parent.parent)
+        # Force the worker's Python stdio to UTF-8 so it matches the UTF-8
+        # pipe readers below regardless of the OS locale (cp1252/cp932).
+        env["PYTHONUTF8"] = "1"
         if sys.platform == "darwin":
             env.setdefault("NUMBA_DISABLE_JIT", "1")
+            # Must be set before the subprocess's first `import torch` — PyTorch
+            # reads this once to decide whether MPS ops with no Metal kernel
+            # (e.g. 3D pooling) fall back to CPU or raise NotImplementedError.
+            # Setting it inside generator.py is too late, since generator.py
+            # itself imports torch before calling select_device().
+            env.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
         # Pass the exact model_dir so runner.py doesn't have to re-derive it
         # from manifest["id"] (which is the ext_id, not the composite node id).
         # runner.py extracts the node id from MODEL_DIR's trailing path component.
@@ -110,6 +119,8 @@ class ExtensionProcess:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 env=self._build_env(),
             )
@@ -372,14 +383,24 @@ class ExtensionProcess:
         next load() starts a fresh subprocess.
         """
         proc = self._proc
-        self._proc   = None
         self._loaded = False
         if proc and proc.poll() is None:
             try:
                 proc.kill()
                 proc.wait(timeout=5)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Keep the process reference so callers can verify that the
+                # worker may still be alive and refuse to mutate its venv.
+                self._proc = proc
+                raise RuntimeError(
+                    f"[{self.MODEL_ID}] Could not stop extension subprocess"
+                ) from exc
+            if proc.poll() is None:
+                self._proc = proc
+                raise RuntimeError(
+                    f"[{self.MODEL_ID}] Extension subprocess is still running"
+                )
+        self._proc = None
         self._drain_queue()
 
     def _drain_queue(self) -> None:

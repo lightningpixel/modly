@@ -11,6 +11,7 @@ import {
   formatBytes,
   getNodeState,
 } from './extensionShared'
+import { finishExtensionRepair, isExtensionRepairable } from '../utils'
 
 interface Props {
   ext:              AnyExtension
@@ -24,7 +25,7 @@ interface Props {
   onCancelDownload: (fullId: string) => void
   onUninstallNode:  (fullId: string) => void
   onUninstall:      (extId: string) => void
-  onRepaired:       () => void
+  onRepaired:       () => void | Promise<void>
   onSynced:         () => void
   onClose:          () => void
 }
@@ -44,11 +45,12 @@ export function ExtensionDrawer({
   // Built-ins are corrupted-flagged too (builtin-sync repairs them on restart),
   // but they can't be deleted — show the banner without the delete action.
   const isCorrupted = !!ext.corrupted
+  const canRepair   = isExtensionRepairable(ext)
   const corruptedMsg =
     ext.manifestError === 'invalid'
       ? 'This extension folder has a manifest that cannot be parsed. Fix the JSON syntax in its manifest.json, or delete the folder and reinstall.'
       : ext.manifestError === 'incomplete'
-        ? 'A previous install of this extension never completed. Delete the folder, then install the extension again.'
+        ? 'Setup or runtime registration was interrupted. Click Repair to rebuild and validate the extension, or delete it and reinstall.'
         : 'This extension folder is incomplete (its manifest is missing) — usually the leftover of an interrupted install. Delete the folder, then install the extension again.'
   const isLocal = typeof ext.source === 'string' && ext.source.startsWith('local://')
   const localPath = isLocal ? ext.source!.replace('local://', '') : null
@@ -64,9 +66,8 @@ export function ExtensionDrawer({
     setRepairing(true)
     setRepairError(null)
     const result = await window.electron.extensions.repair(ext.id)
+    setRepairError(await finishExtensionRepair(result, onRepaired))
     setRepairing(false)
-    if (result.success) onRepaired()
-    else setRepairError(result.error ?? 'Repair failed')
   }
 
   async function handleSync() {
@@ -196,7 +197,7 @@ export function ExtensionDrawer({
                           <div className="flex items-center gap-1.5">
                             <NodeInstallControl
                               state={state}
-                              disabled={disabled}
+                              disabled={disabled || isCorrupted}
                               onInstall={() => onInstall(node, fullId)}
                               onPause={() => onPauseDownload(fullId)}
                               onResume={() => onInstall(node, fullId)}
@@ -205,7 +206,7 @@ export function ExtensionDrawer({
                             {state.kind === 'installed' && (
                               <button
                                 onClick={() => onUninstallNode(fullId)}
-                                disabled={disabled}
+                                disabled={disabled || isCorrupted}
                                 title="Remove model weights"
                                 className="p-1 rounded-md text-zinc-600 hover:text-red-400 hover:bg-red-950/40 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                               >
@@ -301,7 +302,7 @@ export function ExtensionDrawer({
             </button>
           )}
 
-          {isModel && !isCorrupted && (
+          {canRepair && (
             <button
               onClick={handleRepair}
               disabled={repairing || disabled}

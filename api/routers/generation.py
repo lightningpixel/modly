@@ -14,6 +14,10 @@ from schemas.generation import JobStatus
 
 router = APIRouter(tags=["generation"])
 
+# Shared with workflow_runs.create_run_from_image so the two endpoints can't drift apart on
+# what counts as a valid remesh mode the way they had drifted on `collection` before #238.
+VALID_REMESH_MODES = ("quad", "triangle", "none")
+
 _jobs: Dict[str, JobStatus] = {}
 _cancelled: set = set()
 _cancel_events: Dict[str, threading.Event] = {}
@@ -32,6 +36,47 @@ def _purge_old_jobs() -> None:
         _completed_at.pop(jid, None)
 
 
+def sanitize_collection(collection: str) -> str:
+    """Normalize a caller-supplied collection name into a safe workspace subfolder.
+
+    The value becomes a directory under the workspace (``WORKSPACE_DIR / collection``), so a
+    name carrying a path separator or a drive/wildcard character could escape that root or fail
+    to create on Windows. Such a name, or an empty one, falls back to ``"Default"`` rather than
+    raising, because a generation the caller already paid for should still land somewhere
+    sensible. Shared so every entry point that routes output into a collection sanitizes it the
+    same way; a second copy of this rule is a second chance to forget a character.
+
+    Legality and containment are different questions, so they are asked separately: the
+    reserved characters above are refused outright, and containment is put to the path
+    library rather than to the spelling -- the same ``relative_to`` check
+    ``generator_registry._path_belongs_to`` uses, so the two containment checks in this
+    backend agree rather than drifting on their own semantics. A character blocklist alone
+    lets ``".."`` through -- it contains none of the listed characters -- and
+    ``WORKSPACE_DIR / ".."`` resolves to the workspace's *parent*, so the generated mesh
+    would land outside the root.
+
+    A name ending in a dot or space is refused too, even once it clears both checks above:
+    Windows silently drops trailing dots/spaces from the final path component it actually
+    creates, so ``mkdir()`` on ``"Exports..."`` lands in the very same folder as
+    ``"Exports"`` -- two collections that look distinct to this function would otherwise
+    merge their output on disk without either caller being told.
+    """
+    collection = (collection or "").strip()
+    if (
+        not collection
+        or _re.search(r'[/:*?"<>|\\]', collection)
+        or collection != collection.rstrip(". ")
+    ):
+        return "Default"
+
+    try:
+        (WORKSPACE_DIR / collection).resolve().relative_to(WORKSPACE_DIR.resolve())
+    except (OSError, ValueError):
+        return "Default"
+
+    return collection
+
+
 @router.post("/from-image")
 async def generate_from_image(
     background_tasks: BackgroundTasks,
@@ -46,13 +91,10 @@ async def generate_from_image(
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(400, "File must be an image")
 
-    if remesh not in ("quad", "triangle", "none"):
+    if remesh not in VALID_REMESH_MODES:
         raise HTTPException(400, "remesh must be 'quad', 'triangle', or 'none'")
 
-    # Sanitize collection name: strip, forbid path separators and special chars
-    collection = collection.strip()
-    if not collection or _re.search(r'[/:*?"<>|\\]', collection):
-        collection = "Default"
+    collection = sanitize_collection(collection)
 
     # Verify the requested model exists in the registry
     try:
@@ -127,6 +169,9 @@ async def _run_generation(job_id: str, image_bytes: bytes, params: dict, collect
     job.status = "running"
 
     def progress_cb(pct: int, step: str = "") -> None:
+        # Monotonic: the loading phase walks the bar up on a background thread and
+        # extensions then report their own 0->100 scale, so an unguarded assignment
+        # yanks the bar backwards on the first generation progress message.
         if pct > job.progress:
             job.progress = pct
         if step:

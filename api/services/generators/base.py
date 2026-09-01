@@ -11,6 +11,43 @@ class GenerationCancelled(Exception):
     """Raised by generators when a cancel_event is set mid-generation."""
 
 
+def select_device() -> str:
+    """
+    Picks the best torch device available on this machine: CUDA (NVIDIA) ->
+    MPS (Apple Silicon) -> CPU. Extensions should call this instead of
+    hardcoding `.cuda()` / `torch.cuda.is_available()` so device logic lives
+    in one place and Windows/CUDA behavior is unaffected.
+
+    PyTorch only falls back to CPU for MPS ops with no Metal kernel (e.g. 3D
+    pooling) — instead of raising NotImplementedError — if
+    PYTORCH_ENABLE_MPS_FALLBACK=1 is set *before the process's first `import
+    torch`*. That's set for every extension subprocess in
+    ExtensionProcess._build_env(); the setdefault() below is just a
+    best-effort backstop for callers that reach select_device() before
+    importing torch themselves.
+    """
+    import os
+    import torch
+
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+        return "mps"
+    return "cpu"
+
+
+def select_dtype(device: str):
+    """
+    Picks a safe default dtype for `device`. MPS has incomplete fp16 kernel
+    coverage (attention, layer norm, some interpolation ops), so extensions
+    get fp32 there and on CPU; CUDA keeps fp16 for speed/memory.
+    """
+    import torch
+
+    return torch.float16 if device == "cuda" else torch.float32
+
+
 def smooth_progress(
     progress_cb: Callable[[int, str], None],
     start: int,
@@ -83,6 +120,8 @@ class BaseGenerator(ABC):
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            elif torch.backends.mps.is_available():
+                torch.mps.empty_cache()
         except ImportError:
             pass
         # Force the OS to reclaim unused memory from this process
@@ -155,7 +194,7 @@ class BaseGenerator(ABC):
 
         from huggingface_hub import snapshot_download
 
-        print(f"[{self.__class__.__name__}] Downloading {self.hf_repo} → {self.model_dir} …")
+        print(f"[{self.__class__.__name__}] Downloading {self.hf_repo} -> {self.model_dir} ...")
         self.model_dir.mkdir(parents=True, exist_ok=True)
 
         ignore = list(self.hf_skip_prefixes) + [

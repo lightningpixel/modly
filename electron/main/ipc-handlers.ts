@@ -1,4 +1,4 @@
-import { ipcMain, BrowserWindow, dialog, app, shell } from 'electron'
+import { ipcMain, BrowserWindow, Notification, dialog, app, shell } from 'electron'
 import { buildSync } from 'esbuild'
 import { autoUpdater } from 'electron-updater'
 import { join } from 'path'
@@ -21,20 +21,41 @@ import { getProcessRunner, getPythonProcessRunner, getExtPythonExe, terminatePro
 import { getBuiltinExtensionsDir } from './builtin-sync'
 import { spawn, execFile } from 'child_process'
 import {
-  EXT_BACKUP_PREFIX,
   EXT_INCOMPLETE_MARKER,
-  EXT_STAGING_PREFIX,
+  EXT_REGISTRATION_PENDING_MARKER,
+  EXT_VALIDATED_MARKER,
   assertSafeExtensionId,
   buildExtensionBackupPath,
   buildExtensionStagingPath,
   isInternalExtensionDirName,
-  parseExtensionBackupName,
   resolveExtensionPathWithinRoot,
-  resolvePathWithinRoot,
 } from './extension-path-guard'
-import { validateInstallManifest } from './extension-install-utils'
 import { detectGpuInfo, describeGpuInfo, torchFlavorFor, type GpuInfo } from './gpu-detect'
 import { SETUP_LAUNCHER_SOURCE } from './setup-launcher'
+import {
+  assertCompatibleExtensionUpdateType,
+  expectedModelIds,
+  markExtensionInstallationInterrupted,
+  validateExtensionQuarantinePayload,
+  validateExtensionReloadPayload,
+  validateExistingExtensionReplacement,
+  validateInstallManifest,
+} from './extension-install-utils'
+import {
+  beginExtensionRegistrationTransaction,
+  clearExtensionRegistrationTransaction,
+  cleanupValidatedExtensionBackups,
+  quarantineExtensionRegistrationFailure,
+  parseExtensionRegistrationPendingName,
+  removeExtensionWithBackups,
+  renameWithRetry as renameExtensionWithRetry,
+  restoreExtensionBackup,
+  rmWithRetry as removeExtensionWithRetry,
+  runExtensionRegistrationValidationTransaction,
+  runExtensionRepairTransaction,
+  type ExtensionRegistrationValidationCapability,
+  validateExtensionDestinationRegistration,
+} from './extension-install-recovery'
 import { registerWorkspaceAssetLibraryIpcHandlers } from './artifact-registry-service'
 import { updatesSupported } from './updater'
 
@@ -108,91 +129,16 @@ function runExtensionSetup(
   })
 }
 
-// ─── Robust directory removal / rename ────────────────────────────────────────
-// On Windows the first attempt routinely fails with EBUSY/EPERM while the
-// antivirus or a dying python process still holds files open — which used to
-// leave half-deleted extension folders behind. Locked errors are retried with
-// a progressive backoff; any other error fails immediately.
-
-const FS_RETRY_DELAYS_MS = [200, 500, 1500, 2500]
-
-function isLockedFsError(err: unknown): boolean {
-  const code = (err as NodeJS.ErrnoException).code
-  return code === 'EBUSY' || code === 'EPERM' || code === 'EACCES'
-}
-
-type FsRetryResult = { ok: true } | { ok: false; locked: boolean; error: unknown }
-
-async function fsWithRetry(op: () => Promise<void>, label: string, target: string): Promise<FsRetryResult> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      await op()
-      return { ok: true }
-    } catch (err) {
-      if (!isLockedFsError(err) || attempt === FS_RETRY_DELAYS_MS.length) {
-        logger.warn(`[${label}] ${target}: ${err}`)
-        return { ok: false, locked: isLockedFsError(err), error: err }
-      }
-      await new Promise((r) => setTimeout(r, FS_RETRY_DELAYS_MS[attempt]))
-    }
-  }
-}
-
-const rmWithRetry = (path: string, label: string): Promise<FsRetryResult> =>
-  fsWithRetry(() => rmAsync(path, { recursive: true, force: true }), label, path)
-
-const renameWithRetry = (from: string, to: string, label: string): Promise<FsRetryResult> =>
-  fsWithRetry(() => rename(from, to), label, `${from} -> ${to}`)
-
 // Extension ids with an install currently in flight. Their folder carries the
 // incomplete marker during setup — extensions:list must not report it as
 // corrupted while the install is legitimately running.
 const activeExtensionInstalls = new Set<string>()
+const rmWithRetry = (path: string, label: string) =>
+  removeExtensionWithRetry(path, label, logger)
+const renameWithRetry = (from: string, to: string, label: string) =>
+  renameExtensionWithRetry(from, to, label, logger)
 
 export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGetter): void {
-  // Reconcile leftovers of interrupted installs. No install can be in flight
-  // this early in the app's life, so anything matching is stale:
-  //  - staging dirs → discard (never the only copy of anything)
-  //  - extension dir still carrying the incomplete marker + a backup exists
-  //    → the install crashed mid-setup: put the previous version back
-  //  - backup dirs → restore if the extension folder is gone, else discard
-  void (async () => {
-    try {
-      const extensionsDir = getSettings(app.getPath('userData')).extensionsDir
-      const entries = await readdir(extensionsDir, { withFileTypes: true })
-      const names   = entries.map((e) => e.name)
-
-      await Promise.allSettled(
-        names
-          .filter((n) => n.startsWith(EXT_STAGING_PREFIX))
-          .map((n) => rmWithRetry(join(extensionsDir, n), 'ext-cleanup')),
-      )
-
-      // Newest backup first, so the most recent good version wins a restore
-      const backups = names.filter((n) => n.startsWith(EXT_BACKUP_PREFIX)).sort().reverse()
-      for (const name of backups) {
-        const backupPath = join(extensionsDir, name)
-        const parsed = parseExtensionBackupName(name)
-        if (!parsed) { await rmWithRetry(backupPath, 'ext-cleanup'); continue }
-
-        const destDir        = join(extensionsDir, parsed.extensionId)
-        const destIncomplete = existsSync(join(destDir, EXT_INCOMPLETE_MARKER))
-        if (existsSync(destDir) && !destIncomplete) {
-          // Install completed; only the backup's own cleanup had failed
-          await rmWithRetry(backupPath, 'ext-cleanup')
-          continue
-        }
-        // Crash mid-swap or mid-setup: this backup is the last good copy
-        if (destIncomplete) {
-          const removed = await rmWithRetry(destDir, 'ext-restore')
-          if (!removed.ok) continue   // keep the backup; retried next launch
-        }
-        const restored = await renameWithRetry(backupPath, destDir, 'ext-restore')
-        if (restored.ok) logger.info(`[ext-restore] restored "${parsed.extensionId}" from ${name}`)
-      }
-    } catch { /* best-effort; extensionsDir may not exist yet */ }
-  })()
-
   const activeDownloads = new Map<string, { percent: number; file?: string; fileIndex?: number; totalFiles?: number }>()
   // Logging from renderer
   ipcMain.on('log:error', (_event, message: string) => logger.error(`[Renderer] ${message}`))
@@ -234,6 +180,29 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
   ipcMain.on('window:close', () => getWindow()?.close())
   ipcMain.handle('window:isMaximized', () => getWindow()?.isMaximized() ?? false)
+
+  // Native OS notification (Windows toast / macOS Notification Center / Linux),
+  // for events the user wants to know about even when the window is minimized or
+  // behind other apps — e.g. a generation or workflow run finishing. Routed through
+  // the main process rather than the renderer's own Notification API so it works
+  // the same way regardless of focus and carries the app's own icon.
+  ipcMain.handle('notifications:show', (_event, title: string, body: string) => {
+    if (!Notification.isSupported()) return { success: false, error: 'Notifications not supported' }
+    const notification = new Notification({
+      title,
+      body,
+      icon: join(__dirname, '../../resources/icons/icon.png'),
+    })
+    notification.on('click', () => {
+      const win = getWindow()
+      if (!win) return
+      if (win.isMinimized()) win.restore()
+      win.show()
+      win.focus()
+    })
+    notification.show()
+    return { success: true }
+  })
 
   // Setup handlers — skipped in dev (uses .venv instead of python-embed)
   ipcMain.handle('setup:check', async () => {
@@ -816,6 +785,119 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     return { ...common, type: 'model' as const, nodes }
   }
 
+  async function reloadAndValidateModelExtension(
+    manifest: ParsedManifest,
+    extensionId: string,
+    validationCapability?: ExtensionRegistrationValidationCapability,
+  ): Promise<void> {
+    const expectedIds = expectedModelIds({ ...manifest, id: extensionId })
+    if (expectedIds.length === 0) return
+
+    let payload: unknown
+    try {
+      const response = await axios.post(
+        `${API_BASE_URL}/extensions/reload`,
+        validationCapability ? { validationCapability } : {},
+        { timeout: 10_000 },
+      )
+      payload = response.data
+    } catch (err) {
+      throw new Error(
+        `Could not validate runtime registration for extension "${extensionId}": ${String(err)}`,
+      )
+    }
+    validateExtensionReloadPayload(payload, extensionId, expectedIds)
+  }
+
+  async function quarantineModelExtensionRuntime(
+    manifest: ParsedManifest,
+    extensionId: string,
+  ): Promise<void> {
+    const forbiddenIds = expectedModelIds({ ...manifest, id: extensionId })
+    if (forbiddenIds.length === 0) return
+
+    let payload: unknown
+    try {
+      const response = await axios.post(
+        `${API_BASE_URL}/extensions/reload`,
+        {},
+        { timeout: 10_000 },
+      )
+      payload = response.data
+    } catch (err) {
+      throw new Error(
+        `Could not quarantine runtime registration for extension "${extensionId}": `
+        + `${String(err)}`,
+      )
+    }
+    validateExtensionQuarantinePayload(payload, extensionId, forbiddenIds)
+  }
+
+  async function rollbackFailedExtensionUpdate(
+    extensionsDir: string,
+    destinationDir: string,
+    backupDir: string,
+    extensionId: string,
+    originalFailure: unknown,
+  ): Promise<never> {
+    const restored = await restoreExtensionBackup(destinationDir, backupDir, logger)
+    if (!restored.ok) {
+      throw new Error(
+        `Extension update failed, and Modly could not restore the previous version `
+        + `during ${restored.stage}: ${String(restored.error)}. `
+        + `Restart Modly to retry recovery. Original failure: ${String(originalFailure)}`,
+      )
+    }
+
+    const stateCleared = await clearExtensionRegistrationTransaction(
+      extensionsDir,
+      extensionId,
+      logger,
+    )
+    if (!stateCleared.ok) {
+      throw new Error(
+        `Extension update failed and the previous version was restored, but Modly `
+        + `could not clear recovery state during ${stateCleared.stage}: `
+        + `${String(stateCleared.error)}. Original failure: ${String(originalFailure)}`,
+      )
+    }
+
+    try {
+      const previousManifest = JSON.parse(
+        await readFile(join(destinationDir, 'manifest.json'), 'utf-8'),
+      ) as ParsedManifest
+      if (previousManifest.type !== 'process') {
+        await reloadAndValidateModelExtension(previousManifest, extensionId)
+      }
+    } catch (reloadError) {
+      throw new Error(
+        `Extension update failed and the previous version was restored on disk, `
+        + `but Modly could not reload it: ${String(reloadError)}. `
+        + `Original failure: ${String(originalFailure)}`,
+      )
+    }
+
+    throw new Error(
+      `Extension update failed before runtime registration could be committed, `
+      + `so the previous version was restored. `
+      + `${String(originalFailure)}`,
+    )
+  }
+
+  async function cleanupValidatedBackupsOrThrow(
+    extensionsDir: string,
+    extensionId: string,
+  ): Promise<void> {
+    const cleaned = await cleanupValidatedExtensionBackups(extensionsDir, extensionId, logger)
+    if (!cleaned.ok) {
+      throw new Error(
+        `Runtime registration succeeded, but Modly could not finish removing the previous `
+        + `extension backup during ${cleaned.stage}: ${String(cleaned.error)}. `
+        + `Restart Modly to retry the validated cleanup.`,
+      )
+    }
+  }
+
   // Extensions — reads user extensions directory + built-in extensions directory
   ipcMain.handle('extensions:list', async () => {
     const userData      = app.getPath('userData')
@@ -828,6 +910,13 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       if (!existsSync(dir)) return []
       try {
         const entries = await readdir(dir, { withFileTypes: true })
+        const pendingRegistrationIds = new Set(
+          isBuiltin
+            ? []
+            : entries
+              .map((entry) => parseExtensionRegistrationPendingName(entry.name)?.extensionId)
+              .filter((extensionId): extensionId is string => Boolean(extensionId)),
+        )
         // On Windows, junction points are reported by Node.js as isSymbolicLink()=true,
         // isDirectory()=false. Use statSync (which follows links) as the authoritative check.
         const dirs = entries.filter(e => {
@@ -843,12 +932,15 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
           const entryPath = join(dir, entry.name)
           const skeleton  = { type: 'model' as const, id: entry.name, name: entry.name, trusted: isBuiltin, builtin: isBuiltin, nodes: [], corrupted: true }
 
-          // Marker still present → an install of this folder never completed.
-          // Hidden entirely while that install is still in flight.
-          if (existsSync(join(entryPath, EXT_INCOMPLETE_MARKER))) {
-            if (activeExtensionInstalls.has(entry.name)) return null
-            return { ...skeleton, manifestError: 'incomplete' as const }
-          }
+          // A setup/registration marker still present means this folder is not
+          // safe to expose. Hide it only while the current install owns it;
+          // after a failed startup recovery, surface it as Repairable instead.
+          const installInterrupted = (
+            existsSync(join(entryPath, EXT_INCOMPLETE_MARKER))
+            || existsSync(join(entryPath, EXT_REGISTRATION_PENDING_MARKER))
+            || pendingRegistrationIds.has(entry.name)
+          )
+          if (installInterrupted && activeExtensionInstalls.has(entry.name)) return null
 
           // Detect local extensions: check for .modly-local sentinel
           let localSourcePath: string | undefined
@@ -872,11 +964,19 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
                 const parsed = JSON.parse(raw) as ParsedManifest
                 // Inject local:// source so the UI shows the Local badge
                 if (localSourcePath) parsed.source = `local://${localSourcePath}`
-                return parseExtensionManifest(parsed, entry.name, trustedRepos, isBuiltin)
+                const extension = parseExtensionManifest(
+                  parsed,
+                  entry.name,
+                  trustedRepos,
+                  isBuiltin,
+                )
+                return markExtensionInstallationInterrupted(extension, installInterrupted)
               } catch { manifestError = 'invalid' }
             }
           }
-          return { ...skeleton, manifestError }
+          return installInterrupted
+            ? markExtensionInstallationInterrupted(skeleton, true)
+            : { ...skeleton, manifestError }
         }))
         return results.filter((e): e is Exclude<typeof e, null> => e !== null)
       } catch {
@@ -973,11 +1073,44 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       //    previous version back.
       const extensionsDir = getSettings(app.getPath('userData')).extensionsDir
       await mkdir(extensionsDir, { recursive: true })
+      const installSuffix = String(Date.now())
       const destDir    = resolveExtensionPathWithinRoot(extensionsDir, extensionId)
-      const stagingDir = buildExtensionStagingPath(extensionsDir, extensionId, String(Date.now()))
+      const stagingDir = buildExtensionStagingPath(extensionsDir, extensionId, installSuffix)
+
+      if (existsSync(destDir)) {
+        const currentManifestPath = join(destDir, 'manifest.json')
+        let currentManifestJson: string
+        try {
+          currentManifestJson = await readFile(currentManifestPath, 'utf-8')
+        } catch (error) {
+          throw new Error(
+            `Cannot safely replace extension "${extensionId}" because its existing `
+            + `manifest.json is missing or unreadable. Uninstall it first. ${String(error)}`,
+          )
+        }
+        validateExistingExtensionReplacement(
+          currentManifestJson,
+          manifest,
+          {
+            hasEntryFile: (candidate) => existsSync(join(destDir, candidate)),
+            hasGeneratorFile: () => existsSync(join(destDir, 'generator.py')),
+          },
+          'existing extension folder',
+        )
+      }
 
       try {
         await cp(extractDir, stagingDir, { recursive: true })
+        // Reserved recovery files are host-owned transaction state, never
+        // repository content. Strip packaged/stale copies before activation.
+        await rmAsync(
+          join(stagingDir, EXT_REGISTRATION_PENDING_MARKER),
+          { recursive: true, force: true },
+        )
+        await rmAsync(
+          join(stagingDir, EXT_VALIDATED_MARKER),
+          { recursive: true, force: true },
+        )
         await writeFile(join(stagingDir, EXT_INCOMPLETE_MARKER), new Date().toISOString(), 'utf-8')
 
         // Compile TypeScript entry to JS at install time (once, no runtime overhead)
@@ -1002,7 +1135,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
       // 6. Swap into place (backup the previous version first)
       terminateProcessRunner(extensionId)
-      const backupDir = existsSync(destDir) ? buildExtensionBackupPath(extensionsDir, extensionId, String(Date.now())) : null
+      const backupDir = existsSync(destDir)
+        ? buildExtensionBackupPath(extensionsDir, extensionId, installSuffix)
+        : null
       if (backupDir) {
         const parked = await renameWithRetry(destDir, backupDir, 'ext-install')
         if (!parked.ok) {
@@ -1015,6 +1150,29 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         await rmWithRetry(stagingDir, 'ext-install')
         if (backupDir) await renameWithRetry(backupDir, destDir, 'ext-install')
         throw new Error('Could not move the staged extension into place — the folder is locked. Try again.')
+      }
+
+      // Persist transaction state beside extension folders, never inside a
+      // destination or backup that may be a symlink to developer source.
+      const pending = await beginExtensionRegistrationTransaction(
+        extensionsDir,
+        extensionId,
+        installSuffix,
+        logger,
+      )
+      if (!pending.ok) {
+        if (backupDir) {
+          await rollbackFailedExtensionUpdate(
+            extensionsDir,
+            destDir,
+            backupDir,
+            extensionId,
+            `Could not mark the update as pending: ${String(pending.error)}`,
+          )
+        } else {
+          await rmWithRetry(destDir, 'ext-install')
+        }
+        throw new Error(`Could not mark extension registration as pending: ${String(pending.error)}`)
       }
 
       // 7. Setup runs in the final folder; a failure restores the previous version
@@ -1036,7 +1194,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
             emit({ step: 'setting_up', message: 'Installing dependencies…' })
             await new Promise<void>((resolve, reject) => {
               const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-              const child = spawn(npm, ['install', '--omit=dev', '--no-audit', '--no-fund'], {
+              const child = spawn(npm, ['install', '--omit=dev', '--no-audit', '--no-fund', '--ignore-scripts=false'], {
                 cwd:   destDir,
                 stdio: 'pipe',
               })
@@ -1072,24 +1230,104 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         // Discard the half-set-up folder and put the previous version back. If
         // the folder is locked, the marker keeps it flagged corrupted and the
         // startup reconciler restores the backup on next launch.
-        const discarded = await rmWithRetry(destDir, 'ext-install')
-        if (discarded.ok && backupDir) await renameWithRetry(backupDir, destDir, 'ext-install')
+        if (backupDir) {
+          const restored = await restoreExtensionBackup(destDir, backupDir, logger)
+          if (!restored.ok) {
+            throw new Error(
+              `Extension setup failed, and Modly could not restore the previous version `
+              + `during ${restored.stage}: ${String(restored.error)}. `
+              + `Restart Modly to retry recovery. Original failure: ${String(setupErr)}`,
+            )
+          }
+          const cleared = await clearExtensionRegistrationTransaction(
+            extensionsDir,
+            extensionId,
+            logger,
+          )
+          if (!cleared.ok) {
+            throw new Error(
+              `Extension setup failed and the previous version was restored, but Modly `
+              + `could not clear recovery state during ${cleared.stage}: ${String(cleared.error)}.`,
+            )
+          }
+        } else {
+          const removed = await rmWithRetry(destDir, 'ext-install')
+          if (removed.ok) {
+            const cleared = await clearExtensionRegistrationTransaction(
+              extensionsDir,
+              extensionId,
+              logger,
+            )
+            if (!cleared.ok) {
+              throw new Error(
+                `Extension setup failed and its incomplete folder was removed, but Modly `
+                + `could not clear recovery state during ${cleared.stage}: ${String(cleared.error)}.`,
+              )
+            }
+          }
+        }
         throw setupErr
       }
 
-      // 8. Success: clear the marker, then drop the backup. The backup is only
-      //    discarded once the marker is confirmed gone — a still-marked folder
-      //    would make the startup reconciler restore the backup over this
-      //    freshly completed install.
-      const markerGone = await rmWithRetry(join(destDir, EXT_INCOMPLETE_MARKER), 'ext-install')
-      if (backupDir && markerGone.ok) void rmWithRetry(backupDir, 'ext-install')
-
-      // Hot-reload Python so it picks up the new/updated model extension
-      if (!isProcess) {
-        try {
-          await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
-        } catch { /* Python might not be running yet */ }
+      // 8. Setup succeeded. Root-level transaction state remains pending while
+      //    the new destination is explicitly validated. A crash or failure in
+      //    this window restores a backup or quarantines a fresh destination.
+      try {
+        await validateExtensionDestinationRegistration(
+          destDir,
+          async () => {
+            if (!isProcess) {
+              await reloadAndValidateModelExtension(
+                manifest,
+                extensionId,
+                pending.validationCapability,
+              )
+            }
+          },
+          'ext-install',
+          logger,
+        )
+      } catch (registrationError) {
+        if (backupDir) {
+          await rollbackFailedExtensionUpdate(
+            extensionsDir,
+            destDir,
+            backupDir,
+            extensionId,
+            registrationError,
+          )
+        } else {
+          const quarantined = await quarantineExtensionRegistrationFailure(
+            extensionsDir,
+            extensionId,
+            logger,
+          )
+          if (!quarantined.ok) {
+            throw new Error(
+              `Runtime registration failed, and Modly could not quarantine the extension `
+              + `during ${quarantined.stage}: ${String(quarantined.error)}. `
+              + `Restart Modly to retry recovery. Original failure: ${String(registrationError)}`,
+            )
+          }
+          if (!isProcess) {
+            try {
+              await quarantineModelExtensionRuntime(manifest, extensionId)
+            } catch (runtimeQuarantineError) {
+              throw new Error(
+                `Runtime registration failed and filesystem quarantine was preserved, `
+                + `but Modly could not evict partially registered model state: `
+                + `${String(runtimeQuarantineError)}. `
+                + `Original failure: ${String(registrationError)}`,
+              )
+            }
+          }
+        }
+        throw registrationError
       }
+
+      // Runtime validation passed. Mark cleanup as validated before deleting
+      // rollback copies so startup can safely retry an interrupted deletion.
+      await cleanupValidatedBackupsOrThrow(extensionsDir, extensionId)
 
       emit({ step: 'done', extensionId })
 
@@ -1116,7 +1354,6 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       // strict id pattern still guards the built-in check — a non-conforming
       // name can never be a built-in.
       const extensionsDir = getSettings(app.getPath('userData')).extensionsDir
-      const extPath       = resolvePathWithinRoot(extensionsDir, String(extensionId))
 
       try {
         const safeExtensionId = assertSafeExtensionId(extensionId)
@@ -1128,13 +1365,19 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       // Terminate process runner if it's a process extension
       terminateProcessRunner(extensionId)
 
-      const removed = await rmWithRetry(extPath, 'ext-uninstall')
+      const removed = await removeExtensionWithBackups(
+        extensionsDir,
+        String(extensionId),
+        logger,
+      )
       if (!removed.ok) {
         return {
           success: false,
           error: removed.locked
-            ? 'Could not delete the extension folder — a file inside it is locked (antivirus or a running process). Close what might be using it and try again.'
-            : String(removed.error),
+            ? `Could not delete the extension ${removed.stage === 'backup' ? 'backup' : 'folder'} `
+              + '— a file inside it is locked (antivirus or a running process). '
+              + 'Close what might be using it and try again.'
+            : `Could not uninstall the extension during ${removed.stage}: ${String(removed.error)}`,
         }
       }
       // Hot-reload Python so it stops using the deleted model extension
@@ -1151,16 +1394,52 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   ipcMain.handle('extensions:repair', async (_, extensionId: string) => {
     try {
       const safeExtensionId = assertSafeExtensionId(extensionId)
-      const extDir = resolveExtensionPathWithinRoot(getSettings(app.getPath('userData')).extensionsDir, safeExtensionId)
+      const extensionsDir = getSettings(app.getPath('userData')).extensionsDir
+      const extDir = resolveExtensionPathWithinRoot(extensionsDir, safeExtensionId)
       if (!existsSync(join(extDir, 'setup.py'))) {
         return { success: false, error: 'setup.py is missing from the extension folder — the install looks incomplete. Uninstall the extension and install it again.' }
       }
+      const manifestRaw = await readFile(join(extDir, 'manifest.json'), 'utf-8')
+      const manifest = JSON.parse(manifestRaw) as ParsedManifest
+      const { isProcess } = validateInstallManifest(
+        manifest,
+        {
+          hasEntryFile: (candidate) => existsSync(join(extDir, candidate)),
+          hasGeneratorFile: () => existsSync(join(extDir, 'generator.py')),
+        },
+        'extension folder',
+      )
       const gpu = await detectGpuInfo({ onLog: (line) => logger.info(line) })
       logger.info(`[ext-repair] ${describeGpuInfo(gpu)}`)
-      await runExtensionSetup(extDir, gpu, (line) => logger.info(`[ext-repair] ${line}`))
-      try {
-        await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
-      } catch { /* ignore if Python is not running yet */ }
+      await runExtensionRepairTransaction(
+        {
+          extensionsDir,
+          extensionId: safeExtensionId,
+          destinationDir: extDir,
+          suffix: String(Date.now()),
+          quarantine: async () => {
+            terminateProcessRunner(safeExtensionId)
+            if (!isProcess) {
+              await quarantineModelExtensionRuntime(manifest, safeExtensionId)
+            }
+          },
+          setup: () => runExtensionSetup(
+            extDir,
+            gpu,
+            (line) => logger.info(`[ext-repair] ${line}`),
+          ),
+          validate: async (validationCapability) => {
+            if (!isProcess) {
+              await reloadAndValidateModelExtension(
+                manifest,
+                safeExtensionId,
+                validationCapability,
+              )
+            }
+          },
+        },
+        logger,
+      )
       return { success: true }
     } catch (err: any) {
       return { success: false, error: `Repair failed: ${err?.message ?? err}` }
@@ -1193,7 +1472,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       const manifestRaw = await readFile(manifestPath, 'utf-8')
       const manifest    = JSON.parse(manifestRaw) as ParsedManifest
 
-      const { id: rawManifestId } = validateInstallManifest(
+      const { id: rawManifestId, isProcess } = validateInstallManifest(
         manifest,
         {
           hasEntryFile:     (candidate) => existsSync(join(localPath, candidate)),
@@ -1209,49 +1488,121 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       await mkdir(extensionsDir, { recursive: true })
 
       const linkPath = resolveExtensionPathWithinRoot(extensionsDir, extensionId)
+      const installSuffix = String(Date.now())
+      let backupDir: string | null = null
 
-      // Remove any existing symlink/dir at that location
+      // Inspect an existing local link without mutating it. The host-side
+      // pending transaction is created before the link is ever parked or
+      // replaced, so a crash cannot expose the new target as validated.
       if (existsSync(linkPath)) {
-        // Check if it's already linked to the same path
-        try {
-          const stat = await lstat(linkPath)
-          if (stat.isSymbolicLink() || (process.platform === 'win32' && stat.isDirectory())) {
-            await rmAsync(linkPath, { recursive: true, force: true })
-          } else {
-            throw new Error(`A non-symlink folder named "${extensionId}" already exists in extensionsDir. Remove it first.`)
-          }
-        } catch (e: any) {
-          if (e.message?.includes('already exists')) throw e
-          await rmAsync(linkPath, { recursive: true, force: true })
+        const currentManifestPath = join(linkPath, 'manifest.json')
+        if (!existsSync(currentManifestPath)) {
+          throw new Error(
+            `Cannot safely replace local extension "${extensionId}" because its existing `
+            + 'manifest.json is missing. Uninstall it first.',
+          )
         }
+        const currentManifest = JSON.parse(
+          await readFile(currentManifestPath, 'utf-8'),
+        ) as ParsedManifest
+        assertCompatibleExtensionUpdateType(currentManifest, manifest)
+
+        const linkStat = await lstat(linkPath)
+        if (!linkStat.isSymbolicLink() && !(process.platform === 'win32' && linkStat.isDirectory())) {
+          throw new Error(
+            `A non-symlink folder named "${extensionId}" already exists in `
+            + 'extensionsDir. Remove it first.',
+          )
+        }
+        backupDir = buildExtensionBackupPath(extensionsDir, extensionId, installSuffix)
       }
-
-      emit({ step: 'setting_up', message: 'Linking local folder…' })
-
-      if (process.platform === 'win32') {
-        // Windows: junction (no elevation needed, works for directories)
-        await symlink(localPath, linkPath, 'junction')
-      } else {
-        // macOS / Linux: standard symlink
-        await symlink(localPath, linkPath)
-      }
-
-      // Write sentinel so extensions:list can detect this as a local extension
-      // The sentinel lives in the linked folder (= the original local folder), so
-      // it persists even if Modly is restarted. The content is the absolute path.
-      await writeFile(join(linkPath, '.modly-local'), localPath, 'utf-8')
-
-      // 4. Hot-reload Python registry so it picks up the new extension
-      try {
-        await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
-      } catch { /* Python might not be running yet */ }
-
-      emit({ step: 'done', extensionId })
 
       const trustedRepos = await fetchTrustedRepos()
       // Build manifest with localPath marker so the UI can identify local extensions
       const annotatedManifest = { ...manifest, source: `local://${localPath}` }
       const ext = parseExtensionManifest(annotatedManifest, extensionId, trustedRepos)
+
+      try {
+        await runExtensionRegistrationValidationTransaction(
+          {
+            extensionsDir,
+            extensionId,
+            suffix: installSuffix,
+            quarantine: async () => {
+              terminateProcessRunner(extensionId)
+              if (!isProcess) {
+                await quarantineModelExtensionRuntime(manifest, extensionId)
+              }
+            },
+            activate: async () => {
+              emit({ step: 'setting_up', message: 'Linking local folder…' })
+              if (backupDir) {
+                const parked = await renameWithRetry(linkPath, backupDir, 'ext-local')
+                if (!parked.ok) {
+                  throw new Error(
+                    `Could not preserve the previous local extension: `
+                    + `${String(parked.error)}`,
+                  )
+                }
+              }
+
+              if (process.platform === 'win32') {
+                // Windows: junction (no elevation needed, works for directories)
+                await symlink(localPath, linkPath, 'junction')
+              } else {
+                // macOS / Linux: standard symlink
+                await symlink(localPath, linkPath)
+              }
+
+              // The sentinel lives in the linked source folder. Runtime
+              // registration is still pending externally until validation.
+              await writeFile(join(linkPath, '.modly-local'), localPath, 'utf-8')
+            },
+            validate: async (validationCapability) => {
+              if (!isProcess) {
+                await reloadAndValidateModelExtension(
+                  manifest,
+                  extensionId,
+                  validationCapability,
+                )
+              }
+            },
+          },
+          logger,
+        )
+      } catch (err) {
+        if (backupDir && existsSync(backupDir)) {
+          await rollbackFailedExtensionUpdate(
+            extensionsDir,
+            linkPath,
+            backupDir,
+            extensionId,
+            err,
+          )
+        }
+
+        // Local links intentionally do not run setup. A fresh model that
+        // cannot register remains linked, externally quarantined, and visible
+        // only as a Repairable entry.
+        if (!isProcess && existsSync(linkPath)) {
+          const error = (
+            `The local extension was linked, but it is not runtime-ready. `
+            + `Click 'Repair' on its extension card, then retry. ${String(err)}`
+          )
+          emit({ step: 'error', extensionId, message: error })
+          return {
+            success: false,
+            needsRepair: true,
+            error,
+            extensionId,
+            extension: markExtensionInstallationInterrupted(ext, true),
+            localPath,
+          }
+        }
+        throw err
+      }
+
+      emit({ step: 'done', extensionId })
       return { success: true, extensionId, extension: ext, localPath }
 
     } catch (err) {
