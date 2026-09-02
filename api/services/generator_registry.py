@@ -461,10 +461,10 @@ def _discover_extensions(
                     and not (
                         registration_authorization is not None
                         and registration_authorization[0] == ext_id
-                        and registration_authorization[1].exists()
-                        and registration_authorization[2]
-                        == Path(os.path.abspath(ext_dir))
-                    )
+                    and registration_authorization[1].exists()
+                    and registration_authorization[2]
+                    == ext_dir.resolve()
+                )
                 )
             )
             if install_interrupted:
