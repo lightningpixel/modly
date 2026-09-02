@@ -7,6 +7,8 @@ import type {
   AssetLibraryOpenResult,
   AssetLibraryReadRequest,
   AssetLibraryReadResult,
+  AssetLibraryThumbnailRequest,
+  AssetLibraryThumbnailResult,
 } from './assetLibrary'
 
 // ─── Extension types ──────────────────────────────────────────────────────────
@@ -259,6 +261,7 @@ declare global {
           list: () => Promise<AssetLibraryListResult>
           read: (request: AssetLibraryReadRequest) => Promise<AssetLibraryReadResult>
           open: (request: AssetLibraryOpenRequest) => Promise<AssetLibraryOpenResult>
+          thumbnail: (request: AssetLibraryThumbnailRequest) => Promise<AssetLibraryThumbnailResult>
         }
       }
       setup: {

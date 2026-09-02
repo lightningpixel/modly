@@ -81,3 +81,13 @@ export type AssetLibraryReadResult =
 export type AssetLibraryOpenResult =
   | { success: true, entry: AssetLibraryEntry }
   | { success: false, error: AssetLibraryError }
+
+export interface AssetLibraryThumbnailRequest {
+  workspacePath: string
+}
+
+// Missing thumbnails are an expected, silent condition (not every asset has
+// a rendered preview), so failure carries no error payload for the UI to show.
+export type AssetLibraryThumbnailResult =
+  | { success: true, dataUrl: string }
+  | { success: false }
