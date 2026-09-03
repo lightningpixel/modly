@@ -15,3 +15,11 @@ export async function showCompletionNotification(body: string, title = 'Modly'):
     // Notifications not available (e.g. unsupported platform)
   }
 }
+
+export async function showErrorNotification(body: string, title = 'Modly'): Promise<void> {
+  try {
+    await window.electron.notifications.show(title, body)
+  } catch {
+    // Notifications not available (e.g. unsupported platform)
+  }
+}

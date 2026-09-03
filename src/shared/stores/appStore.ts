@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { showErrorNotification } from '@shared/utils/notification'
 
 export type UiScale = 'small' | 'medium' | 'large' | 'very-large'
 export type BackendStatus = 'not_started' | 'starting' | 'ready' | 'error'
@@ -290,6 +291,9 @@ export const useAppStore = create<AppState>()(
         const current = get().currentJob
         if (!current) return
         set({ currentJob: { ...current, ...patch } })
+        if (patch.status === 'error') {
+          void showErrorNotification('Generation failed', `Workspace generation failed: ${patch.error ?? 'Unknown error'}`)
+        }
       },
 
       setGenerationOptions: (patch) => {
