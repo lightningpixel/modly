@@ -2,7 +2,7 @@ import { Component, Suspense, useCallback, useEffect, useMemo, useRef, useState 
 import type { ReactNode, ErrorInfo, MutableRefObject } from 'react'
 import { Canvas, useFrame, useLoader, useThree } from '@react-three/fiber'
 import type { ThreeEvent } from '@react-three/fiber'
-import { Environment, GizmoHelper, Lightformer, OrbitControls, useGizmoContext, useGLTF } from '@react-three/drei'
+import { Environment, GizmoHelper, Html, Lightformer, OrbitControls, useGizmoContext, useGLTF } from '@react-three/drei'
 import { EffectComposer, Outline, Select, Selection } from '@react-three/postprocessing'
 import * as THREE from 'three'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
@@ -151,8 +151,48 @@ function MeshModel({ url, jobId, viewMode, selected, onStats, onSelect, onObject
 }
 
 function GltfMeshModel(props: MeshModelProps): JSX.Element {
-  const { scene } = useGLTF(props.url)
-  return <SceneMeshModel {...props} scene={scene} loaderType="gltf" />
+  const gltf = useGLTF(props.url)
+  const { scene, animations } = gltf
+  const mixerRef = useRef<THREE.AnimationMixer | null>(null)
+  const [clipIndex, setClipIndex] = useState(0)
+
+  // Rigged models arrive with one or more clips; without a mixer they render
+  // frozen in bind pose, which reads as "the rig failed".
+  useEffect(() => {
+    if (!animations?.length) {
+      mixerRef.current = null
+      return
+    }
+    const mixer = new THREE.AnimationMixer(scene)
+    mixer.clipAction(animations[Math.min(clipIndex, animations.length - 1)]).play()
+    mixerRef.current = mixer
+    return () => {
+      mixer.stopAllAction()
+      mixer.uncacheRoot(scene)
+      mixerRef.current = null
+    }
+  }, [scene, animations, clipIndex])
+
+  useFrame((_state, delta) => mixerRef.current?.update(delta))
+
+  return (
+    <>
+      <SceneMeshModel {...props} scene={scene} loaderType="gltf" />
+      {animations && animations.length > 1 && (
+        <Html position={[0, 0, 0]} wrapperClass="clip-picker">
+          <select
+            value={clipIndex}
+            onChange={(e) => setClipIndex(Number(e.target.value))}
+            className="bg-zinc-800 text-zinc-200 border border-zinc-700 rounded px-2 py-1 text-xs"
+          >
+            {animations.map((clip, i) => (
+              <option key={clip.name || i} value={i}>{clip.name || }</option>
+            ))}
+          </select>
+        </Html>
+      )}
+    </>
+  )
 }
 
 function ObjMeshModel(props: MeshModelProps): JSX.Element {
