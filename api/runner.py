@@ -104,6 +104,46 @@ def _resolve_ready_schema(GenClass, node: dict, manifest: dict) -> list:
         return node.get("params_schema") or manifest.get("params_schema", [])
 
 
+def _generator_is_loaded(gen) -> bool:
+    """
+    Best-effort read of the generator's loaded state.
+
+    Never raises: this is used on the error path, where a generator left in a
+    half-initialised state can make is_loaded() itself blow up. An unreadable
+    state is reported as "not loaded" so the caller reloads rather than reusing
+    a worker that may be broken.
+    """
+    try:
+        return bool(gen.is_loaded())
+    except Exception:
+        return False
+
+
+def _ensure_model_loaded(gen) -> bool:
+    """
+    Guarantees the model is in memory before inference. Returns True if a
+    reload was needed.
+
+    Texture pipelines are built lazily on first use, and extensions typically
+    free the shape pipeline first to make room for them. When that setup fails
+    (a missing `xatlas` being the common case) the generator is left with
+    _model = None, yet the worker process stays alive and both ExtensionProcess
+    and GeneratorRegistry still consider it loaded — so load() is never called
+    again and every later generate() dies with
+
+        TypeError: 'NoneType' object is not callable
+
+    until the process is killed by hand. Re-loading here mirrors what
+    GeneratorRegistry.get_active() already does host-side, which makes a failed
+    setup recoverable on the next attempt instead of permanently poisoning the
+    worker.
+    """
+    if _generator_is_loaded(gen):
+        return False
+    gen.load()
+    return True
+
+
 def _apply_manifest_metadata(gen, manifest: dict, node: dict) -> None:
     gen.hf_repo = node.get("hf_repo") or manifest.get("hf_repo", "")
     gen.hf_skip_prefixes = node.get("hf_skip_prefixes") or manifest.get("hf_skip_prefixes", [])
@@ -173,6 +213,10 @@ def main() -> None:
                     send({"type": "progress", "id": rid, "pct": pct, "step": step})
 
                 try:
+                    if _ensure_model_loaded(gen):
+                        send({"type": "log", "level": "warning",
+                              "message": ("Model was not loaded (earlier setup failure?); "
+                                          "reloaded before generating.")})
                     output_path = gen.generate(image_bytes, params, progress_cb, cancel_evt)
                     send({"type": "done", "id": rid, "output_path": str(output_path)})
                 except Exception as exc:
@@ -180,9 +224,13 @@ def main() -> None:
                     if type(exc).__name__ == "GenerationCancelled":
                         send({"type": "cancelled", "id": rid})
                     else:
+                        # Report whether the model survived the failure so the
+                        # host can drop its cached "loaded" flag and reload
+                        # instead of reusing a worker whose _model is None.
                         send({"type": "error", "id": rid,
                               "message": str(exc),
-                              "traceback": traceback.format_exc()})
+                              "traceback": traceback.format_exc(),
+                              "loaded": _generator_is_loaded(gen)})
                 finally:
                     _cancel.pop(rid, None)
 
