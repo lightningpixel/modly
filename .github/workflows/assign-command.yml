@@ -1,0 +1,65 @@
+name: Assign command
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+
+jobs:
+  assign:
+    if: ${{ !github.event.issue.pull_request && (github.event.comment.body == '/assign' || github.event.comment.body == '/unassign') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Handle /assign
+        if: github.event.comment.body == '/assign'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const commenter = context.payload.comment.user.login;
+
+            const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number });
+
+            if (issue.assignees.length > 0) {
+              const names = issue.assignees.map(a => `@${a.login}`).join(', ');
+              await github.rest.issues.createComment({
+                owner, repo, issue_number,
+                body: `⚠️ This issue is already assigned to ${names}. Ask them to comment \`/unassign\` first if they're no longer working on it.`,
+              });
+              return;
+            }
+
+            await github.rest.issues.addAssignees({ owner, repo, issue_number, assignees: [commenter] });
+            await github.rest.issues.createComment({
+              owner, repo, issue_number,
+              body: `✅ Assigned to @${commenter}. Comment \`/unassign\` if you can no longer work on this. Open a PR that includes \`Closes #${issue_number}\` in its description when you're ready for review.`,
+            });
+
+      - name: Handle /unassign
+        if: github.event.comment.body == '/unassign'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const commenter = context.payload.comment.user.login;
+
+            const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number });
+            const isAssigned = issue.assignees.some(a => a.login === commenter);
+
+            if (!isAssigned) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number,
+                body: `⚠️ @${commenter}, you're not currently assigned to this issue.`,
+              });
+              return;
+            }
+
+            await github.rest.issues.removeAssignees({ owner, repo, issue_number, assignees: [commenter] });
+            await github.rest.issues.createComment({
+              owner, repo, issue_number,
+              body: `Unassigned @${commenter}. This issue is open again — comment \`/assign\` to pick it up.`,
+            });
