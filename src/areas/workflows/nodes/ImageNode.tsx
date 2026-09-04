@@ -2,15 +2,9 @@ import { useCallback, useLayoutEffect, useRef, useState } from 'react'
 import { Handle, Position, useReactFlow } from '@xyflow/react'
 import type { WFNodeData } from '@shared/types/electron.d'
 import BaseNode from './BaseNode'
+import { mimeFromPath } from './imageUtils'
 
 const OUTPUT_COLOR = '#38bdf8'
-
-function mimeFromPath(p: string): string {
-  const ext = p.split('.').pop()?.toLowerCase() ?? ''
-  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg'
-  if (ext === 'webp') return 'image/webp'
-  return 'image/png'
-}
 
 export default function ImageNode({ id, data, selected }: { id: string; data: WFNodeData; selected?: boolean }) {
   const { updateNodeData } = useReactFlow()
