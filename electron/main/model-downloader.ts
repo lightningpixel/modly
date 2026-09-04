@@ -6,6 +6,7 @@ import { existsSync, readdirSync, statSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { getSettings } from './settings-store'
 import { app } from 'electron'
+import type { ModelSource } from './model-sources'
 
 export interface DownloadProgress {
   percent: number
@@ -121,7 +122,6 @@ export async function downloadModelFromHF(
   includePrefixes?: string[],
 ): Promise<void> {
   const { net } = require('electron')
-  const STALL_TIMEOUT_MS = 120_000
   let url = `${PYTHON_API_URL}/model/hf-download?repo_id=${encodeURIComponent(repoId)}&model_id=${encodeURIComponent(modelId)}`
   if (skipPrefixes && skipPrefixes.length > 0) {
     url += `&skip_prefixes=${encodeURIComponent(JSON.stringify(skipPrefixes))}`
@@ -136,11 +136,39 @@ export async function downloadModelFromHF(
 
   const res = await net.fetch(url)
   if (!res.ok) throw new Error(`HuggingFace download failed: HTTP ${res.status}`)
+  await consumeDownloadStream(res, onProgress)
+}
+
+/** Download a validated node-level source plan through one aggregate SSE stream. */
+export async function downloadModelSourcesFromHF(
+  modelId: string,
+  sources: ModelSource[],
+  onProgress: ProgressCallback,
+): Promise<void> {
+  const { net } = require('electron')
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const hfToken = getSettings(app.getPath('userData')).hfToken
+  if (hfToken) headers.Authorization = `Bearer ${hfToken}`
+  const url = `${PYTHON_API_URL}/model/hf-download-sources?model_id=${encodeURIComponent(modelId)}`
+  const res = await net.fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ sources }),
+  })
+  if (!res.ok) throw new Error(`HuggingFace multi-source download failed: HTTP ${res.status}`)
+  await consumeDownloadStream(res, onProgress)
+}
+
+async function consumeDownloadStream(
+  res: Response,
+  onProgress: ProgressCallback,
+): Promise<void> {
   if (!res.body) throw new Error('No response body from HF download stream')
 
   const decoder = new TextDecoder()
   const reader  = res.body.getReader()
   let buffer = ''
+  const STALL_TIMEOUT_MS = 120_000
 
   async function readWithTimeout() {
     return await Promise.race([

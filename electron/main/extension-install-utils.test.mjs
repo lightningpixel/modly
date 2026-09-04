@@ -53,6 +53,55 @@ test('validateInstallManifest still rejects missing process entry files', () => 
   )
 })
 
+test('validateInstallManifest accepts multi-source nodes and preserves legacy shapes', () => {
+  const mod = loadModule()
+  assert.doesNotThrow(() => mod.validateInstallManifest({
+    id: 'multi-model',
+    generator_class: 'Generator',
+    nodes: [{
+      id: 'generate',
+      model_sources: [
+        {
+          id: 'primary', provider: 'huggingface', repo_id: 'org/main',
+          destination: '.', checks: ['pipeline.json'],
+        },
+        {
+          id: 'encoder', provider: 'huggingface', repo_id: 'org/encoder',
+          destination: 'auxiliary/encoder', checks: ['model.safetensors'],
+        },
+      ],
+    }],
+  }, { hasEntryFile: () => false, hasGeneratorFile: () => true }, 'repository'))
+
+  assert.doesNotThrow(() => mod.validateInstallManifest({
+    id: 'legacy',
+    generator_class: 'Generator',
+    nodes: [{
+      id: 'projection',
+      hf_repo: 'org/legacy',
+      download_check: '../generate/model.safetensors',
+      hf_skip_prefixes: ['weights/**'],
+    }],
+  }, { hasEntryFile: () => false, hasGeneratorFile: () => true }, 'repository'))
+})
+
+test('validateInstallManifest rejects malformed or process model_sources', () => {
+  const mod = loadModule()
+  const source = {
+    id: 'weights', provider: 'huggingface', repo_id: 'org/model',
+    destination: '../outside', checks: ['model.safetensors'],
+  }
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'unsafe', generator_class: 'Generator',
+    nodes: [{ id: 'generate', model_sources: [source] }],
+  }, { hasEntryFile: () => false, hasGeneratorFile: () => true }, 'repository'), /destination/i)
+
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'process', type: 'process', entry: 'processor.js',
+    nodes: [{ id: 'run', model_sources: [{ ...source, destination: '.' }] }],
+  }, { hasEntryFile: () => true, hasGeneratorFile: () => false }, 'repository'), /only for model nodes/i)
+})
+
 test('python process setup failures are treated as fatal', () => {
   const mod = loadModule()
 

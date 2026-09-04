@@ -1,9 +1,16 @@
+import {
+  normalizeModelSources,
+  safeModelSourceId,
+  type ModelSourceNode,
+} from './model-sources'
+
 export interface InstallManifest {
   id?: string
   type?: 'model' | 'process'
   entry?: string
   generator_class?: string
-  nodes?: Array<{ id?: string }>
+  model_sources?: unknown
+  nodes?: Array<{ id?: string; model_sources?: unknown } & ModelSourceNode>
 }
 
 export interface ValidatedInstallManifest {
@@ -38,6 +45,18 @@ export function validateInstallManifest(
   const isProcess = manifest.type === 'process'
   const entryFile = manifest.entry ?? 'processor.js'
   const nodes = Array.isArray(manifest.nodes) ? manifest.nodes.filter((node) => node?.id) : []
+
+  if (manifest.model_sources !== undefined) {
+    throw new Error('manifest.json: model_sources must be declared on a model node')
+  }
+  for (const node of Array.isArray(manifest.nodes) ? manifest.nodes : []) {
+    if (node.model_sources === undefined) continue
+    if (isProcess) {
+      throw new Error('manifest.json: model_sources is supported only for model nodes')
+    }
+    safeModelSourceId(node.id, 'model node id')
+    normalizeModelSources(node)
+  }
 
   if (isProcess) {
     if (!opts.hasEntryFile(entryFile)) {

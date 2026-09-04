@@ -16,6 +16,7 @@ import { finishExtensionRepair, isExtensionRepairable } from '../utils'
 interface Props {
   ext:              AnyExtension
   installedIds:     string[]
+  localDataIds:     string[]
   downloading:      DownloadMap
   loadError?:       string
   disabled?:        boolean
@@ -31,7 +32,7 @@ interface Props {
 }
 
 export function ExtensionDrawer({
-  ext, installedIds, downloading, loadError, disabled,
+  ext, installedIds, localDataIds, downloading, loadError, disabled,
   onInstall, onInstallAll, onPauseDownload, onCancelDownload,
   onUninstallNode, onUninstall, onRepaired, onSynced, onClose,
 }: Props): JSX.Element {
@@ -203,11 +204,11 @@ export function ExtensionDrawer({
                               onResume={() => onInstall(node, fullId)}
                               onCancel={() => onCancelDownload(fullId)}
                             />
-                            {state.kind === 'installed' && (
+                            {localDataIds.includes(fullId) && state.kind !== 'downloading' && (
                               <button
                                 onClick={() => onUninstallNode(fullId)}
                                 disabled={disabled || isCorrupted}
-                                title="Remove model weights"
+                                title={state.kind === 'installed' ? 'Remove model weights' : 'Remove partial model data'}
                                 className="p-1 rounded-md text-zinc-600 hover:text-red-400 hover:bg-red-950/40 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                               >
                                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">

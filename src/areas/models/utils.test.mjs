@@ -21,6 +21,7 @@ function loadModule() {
 }
 
 const {
+  deleteModelsThenUninstallExtension,
   finishExtensionRepair,
   formatModelName,
   isExtensionRepairable,
@@ -84,4 +85,32 @@ test('Repair completion refreshes extension state even when setup fails', async 
 
   assert.equal(refreshCount, 1)
   assert.equal(error, 'setup failed')
+})
+
+test('failed selected-weight deletion aborts extension uninstall and preserves its error', async () => {
+  const deleteCalls = []
+  let uninstallCalls = 0
+
+  const result = await deleteModelsThenUninstallExtension(
+    'pixal3d',
+    new Set([
+      'pixal3d/generate',
+      'pixal3d/refine',
+      'pixal3d/export',
+    ]),
+    async (modelId) => {
+      deleteCalls.push(modelId)
+      return modelId === 'pixal3d/refine'
+        ? { success: false, error: 'Model weights are locked.' }
+        : { success: true }
+    },
+    async () => {
+      uninstallCalls += 1
+      return { success: true }
+    },
+  )
+
+  assert.deepEqual(deleteCalls, ['pixal3d/generate', 'pixal3d/refine'])
+  assert.equal(uninstallCalls, 0)
+  assert.deepEqual(result, { success: false, error: 'Model weights are locked.' })
 })

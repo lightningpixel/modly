@@ -117,9 +117,9 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
     model: {
       export:         (args: { outputUrl: string; format: string }) => ipcRenderer.invoke('model:export', args),
       listDownloaded: () => ipcRenderer.invoke('model:listDownloaded'),
-      isDownloaded:   (modelId: string, downloadCheck?: string) => ipcRenderer.invoke('model:isDownloaded', modelId, downloadCheck),
-      download:       (repoId: string, modelId: string, skipPrefixes?: string[], includePrefixes?: string[]) =>
-        ipcRenderer.invoke('model:download', { repoId, modelId, skipPrefixes, includePrefixes }),
+      isDownloaded:   (modelId: string) => ipcRenderer.invoke('model:isDownloaded', modelId),
+      hasLocalData:    (modelId: string) => ipcRenderer.invoke('model:hasLocalData', modelId),
+      download:       (modelId: string) => ipcRenderer.invoke('model:download', modelId),
       pauseDownload:  (modelId: string) => ipcRenderer.invoke('model:pauseDownload', modelId),
       cancelDownload: (modelId: string) => ipcRenderer.invoke('model:cancelDownload', modelId),
       delete:         (modelId: string) => ipcRenderer.invoke('model:delete', modelId),

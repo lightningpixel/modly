@@ -21,3 +21,27 @@ export async function finishExtensionRepair(
   await refreshExtensions()
   return result.success ? null : (result.error ?? 'Repair failed')
 }
+
+interface ActionResult {
+  success: boolean
+  error?: string
+}
+
+export async function deleteModelsThenUninstallExtension(
+  extensionId: string,
+  modelIds: Iterable<string>,
+  deleteModel: (modelId: string) => Promise<ActionResult>,
+  uninstallExtension: (extensionId: string) => Promise<ActionResult>,
+): Promise<ActionResult> {
+  for (const modelId of modelIds) {
+    const result = await deleteModel(modelId)
+    if (!result.success) {
+      return {
+        success: false,
+        error: result.error ?? 'Could not delete selected model weights.',
+      }
+    }
+  }
+
+  return uninstallExtension(extensionId)
+}
