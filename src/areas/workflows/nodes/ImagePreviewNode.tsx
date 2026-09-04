@@ -1,8 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Handle, Position, useEdges, useNodes } from '@xyflow/react'
 import { useWorkflowRunStore, fromWorkspaceUrl } from '../workflowRunStore'
+import { resolveDataSource } from '../nodeBehaviors'
 import BaseNode from './BaseNode'
 import { mimeFromPath } from './imageUtils'
+import type { WFNode } from '@shared/types/electron.d'
 
 const IO_COLOR = '#38bdf8'
 
@@ -32,8 +34,12 @@ export default function ImagePreviewNode({ id, selected }: { id: string; selecte
   }, [])
 
   const incomingEdge  = edges.find((e) => e.target === id)
-  const sourceNode    = incomingEdge ? nodes.find((n) => n.id === incomingEdge.source) : undefined
-  const workspaceUrl  = incomingEdge ? nodeImageOutputs[incomingEdge.source] : undefined
+  const nodeMap       = new Map(nodes.map((n) => [n.id, n as unknown as WFNode]))
+  const realSourceId  = incomingEdge
+    ? resolveDataSource(incomingEdge.source, edges, nodeMap)
+    : undefined
+  const sourceNode    = realSourceId ? nodes.find((n) => n.id === realSourceId) : undefined
+  const workspaceUrl  = realSourceId ? nodeImageOutputs[realSourceId] : undefined
   const imageFilePath = sourceNode?.type === 'imageNode'
     ? (sourceNode.data as { params?: { filePath?: string } })?.params?.filePath
     : undefined
