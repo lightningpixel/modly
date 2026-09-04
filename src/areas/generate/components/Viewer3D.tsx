@@ -16,7 +16,7 @@ import SplatViewer, { type SplatViewerHandle } from './SplatViewer'
 import { useGeneration } from '@shared/hooks/useGeneration'
 import { useAppStore } from '@shared/stores/appStore'
 import { ViewerToolbar, type ViewMode } from './ViewerToolbar'
-import type { LightSettings } from '@shared/stores/appStore'
+import type { LightSettings, PointLight } from '@shared/stores/appStore'
 import { DEFAULT_LIGHT_SETTINGS } from '@shared/stores/appStore'
 
 export type GizmoMode = 'translate' | 'rotate' | 'scale'
@@ -62,6 +62,48 @@ function createCheckerTexture(): THREE.CanvasTexture {
   const tex = new THREE.CanvasTexture(canvas)
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping
   return tex
+}
+
+function makeLightBulbTexture(color: string): THREE.CanvasTexture {
+  const size = 64
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = size
+  const ctx = canvas.getContext('2d')!
+
+  const cx = size / 2
+  const cy = size / 2
+
+  // Rays
+  ctx.strokeStyle = color
+  ctx.lineWidth = 2
+  ctx.lineCap = 'round'
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2 - Math.PI / 2
+    const r1 = 20
+    const r2 = 27
+    ctx.beginPath()
+    ctx.moveTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1)
+    ctx.lineTo(cx + Math.cos(a) * r2, cy + Math.sin(a) * r2)
+    ctx.stroke()
+  }
+
+  // Bulb circle
+  ctx.beginPath()
+  ctx.arc(cx, cy - 1, 12, 0, Math.PI * 2)
+  ctx.fillStyle = color
+  ctx.fill()
+  ctx.strokeStyle = '#ffffff'
+  ctx.lineWidth = 1.5
+  ctx.stroke()
+
+  // Base (small rectangle below bulb)
+  ctx.fillStyle = color
+  ctx.fillRect(cx - 4, cy + 11, 8, 8)
+  ctx.strokeStyle = '#ffffff'
+  ctx.lineWidth = 1
+  ctx.strokeRect(cx - 4, cy + 11, 8, 8)
+
+  return new THREE.CanvasTexture(canvas)
 }
 
 // ---------------------------------------------------------------------------
@@ -785,6 +827,47 @@ function ScaleGizmo({ object, onDragStart, onDragEnd }: { object: THREE.Object3D
 }
 
 // ---------------------------------------------------------------------------
+// PointLightMarker — renders a point light + billboard icon + optional gizmo
+// ---------------------------------------------------------------------------
+
+function PointLightMarker({
+  light,
+  isSelected,
+  gizmoMode,
+  onSelect,
+  onPositionChange,
+}: {
+  light: PointLight
+  isSelected: boolean
+  gizmoMode: GizmoMode | null
+  onSelect: () => void
+  onPositionChange: (pos: [number, number, number]) => void
+}) {
+  const [group, setGroup] = useState<THREE.Group | null>(null)
+  const iconTexture = useMemo(() => makeLightBulbTexture(light.color), [light.color])
+
+  return (
+    <>
+      <group ref={setGroup} position={light.position}>
+        <pointLight color={light.color} intensity={light.intensity} distance={8} decay={2} />
+        <sprite
+          scale={[0.3, 0.3, 1]}
+          onPointerDown={(e) => { e.stopPropagation(); onSelect() }}
+        >
+          <spriteMaterial map={iconTexture} toneMapped={false} depthTest={false} />
+        </sprite>
+      </group>
+      {group && isSelected && gizmoMode === 'translate' && (
+        <TranslateGizmo
+          object={group}
+          onDragEnd={() => onPositionChange([group.position.x, group.position.y, group.position.z])}
+        />
+      )}
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // EmptyState
 // ---------------------------------------------------------------------------
 
@@ -805,7 +888,23 @@ function EmptyState(): JSX.Element {
 
 type TransformSnapshot = { p: THREE.Vector3; q: THREE.Quaternion; s: THREE.Vector3 }
 
-export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmoMode = null, gizmoUndoRef }: { lightSettings?: LightSettings; gizmoMode?: GizmoMode | null; gizmoUndoRef?: MutableRefObject<(() => boolean) | null> }): JSX.Element {
+export default function Viewer3D({
+  lightSettings = DEFAULT_LIGHT_SETTINGS,
+  gizmoMode = null,
+  gizmoUndoRef,
+  pointLights = [],
+  selectedPointLightId = null,
+  onSelectPointLight,
+  onPointLightsChange,
+}: {
+  lightSettings?: LightSettings
+  gizmoMode?: GizmoMode | null
+  gizmoUndoRef?: MutableRefObject<(() => boolean) | null>
+  pointLights?: PointLight[]
+  selectedPointLightId?: string | null
+  onSelectPointLight?: (id: string | null) => void
+  onPointLightsChange?: (lights: PointLight[]) => void
+}): JSX.Element {
   const { currentJob } = useGeneration()
   const apiUrl = useAppStore((s) => s.apiUrl)
 
@@ -868,6 +967,18 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
     return () => window.removeEventListener('keydown', handler)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- setSelected is a stable store setter
   }, [selected, setCurrentJob])
+
+  // Deselect both mesh and point light when clicking empty space
+  const handlePointerMissed = useCallback(() => {
+    setSelected(false)
+    onSelectPointLight?.(null)
+  }, [setSelected, onSelectPointLight])
+
+  // Select mesh and deselect any selected point light
+  const handleMeshSelect = useCallback(() => {
+    setSelected(true)
+    onSelectPointLight?.(null)
+  }, [setSelected, onSelectPointLight])
 
   const handleScreenshot = () => {
     const dataUrl = isSplat
@@ -963,7 +1074,7 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
         {/* Mesh path → original Canvas, unchanged */}
         {!isSplat && (
         <Canvas
-          onPointerMissed={() => setSelected(false)}
+          onPointerMissed={handlePointerMissed}
           camera={{ position: [0, 1.5, 4], fov: 45 }}
           dpr={[1, 2]}
           gl={{
@@ -995,12 +1106,29 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
                   viewMode={viewMode}
                   selected={selected}
                   onStats={setStoreMeshStats}
-                  onSelect={() => setSelected(true)}
+                  onSelect={handleMeshSelect}
                   onObject={setMeshObject}
                 />
               </Suspense>
             </Selection>
           ) : null}
+
+          {/* Point light markers */}
+          {onPointLightsChange && pointLights.map((pl) => (
+            <PointLightMarker
+              key={pl.id}
+              light={pl}
+              isSelected={pl.id === selectedPointLightId}
+              gizmoMode={gizmoMode}
+              onSelect={() => {
+                setSelected(false)
+                onSelectPointLight?.(pl.id)
+              }}
+              onPositionChange={(pos) => {
+                onPointLightsChange!(pointLights.map((p) => p.id === pl.id ? { ...p, position: pos } : p))
+              }}
+            />
+          ))}
 
           {selected && meshObject && gizmoMode === 'translate' && (
             <TranslateGizmo object={meshObject} onDragStart={handleGizmoDragStart} onDragEnd={handleGizmoDragEnd} />

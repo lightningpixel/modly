@@ -46,6 +46,13 @@ export interface LightSettings {
   envIntensity: number
 }
 
+export interface PointLight {
+  id: string
+  position: [number, number, number]
+  color: string
+  intensity: number
+}
+
 export interface AppToast {
   id: number
   message: string
@@ -147,6 +154,8 @@ interface AppState {
   // 3D viewer lighting
   lightSettings: LightSettings
   setLightSettings: (settings: LightSettings) => void
+  pointLights: PointLight[]
+  setPointLights: (lights: PointLight[]) => void
 
   // Actions
   initApp: () => Promise<void>
@@ -249,6 +258,8 @@ export const useAppStore = create<AppState>()(
 
       lightSettings: DEFAULT_LIGHT_SETTINGS,
       setLightSettings: (settings) => set({ lightSettings: settings }),
+      pointLights: [],
+      setPointLights: (lights) => set({ pointLights: lights }),
 
       currentJob: null,
       selectedImagePath: null,
@@ -304,6 +315,7 @@ export const useAppStore = create<AppState>()(
         useAtkinsonFont: state.useAtkinsonFont,
         uiScale: state.uiScale,
         lightSettings: state.lightSettings,
+        pointLights: state.pointLights,
       }),
     }
   )
