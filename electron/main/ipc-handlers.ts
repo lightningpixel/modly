@@ -20,6 +20,7 @@ import {
   areModelSourcesDownloaded,
   modelHasLocalData,
   normalizeModelSources,
+  removePartialDownloadArtifacts,
   resolveModelRoot,
 } from './model-sources'
 import { getSettings, setSettings } from './settings-store'
@@ -639,7 +640,10 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         ])
       }
       const modelDir = resolveModelRoot(getSettings(app.getPath('userData')).modelsDir, modelId)
-      await rmAsync(modelDir, { recursive: true, force: true })
+      // Only remove in-progress `.part` files — a model can now have multiple sources
+      // sharing this directory, and any source that already finished downloading
+      // must survive cancelling the ones still in flight.
+      await removePartialDownloadArtifacts(modelDir)
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }

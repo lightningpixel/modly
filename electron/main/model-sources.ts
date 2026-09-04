@@ -1,4 +1,5 @@
 import { existsSync, lstatSync, readdirSync, statSync } from 'node:fs'
+import { readdir, rm } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
 
 export interface ModelSource {
@@ -193,4 +194,16 @@ export function modelHasLocalData(modelsDir: string, modelId: string): boolean {
   } catch {
     return false
   }
+}
+
+// Mirrors the backend's cancel cleanup (api/routers/model.py): only the in-progress
+// `.part` files are removed, so completed sources already on disk survive a cancel.
+export async function removePartialDownloadArtifacts(modelRoot: string): Promise<void> {
+  if (!existsSync(modelRoot)) return
+  const entries = await readdir(modelRoot, { recursive: true, withFileTypes: true })
+  await Promise.all(
+    entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.part'))
+      .map((entry) => rm(resolve(entry.parentPath ?? modelRoot, entry.name), { force: true })),
+  )
 }
