@@ -138,9 +138,12 @@ declared check exists.
 ```
 
 `destination`, filters, and checks use safe POSIX paths relative to the node's
-model directory. The only supported provider is `huggingface`. Existing nodes
-that use `hf_repo`, `download_check`, `hf_include_prefixes`, and
-`hf_skip_prefixes` keep their original behavior.
+model directory. Every check must name a regular, non-empty file included by
+that source's filters; invalid plans fail before any file is downloaded. Pin a
+tag or commit in `revision` when reproducible weights are required. The only
+supported provider is `huggingface`. Existing nodes that use `hf_repo`,
+`download_check`, `hf_include_prefixes`, and `hf_skip_prefixes` keep their
+original behavior.
 
 ---
 

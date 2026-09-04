@@ -18,6 +18,21 @@ import {
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
+// Windows refuses symlink creation unless the process is elevated or Developer
+// Mode is on, so probe once rather than letting the test report an EPERM as a
+// product failure — that turns a stock Windows checkout into a failing suite.
+const symlinksAvailable = (() => {
+  const probe = mkdtempSync(join(tmpdir(), 'modly-symlink-probe-'))
+  try {
+    symlinkSync(join(probe, 'target'), join(probe, 'link'), 'dir')
+    return true
+  } catch {
+    return false
+  } finally {
+    rmSync(probe, { recursive: true, force: true })
+  }
+})()
+
 function loadModule() {
   const outfile = join(mkdtempSync(join(tmpdir(), 'modly-recovery-module-')), 'extension-install-recovery.cjs')
   const require = createRequire(import.meta.url)
@@ -638,7 +653,11 @@ test('destination validated marker cannot authorize deletion of an uncommitted b
   }
 })
 
-test('registration transaction state never writes through a symlinked backup', async () => {
+test('registration transaction state never writes through a symlinked backup', {
+  skip: symlinksAvailable
+    ? false
+    : 'symlink creation needs elevation or Developer Mode on this platform',
+}, async () => {
   const root = mkdtempSync(join(tmpdir(), 'modly-symlink-state-test-'))
   const source = mkdtempSync(join(tmpdir(), 'modly-linked-source-'))
   const destination = join(root, 'pixal3d')

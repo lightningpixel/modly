@@ -68,8 +68,16 @@ class ModelSourcesTests(unittest.TestCase):
         sources = normalize_model_sources(valid_node()) or []
         with self.assertRaisesRegex(ValueError, "portable target collision"):
             validate_source_file_plan(sources, {
-                "primary": ["Auxiliary/Encoder/model.safetensors"],
-                "encoder": ["model.safetensors"],
+                "primary": ["pipeline.json", "Auxiliary/Encoder/model.safetensors"],
+                "encoder": ["config.json", "model.safetensors"],
+            })
+
+    def test_rejects_checks_excluded_from_the_download_plan(self) -> None:
+        sources = normalize_model_sources(valid_node()) or []
+        with self.assertRaisesRegex(ValueError, "excluded from its download plan"):
+            validate_source_file_plan(sources, {
+                "primary": ["pipeline.json"],
+                "encoder": ["config.json"],
             })
 
     def test_requires_all_checks_and_rejects_symlinked_extension_ancestry(self) -> None:
@@ -84,6 +92,12 @@ class ModelSourcesTests(unittest.TestCase):
             self.assertFalse(model_sources_are_downloaded(models, "pixal3d/generate", sources))
             (encoder / "model.safetensors").write_bytes(b"x")
             self.assertTrue(model_sources_are_downloaded(models, "pixal3d/generate", sources))
+
+            (encoder / "model.safetensors").write_bytes(b"")
+            self.assertFalse(model_sources_are_downloaded(models, "pixal3d/generate", sources))
+            (encoder / "model.safetensors").unlink()
+            (encoder / "model.safetensors").mkdir()
+            self.assertFalse(model_sources_are_downloaded(models, "pixal3d/generate", sources))
 
             for child in sorted((models / "pixal3d").rglob("*"), reverse=True):
                 child.unlink() if child.is_file() else child.rmdir()

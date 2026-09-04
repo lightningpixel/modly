@@ -177,6 +177,20 @@ class MultiSourceRouterTests(unittest.TestCase):
         self.assertEqual(resumed[-1], {"percent": 100, "status": "done"})
         self.assertTrue((self.models_dir / "pixal3d/generate/main.bin").is_file())
 
+    def test_rejects_a_check_filtered_out_of_the_source_plan(self) -> None:
+        calls: list[str] = []
+        self.install_hf_stub({"org/main": ["other.bin"]}, calls)
+
+        async def run():
+            response = await model_router.hf_download_sources(
+                request_for([SOURCES[0]]), "pixal3d/generate"
+            )
+            return await collect_events(response)
+
+        events = asyncio.run(run())
+        self.assertIn("excluded from its download plan", events[-1]["error"])
+        self.assertFalse((self.models_dir / "pixal3d/generate/other.bin").exists())
+
     def test_composite_model_unload_route_uses_path_converter(self) -> None:
         paths = {route.path for route in model_router.router.routes}
         self.assertIn("/unload/{model_id:path}", paths)

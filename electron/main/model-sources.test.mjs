@@ -93,6 +93,12 @@ test('requires every declared check and rejects symlinked extension-root ancestr
     writeFileSync(join(modelRoot, 'auxiliary', 'encoder', 'model.safetensors'), 'x')
     assert.equal(areModelSourcesDownloaded(models, 'pixal3d/generate', sources), true)
 
+    writeFileSync(join(modelRoot, 'auxiliary', 'encoder', 'model.safetensors'), '')
+    assert.equal(areModelSourcesDownloaded(models, 'pixal3d/generate', sources), false)
+    rmSync(join(modelRoot, 'auxiliary', 'encoder', 'model.safetensors'))
+    mkdirSync(join(modelRoot, 'auxiliary', 'encoder', 'model.safetensors'))
+    assert.equal(areModelSourcesDownloaded(models, 'pixal3d/generate', sources), false)
+
     rmSync(join(models, 'pixal3d'), { recursive: true, force: true })
     const outside = join(root, 'outside')
     mkdirSync(join(outside, 'generate'), { recursive: true })

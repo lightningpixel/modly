@@ -163,11 +163,8 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
   const { updateNodeData } = useReactFlow()
   const running = useWorkflowRunStore((s) => s.activeNodeId === id)
 
-  // Refs for handle alignment — support up to 2 inputs
-  const ioRowRef  = useRef<HTMLDivElement>(null)
-  const ioRow2Ref = useRef<HTMLDivElement>(null)
-  const [handleTop,  setHandleTop]  = useState('50%')
-  const [handle2Top, setHandle2Top] = useState('50%')
+  const handleRefs = useRef<HTMLDivElement[]>([])
+  const [handleTops, setHandleTops] = useState<string[]>([])
 
   const { modelExtensions, processExtensions } = useExtensionsStore()
   const allExtensions = buildAllWorkflowExtensions(modelExtensions, processExtensions)
@@ -181,15 +178,14 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
 
   // Align handles with their respective IO rows after mount
   useLayoutEffect(() => {
-    if (ioRowRef.current) {
-      const center = ioRowRef.current.offsetTop + ioRowRef.current.offsetHeight / 2
-      setHandleTop(`${center}px`)
-    }
-    if (ioRow2Ref.current) {
-      const center = ioRow2Ref.current.offsetTop + ioRow2Ref.current.offsetHeight / 2
-      setHandle2Top(`${center}px`)
-    }
-  }, [isMulti])
+    setHandleTops(handleRefs.current.map((ref) => {
+      if (ref) {
+        const center = ref.offsetTop + ref.offsetHeight / 2
+        return `${center}px`
+      }
+      return '50%'
+    }))
+  }, [isMulti, inputs?.length])
 
   const patchParam = useCallback((key: string, val: number | string) => {
     const params = { ...data.params, [key]: val }
@@ -210,32 +206,30 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
 
   // ── IO subheader ─────────────────────────────────────────────────────────
   const ioSubheader = isMulti ? (
-    // Multi-input layout: one row per input, output on first row
+    // Multi-input layout: one row per input (N, not just 2), output on the first row.
+    // Row refs feed the same handleRefs array handlesEl aligns its Handles against.
     <div className="flex flex-col divide-y divide-zinc-800/40">
-      <div ref={ioRowRef} className="flex items-center justify-between px-3 py-2">
-        <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TAG_CLS[inputs[0]] ?? 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>
-          {ext?.inputLabels?.[0] ?? inputs[0]}
-        </span>
-        {!isTerminal && (
-          <>
-            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-zinc-600 shrink-0">
-              <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
-            </svg>
-            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TAG_CLS[ext?.output ?? ''] ?? 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>
-              {ext?.output ?? '—'}
-            </span>
-          </>
-        )}
-      </div>
-      <div ref={ioRow2Ref} className="flex items-center px-3 py-2">
-        <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TAG_CLS[inputs[1]] ?? 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>
-          {ext?.inputLabels?.[1] ?? inputs[1]}
-        </span>
-      </div>
+      {inputs.map((inputType, i) => (
+        <div key={i} ref={(el) => { if (el) handleRefs.current[i] = el }} className="flex items-center justify-between px-3 py-2">
+          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TAG_CLS[inputType] ?? 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>
+            {ext?.inputLabels?.[i] ?? inputType}
+          </span>
+          {i === 0 && !isTerminal && (
+            <>
+              <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-zinc-600 shrink-0">
+                <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+              </svg>
+              <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TAG_CLS[ext?.output ?? ''] ?? 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>
+                {ext?.output ?? '—'}
+              </span>
+            </>
+          )}
+        </div>
+      ))}
     </div>
   ) : (
     // Single-input layout (existing behavior)
-    <div ref={ioRowRef} className="flex items-center justify-between px-3 py-2">
+    <div ref={(el) => { if (el) handleRefs.current[0] = el }} className="flex items-center justify-between px-3 py-2">
       <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TAG_CLS[ext?.input ?? ''] ?? 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>
         {ext?.input ?? '—'}
       </span>
@@ -253,31 +247,40 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
   )
 
   // ── Handles ──────────────────────────────────────────────────────────────
-  const handlesEl = (
+  const handlesEl = isMulti ? (
     <>
-      {/* Primary input handle */}
-      <Handle
-        id="input-0"
-        type="target"
-        position={Position.Left}
-        style={{ background: HANDLE_COLOR[isMulti ? inputs[0] : (ext?.input ?? 'image')], width: 14, height: 14, border: '2.5px solid #18181b', top: handleTop }}
-      />
-      {/* Secondary input handle (multi-input only) */}
-      {isMulti && (
+      {inputs.map((inputType, i) => (
         <Handle
-          id="input-1"
+          key={i}
+          id={`input-${i}`}
           type="target"
           position={Position.Left}
-          style={{ background: HANDLE_COLOR[inputs[1]], width: 14, height: 14, border: '2.5px solid #18181b', top: handle2Top }}
+          style={{ background: HANDLE_COLOR[inputType], width: 14, height: 14, border: '2.5px solid #18181b', top: handleTops[i] ?? '50%' }}
         />
-      )}
-      {/* Output handle */}
+      ))}
       {!isTerminal && (
         <Handle
           id="output"
           type="source"
           position={Position.Right}
-          style={{ background: outputColor, width: 14, height: 14, border: '2.5px solid #18181b', top: handleTop }}
+          style={{ background: outputColor, width: 14, height: 14, border: '2.5px solid #18181b', top: handleTops[0] ?? '50%' }}
+        />
+      )}
+    </>
+  ) : (
+    <>
+      <Handle
+        id="input-0"
+        type="target"
+        position={Position.Left}
+        style={{ background: HANDLE_COLOR[ext?.input ?? 'image'], width: 14, height: 14, border: '2.5px solid #18181b', top: handleTops[0] ?? '50%' }}
+      />
+      {!isTerminal && (
+        <Handle
+          id="output"
+          type="source"
+          position={Position.Right}
+          style={{ background: outputColor, width: 14, height: 14, border: '2.5px solid #18181b', top: handleTops[0] ?? '50%' }}
         />
       )}
     </>

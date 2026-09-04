@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readdirSync } from 'node:fs'
+import { existsSync, lstatSync, readdirSync, statSync } from 'node:fs'
 import { isAbsolute, relative, resolve } from 'node:path'
 
 export interface ModelSource {
@@ -172,7 +172,13 @@ export function areModelSourcesDownloaded(modelsDir: string, modelId: string, so
       if (!existsSync(destination) || pathHasSymlink(modelRoot, destination)) return false
       return source.checks.every((check) => {
         const candidate = resolve(destination, ...check.split('/'))
-        return existsSync(candidate) && !pathHasSymlink(modelRoot, candidate)
+        if (!existsSync(candidate) || pathHasSymlink(modelRoot, candidate)) return false
+        try {
+          const stat = statSync(candidate)
+          return stat.isFile() && stat.size > 0
+        } catch {
+          return false
+        }
       })
     })
   } catch {

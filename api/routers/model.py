@@ -455,7 +455,12 @@ def _download_file_streamed(
     final_path.parent.mkdir(parents=True, exist_ok=True)
 
     if final_path.exists():
-        return final_path.stat().st_size
+        if not final_path.is_file():
+            raise RuntimeError(f"Download target is not a regular file: {filename}")
+        existing_size = final_path.stat().st_size
+        if existing_size > 0:
+            return existing_size
+        final_path.unlink()
 
     # Explicit token (from caller) > env vars > none
     hf_token = (

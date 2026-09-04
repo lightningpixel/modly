@@ -224,7 +224,11 @@ def model_sources_are_downloaded(
                 return False
             for check in source["checks"]:
                 candidate = resolve_download_path(destination, check)
-                if not candidate.exists() or _path_has_symlink(model_root, candidate):
+                if (
+                    not candidate.is_file()
+                    or candidate.stat().st_size <= 0
+                    or _path_has_symlink(model_root, candidate)
+                ):
                     return False
         return bool(sources)
     except (KeyError, OSError, TypeError, ValueError):
@@ -239,8 +243,17 @@ def validate_source_file_plan(
     for source in sources:
         source_id = source["id"]
         destination = source["destination"]
-        for filename in files_by_source[source_id]:
-            safe_filename = safe_relative_path(filename, f'model source "{source_id}" file')
+        source_files = {
+            safe_relative_path(filename, f'model source "{source_id}" file')
+            for filename in files_by_source[source_id]
+        }
+        missing_checks = [check for check in source["checks"] if check not in source_files]
+        if missing_checks:
+            raise ValueError(
+                f'Model source "{source_id}" checks files excluded from its download plan: '
+                + ", ".join(missing_checks)
+            )
+        for safe_filename in source_files:
             target = safe_filename if destination == "." else f"{destination}/{safe_filename}"
             for value in (target, f"{target}.part"):
                 alias = unicodedata.normalize("NFC", value).casefold()
