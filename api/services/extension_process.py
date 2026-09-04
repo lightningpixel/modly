@@ -97,6 +97,9 @@ class ExtensionProcess:
                 env["SSL_CERT_FILE"] = certifi.where()
             except ImportError:
                 pass
+        # Keep the child's stdio UTF-8 so it matches the UTF-8 decode on
+        # our side of the pipes (Windows would otherwise pick cp1252).
+        env.setdefault("PYTHONIOENCODING", "utf-8")
         return env
 
     def _start(self) -> None:
@@ -113,6 +116,10 @@ class ExtensionProcess:
             # older reader thread cannot poison startup for the new process.
             run_queue: queue.Queue = queue.Queue()
             self._queue = run_queue
+            # Explicit UTF-8: with bare text=True Windows decodes the pipes
+            # with the locale codec (cp1252), which lacks bytes like 0x8f
+            # from tqdm's block glyphs — the reader thread then dies mid-run
+            # and the child deadlocks writing to the full stderr pipe.
             self._proc = subprocess.Popen(
                 [str(python), str(_RUNNER_PATH)],
                 stdin=subprocess.PIPE,
