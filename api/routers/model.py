@@ -136,9 +136,10 @@ async def hf_download_sources(request: FastAPIRequest, model_id: str):
         body = await request.json()
         if not isinstance(body, dict):
             raise ValueError("Request body must be an object")
-        sources = normalize_model_sources({"model_sources": body.get("sources")})
-        if sources is None:
+        raw_sources = body.get("sources")
+        if raw_sources is None:
             raise ValueError("sources are required")
+        sources = normalize_model_sources({"model_sources": raw_sources})
         model_root = resolve_model_root(MODELS_DIR, model_id)
         destinations = {
             source["id"]: resolve_source_destination(
