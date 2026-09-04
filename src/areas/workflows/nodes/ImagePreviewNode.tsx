@@ -1,17 +1,21 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Handle, Position, useEdges, useNodes } from '@xyflow/react'
-import { useWorkflowRunStore } from '../workflowRunStore'
+import { useWorkflowRunStore, fromWorkspaceUrl } from '../workflowRunStore'
 import BaseNode from './BaseNode'
+import { mimeFromPath } from './imageUtils'
 
 const IO_COLOR = '#38bdf8'
 
-function mimeFromPath(p: string): string {
-  const ext = p.split('.').pop()?.toLowerCase() ?? ''
-  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg'
-  if (ext === 'webp') return 'image/webp'
-  return 'image/png'
-}
-
+/**
+ * Single-image passthrough preview: an image in, the same image forwarded out
+ * unchanged. Distinct from PreviewImageNode ("Preview Views"), which is a
+ * terminal node for multi-view strip outputs (e.g. MV-Adapter) and has no
+ * output handle.
+ *
+ * Reads the source file straight off disk and renders it as a `data:` URL
+ * (rather than an API-served URL) so the preview works without depending on
+ * the backend being up or CSP allowances for a remote origin.
+ */
 export default function ImagePreviewNode({ id, selected }: { id: string; selected?: boolean }) {
   const nodeImageOutputs = useWorkflowRunStore((s) => s.nodeImageOutputs)
   const edges            = useEdges()
@@ -45,9 +49,7 @@ export default function ImagePreviewNode({ id, selected }: { id: string; selecte
         let absPath: string
         if (workspaceUrl) {
           const settings = await window.electron.settings.get()
-          const wsDir    = settings.workspaceDir.replace(/\\/g, '/').replace(/\/+$/, '')
-          const rel      = workspaceUrl.replace(/^\/workspace\//, '')
-          absPath        = `${wsDir}/${rel}`
+          absPath        = fromWorkspaceUrl(workspaceUrl, settings.workspaceDir)
         } else {
           absPath = imageFilePath!
         }

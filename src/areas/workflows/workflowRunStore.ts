@@ -118,6 +118,14 @@ function toWorkspaceUrl(filePath: string, workspaceDir: string): string | undefi
   return `/workspace/${norm.slice(workspaceDir.length).replace(/^\//, '')}`
 }
 
+// Inverse of toWorkspaceUrl — used by node components that read a `/workspace/...`
+// output URL back off disk (e.g. to build a data: URL for a preview).
+export function fromWorkspaceUrl(url: string, workspaceDir: string): string {
+  const wsDir = workspaceDir.replace(/\\/g, '/').replace(/\/+$/, '')
+  const rel   = url.replace(/^\/workspace\//, '')
+  return `${wsDir}/${rel}`
+}
+
 interface RunContext {
   workflow:           Workflow
   allExtensions:      WorkflowExtension[]
