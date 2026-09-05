@@ -1,4 +1,4 @@
-"""Thin workflow adapter for the shared repair mesh operation."""
+"""Thin workflow adapter for the shared meshoptimizer operation."""
 
 import os
 import sys
@@ -19,4 +19,4 @@ from services.mesh_ops.processor import run_processor
 
 
 if __name__ == "__main__":
-    run_processor("repair", "mesh-repair")
+    run_processor("decimate", "mesh-optimizer")
