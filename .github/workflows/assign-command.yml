@@ -7,12 +7,19 @@ on:
 permissions:
   issues: write
 
+env:
+  PROJECT_ID: PVT_kwHOA8O2Dc4BX1OY
+  STATUS_FIELD_ID: PVTSSF_lAHOA8O2Dc4BX1OYzhS_ZbU
+  STATUS_IN_PROGRESS: "98236657"
+  STATUS_BACKLOG: "f75ad846"
+
 jobs:
   assign:
     if: ${{ !github.event.issue.pull_request && (github.event.comment.body == '/assign' || github.event.comment.body == '/unassign') }}
     runs-on: ubuntu-latest
     steps:
       - name: Handle /assign
+        id: do_assign
         if: github.event.comment.body == '/assign'
         uses: actions/github-script@v7
         with:
@@ -29,6 +36,7 @@ jobs:
                 owner, repo, issue_number,
                 body: `⚠️ This issue is already assigned to ${names}. Ask them to comment \`/unassign\` first if they're no longer working on it.`,
               });
+              core.setOutput('assigned', 'false');
               return;
             }
 
@@ -37,8 +45,50 @@ jobs:
               owner, repo, issue_number,
               body: `✅ Assigned to @${commenter}. Comment \`/unassign\` if you can no longer work on this. Open a PR that includes \`Closes #${issue_number}\` in its description when you're ready for review.`,
             });
+            core.setOutput('assigned', 'true');
+
+      - name: Move to In progress
+        if: github.event.comment.body == '/assign' && steps.do_assign.outputs.assigned == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+          script: |
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
+            });
+
+            const { node } = await github.graphql(
+              `query($issueId: ID!) {
+                node(id: $issueId) {
+                  ... on Issue { projectItems(first: 10) { nodes { id project { id } } } }
+                }
+              }`,
+              { issueId: issue.node_id }
+            );
+
+            const item = node.projectItems.nodes.find(n => n.project.id === process.env.PROJECT_ID);
+            if (!item) {
+              console.log('Issue is not on the project board; skipping status update.');
+              return;
+            }
+
+            await github.graphql(
+              `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $projectId, itemId: $itemId, fieldId: $fieldId,
+                  value: { singleSelectOptionId: $optionId }
+                }) { projectV2Item { id } }
+              }`,
+              {
+                projectId: process.env.PROJECT_ID,
+                itemId: item.id,
+                fieldId: process.env.STATUS_FIELD_ID,
+                optionId: process.env.STATUS_IN_PROGRESS,
+              }
+            );
 
       - name: Handle /unassign
+        id: do_unassign
         if: github.event.comment.body == '/unassign'
         uses: actions/github-script@v7
         with:
@@ -55,6 +105,7 @@ jobs:
                 owner, repo, issue_number,
                 body: `⚠️ @${commenter}, you're not currently assigned to this issue.`,
               });
+              core.setOutput('unassigned', 'false');
               return;
             }
 
@@ -63,3 +114,44 @@ jobs:
               owner, repo, issue_number,
               body: `Unassigned @${commenter}. This issue is open again — comment \`/assign\` to pick it up.`,
             });
+            core.setOutput('unassigned', 'true');
+
+      - name: Move to Backlog
+        if: github.event.comment.body == '/unassign' && steps.do_unassign.outputs.unassigned == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+          script: |
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
+            });
+
+            const { node } = await github.graphql(
+              `query($issueId: ID!) {
+                node(id: $issueId) {
+                  ... on Issue { projectItems(first: 10) { nodes { id project { id } } } }
+                }
+              }`,
+              { issueId: issue.node_id }
+            );
+
+            const item = node.projectItems.nodes.find(n => n.project.id === process.env.PROJECT_ID);
+            if (!item) {
+              console.log('Issue is not on the project board; skipping status update.');
+              return;
+            }
+
+            await github.graphql(
+              `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $projectId, itemId: $itemId, fieldId: $fieldId,
+                  value: { singleSelectOptionId: $optionId }
+                }) { projectV2Item { id } }
+              }`,
+              {
+                projectId: process.env.PROJECT_ID,
+                itemId: item.id,
+                fieldId: process.env.STATUS_FIELD_ID,
+                optionId: process.env.STATUS_BACKLOG,
+              }
+            );

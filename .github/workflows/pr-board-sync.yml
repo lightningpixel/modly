@@ -1,0 +1,76 @@
+name: PR board sync
+
+on:
+  pull_request:
+    types: [opened, edited, ready_for_review]
+
+permissions:
+  contents: read
+
+env:
+  PROJECT_ID: PVT_kwHOA8O2Dc4BX1OY
+  STATUS_FIELD_ID: PVTSSF_lAHOA8O2Dc4BX1OYzhS_ZbU
+  STATUS_READY_TO_REVIEW: c6aa22db
+
+jobs:
+  move-linked-issues:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Move linked issues to Ready to review
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+          script: |
+            const body = context.payload.pull_request.body || '';
+            const keywords = '(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)';
+            const re = new RegExp(`${keywords}\\s+#(\\d+)`, 'gi');
+            const issueNumbers = [...new Set([...body.matchAll(re)].map(m => Number(m[1])))];
+
+            if (issueNumbers.length === 0) {
+              console.log('No closing keyword found in the PR description; nothing to move.');
+              return;
+            }
+
+            for (const issue_number of issueNumbers) {
+              let issue;
+              try {
+                ({ data: issue } = await github.rest.issues.get({
+                  owner: context.repo.owner, repo: context.repo.repo, issue_number,
+                }));
+              } catch (err) {
+                console.log(`Issue #${issue_number} not found in this repo, skipping.`);
+                continue;
+              }
+
+              const { node } = await github.graphql(
+                `query($issueId: ID!) {
+                  node(id: $issueId) {
+                    ... on Issue { projectItems(first: 10) { nodes { id project { id } } } }
+                  }
+                }`,
+                { issueId: issue.node_id }
+              );
+
+              const item = node.projectItems.nodes.find(n => n.project.id === process.env.PROJECT_ID);
+              if (!item) {
+                console.log(`Issue #${issue_number} is not on the project board, skipping.`);
+                continue;
+              }
+
+              await github.graphql(
+                `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $projectId, itemId: $itemId, fieldId: $fieldId,
+                    value: { singleSelectOptionId: $optionId }
+                  }) { projectV2Item { id } }
+                }`,
+                {
+                  projectId: process.env.PROJECT_ID,
+                  itemId: item.id,
+                  fieldId: process.env.STATUS_FIELD_ID,
+                  optionId: process.env.STATUS_READY_TO_REVIEW,
+                }
+              );
+              console.log(`Moved issue #${issue_number} to Ready to review.`);
+            }
