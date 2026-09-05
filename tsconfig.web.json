@@ -8,6 +8,7 @@
     "jsx": "react-jsx",
     "strict": true,
     "skipLibCheck": true,
+    "rewriteRelativeImportExtensions": true,
     "paths": {
       "@/*":       ["./src/*"],
       "@areas/*":  ["./src/areas/*"],

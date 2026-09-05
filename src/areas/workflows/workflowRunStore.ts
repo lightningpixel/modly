@@ -915,7 +915,9 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
           if (_cancel.current) { _ctx.current = null; set({ runState: IDLE, activeNodeId: null }); return }
           const node = preExecExtNodes[i]
           // During a loop replay, only re-run the active loop's body members.
-          if (activeLoopBody && !activeLoopBody.has(node.id)) continue
+          // handleLoopEnd muta activeLoopBody in closure: reset del narrowing TS (TS#9998).
+          const loopBody = activeLoopBody as Set<string> | null
+          if (loopBody && !loopBody.has(node.id)) continue
           set((s) => ({
             activeNodeId: node.id,
             runState: { ...s.runState, blockIndex: stepsDone, blockProgress: 0, blockStep: 'Starting…' },
