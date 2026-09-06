@@ -52,6 +52,9 @@ export class PythonBridge {
       env: {
         ...cleanPythonEnv(),
         PYTHONUNBUFFERED:       '1',
+        // mesh_ops uses Electron in Node mode for the existing meshoptimizer
+        // backend, so packaged builds do not depend on a system Node install.
+        MODLY_NODE_EXECUTABLE:  process.execPath,
         // No PYTHONPATH needed - the venv's Python has its own isolated site-packages
         MODELS_DIR:             this.resolveModelsDir(),
         WORKSPACE_DIR:          this.resolveWorkspaceDir(),

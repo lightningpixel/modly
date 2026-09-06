@@ -2,6 +2,7 @@ import { Worker }      from 'worker_threads'
 import { spawn }       from 'child_process'
 import { existsSync }  from 'fs'
 import { join }        from 'path'
+import { app }         from 'electron'
 
 // ─── Worker code for JS process extensions ────────────────────────────────────
 
@@ -160,12 +161,14 @@ export class ProcessRunner implements IProcessRunner {
 
 export class PythonProcessRunner implements IProcessRunner {
   private pythonExe:    string
+  private extDir:       string
   private scriptPath:   string
   private workspaceDir: string
   private tempDir:      string
 
   constructor(pythonExe: string, extDir: string, entry: string, workspaceDir: string, tempDir: string) {
     this.pythonExe    = pythonExe
+    this.extDir       = extDir
     this.scriptPath   = join(extDir, entry)
     this.workspaceDir = workspaceDir
     this.tempDir      = tempDir
@@ -180,9 +183,22 @@ export class PythonProcessRunner implements IProcessRunner {
     return new Promise((resolve, reject) => {
       const proc = spawn(this.pythonExe, [this.scriptPath], {
         stdio: ['pipe', 'pipe', 'pipe'],
-        // Force UTF-8 stdio so Unicode prints from process extensions do not
-        // crash under legacy Windows codepages (cp1252/cp932).
-        env: { ...process.env, PYTHONUTF8: '1' },
+        env: {
+          ...process.env,
+          // Force UTF-8 stdio so Unicode prints from process extensions do not
+          // crash under legacy Windows codepages (cp1252/cp932).
+          PYTHONUTF8: '1',
+          // Built-in process nodes may import shared services from the backend.
+          MODLY_API_DIR: app.isPackaged
+            ? join(process.resourcesPath, 'api')
+            : join(app.getAppPath(), 'api'),
+          // Electron is also the packaged Node runtime. meshopt_runner.cjs uses
+          // ELECTRON_RUN_AS_NODE when it launches this executable.
+          MODLY_NODE_EXECUTABLE: process.execPath,
+          EXTENSION_DIR: this.extDir,
+          WORKSPACE_DIR: this.workspaceDir,
+          TEMP_DIR: this.tempDir,
+        },
       })
 
       // Send input as a single JSON line on stdin
