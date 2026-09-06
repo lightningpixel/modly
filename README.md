@@ -69,6 +69,9 @@ npm run build
 
 ## Platform notes
 
+- AMD GPUs are supported through ROCm on Linux and Windows: a Radeon card is detected
+  automatically and extensions are steered to ROCm PyTorch wheels, with no ROCm install
+  required. See [docs/running-on-amd-rocm.md](docs/running-on-amd-rocm.md).
 - macOS support targets Apple Silicon only.
 - macOS uses native window controls. Windows and Linux keep the existing custom controls.
 - The top bar includes a live RAM indicator sourced from the main process.
