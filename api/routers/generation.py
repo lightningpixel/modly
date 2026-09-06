@@ -9,7 +9,11 @@ from fastapi import APIRouter, File, Form, UploadFile, HTTPException, Background
 from services.generators.base import smooth_progress, GenerationCancelled
 
 import re as _re
-from services.generator_registry import generator_registry, WORKSPACE_DIR
+# Import the module (not the name) so WORKSPACE_DIR is read at call time: the
+# settings endpoint rebinds it when the user relocates the workspace, and a
+# binding captured at import would keep writing output to the old directory.
+import services.generator_registry as registry
+from services.generator_registry import generator_registry
 from schemas.generation import JobStatus
 
 router = APIRouter(tags=["generation"])
@@ -70,7 +74,9 @@ def sanitize_collection(collection: str) -> str:
         return "Default"
 
     try:
-        (WORKSPACE_DIR / collection).resolve().relative_to(WORKSPACE_DIR.resolve())
+        (registry.WORKSPACE_DIR / collection).resolve().relative_to(
+            registry.WORKSPACE_DIR.resolve()
+        )
     except (OSError, ValueError):
         return "Default"
 
@@ -206,7 +212,7 @@ async def _run_generation(job_id: str, image_bytes: bytes, params: dict, collect
             return
 
         # Direct output to the collection subfolder
-        coll_dir = WORKSPACE_DIR / collection
+        coll_dir = registry.WORKSPACE_DIR / collection
         coll_dir.mkdir(parents=True, exist_ok=True)
         gen.outputs_dir = coll_dir
 
@@ -227,7 +233,7 @@ async def _run_generation(job_id: str, image_bytes: bytes, params: dict, collect
         job.progress = 100
         _completed_at[job_id] = time.monotonic()
         try:
-            rel = output_path.relative_to(WORKSPACE_DIR)
+            rel = output_path.relative_to(registry.WORKSPACE_DIR)
             job.output_url = f"/workspace/{rel.as_posix()}"
         except ValueError:
             job.output_url = f"/workspace/{collection}/{output_path.name}"
