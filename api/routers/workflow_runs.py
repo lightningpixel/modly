@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 import uuid
 from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
@@ -9,7 +10,9 @@ from routers.generation import (
     VALID_REMESH_MODES,
     _cancel_events,
     _cancelled,
+    _completed_at,
     _jobs,
+    _purge_old_jobs,
     _run_generation,
     sanitize_collection,
 )
@@ -75,6 +78,8 @@ async def create_run_from_image(
     job_id = str(uuid.uuid4())
     image_bytes = await image.read()
 
+    _purge_old_jobs()
+
     _jobs[job_id] = JobStatus(job_id=job_id, status="pending", progress=0)
     _cancel_events[job_id] = threading.Event()
 
@@ -115,6 +120,7 @@ async def cancel_run(run_id: str):
         _cancel_events[run_id].set()
     if job.status in ("pending", "running"):
         job.status = "cancelled"
+        _completed_at[run_id] = time.monotonic()
 
     try:
         gen = generator_registry._generators.get(generator_registry._active_id)
