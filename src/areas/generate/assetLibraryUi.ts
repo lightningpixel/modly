@@ -168,6 +168,35 @@ export function resolveOpenPanelAfterLibrarySelection(currentPanel: GenerateOpen
   return currentPanel === 'library' ? 'library' : currentPanel
 }
 
+export const ASSET_LIBRARY_PANEL_MIN_WIDTH = 260
+export const ASSET_LIBRARY_PANEL_MAX_WIDTH = 560
+export const ASSET_LIBRARY_PANEL_DEFAULT_WIDTH = 320
+
+const ASSET_LIBRARY_PANEL_WIDTH_STORAGE_KEY = 'modly-library-panel-width'
+
+export function clampAssetLibraryPanelWidth(width: number): number {
+  return Math.min(ASSET_LIBRARY_PANEL_MAX_WIDTH, Math.max(ASSET_LIBRARY_PANEL_MIN_WIDTH, width))
+}
+
+/** Reads the user's saved Library panel width, falling back to the default when unset, invalid, or unreadable. */
+export function getStoredAssetLibraryPanelWidth(): number {
+  try {
+    const raw = Number(localStorage.getItem(ASSET_LIBRARY_PANEL_WIDTH_STORAGE_KEY))
+    return Number.isFinite(raw) && raw > 0 ? clampAssetLibraryPanelWidth(raw) : ASSET_LIBRARY_PANEL_DEFAULT_WIDTH
+  } catch {
+    return ASSET_LIBRARY_PANEL_DEFAULT_WIDTH
+  }
+}
+
+/** Persists the Library panel width so it survives app restarts. */
+export function storeAssetLibraryPanelWidth(width: number): void {
+  try {
+    localStorage.setItem(ASSET_LIBRARY_PANEL_WIDTH_STORAGE_KEY, String(width))
+  } catch {
+    // Ignore quota/private-mode failures — the panel just won't remember its size.
+  }
+}
+
 function sortAssetLibraryEntries(
   entries: ProjectedAssetLibraryEntry[],
   sortMode: AssetLibrarySortMode,

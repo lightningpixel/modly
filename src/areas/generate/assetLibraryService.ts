@@ -5,6 +5,8 @@ import type {
   AssetLibraryOpenResult,
   AssetLibraryReadRequest,
   AssetLibraryReadResult,
+  AssetLibraryThumbnailRequest,
+  AssetLibraryThumbnailResult,
 } from '../../shared/types/assetLibrary'
 import { projectAssetLibraryEntry, type ProjectedAssetLibraryEntry } from './assetLibraryProjection'
 
@@ -12,6 +14,7 @@ export interface AssetLibraryPreloadApi {
   list: () => Promise<AssetLibraryListResult>
   read: (request: AssetLibraryReadRequest) => Promise<AssetLibraryReadResult>
   open: (request: AssetLibraryOpenRequest) => Promise<AssetLibraryOpenResult>
+  thumbnail: (request: AssetLibraryThumbnailRequest) => Promise<AssetLibraryThumbnailResult>
 }
 
 export type ProjectedAssetLibraryListResult =
@@ -59,6 +62,12 @@ export function createAssetLibraryService(api: AssetLibraryPreloadApi) {
       const result = await api.open(request)
       if (!result.success) return result
       return { success: true, entry: projectAssetLibraryEntry(result.entry) }
+    },
+    // A missing/invalid thumbnail is never an error the UI needs to show — the
+    // Library list just falls back to its text-only row.
+    async thumbnail(request: AssetLibraryThumbnailRequest): Promise<AssetLibraryThumbnailResult> {
+      if (validateWorkspacePath(request.workspacePath)) return { success: false }
+      return api.thumbnail(request)
     },
   }
 }

@@ -4,6 +4,8 @@ import type {
   AssetLibraryOpenResult,
   AssetLibraryReadRequest,
   AssetLibraryReadResult,
+  AssetLibraryThumbnailRequest,
+  AssetLibraryThumbnailResult,
 } from '../../src/shared/types/assetLibrary'
 
 export interface IpcRendererLike {
@@ -195,6 +197,7 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         list: (): Promise<AssetLibraryListResult> => ipcRenderer.invoke('workspace:library:list') as Promise<AssetLibraryListResult>,
         read: (request: AssetLibraryReadRequest): Promise<AssetLibraryReadResult> => ipcRenderer.invoke('workspace:library:read', request) as Promise<AssetLibraryReadResult>,
         open: (request: AssetLibraryOpenRequest): Promise<AssetLibraryOpenResult> => ipcRenderer.invoke('workspace:library:open', request) as Promise<AssetLibraryOpenResult>,
+        thumbnail: (request: AssetLibraryThumbnailRequest): Promise<AssetLibraryThumbnailResult> => ipcRenderer.invoke('workspace:library:thumbnail', request) as Promise<AssetLibraryThumbnailResult>,
       },
     },
 

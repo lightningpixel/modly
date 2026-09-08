@@ -12,6 +12,7 @@ import type {
   AssetLibraryPreviewPayload,
   AssetLibraryReadResult,
   AssetLibrarySourceScope,
+  AssetLibraryThumbnailResult,
 } from '../../src/shared/types/assetLibrary'
 import type { ArtifactProvenance } from '../../src/shared/types/artifacts'
 
@@ -49,6 +50,10 @@ export interface WorkspaceAssetLibraryRequest {
 export interface WorkspaceAssetLibraryReadRequest extends WorkspaceAssetLibraryRequest {
   workspacePath: string
   sourceWorkspacePath?: string
+}
+
+export interface WorkspaceAssetLibraryThumbnailRequest extends WorkspaceAssetLibraryRequest {
+  workspacePath: string
 }
 
 interface AssetLibraryMetadata {
@@ -342,6 +347,21 @@ export async function openWorkspaceAssetLibraryEntry(request: WorkspaceAssetLibr
   return { success: true, entry: read.entry }
 }
 
+// Thumbnails are pre-rendered beside their source mesh (see thumbs.py): a
+// `<name>.glb` asset may have a sibling `<name>.thumb.png`. Missing files are
+// a normal, silent condition, never surfaced as an AssetLibraryError.
+export async function readWorkspaceAssetLibraryThumbnail(request: WorkspaceAssetLibraryThumbnailRequest): Promise<AssetLibraryThumbnailResult> {
+  try {
+    const normalized = normalizeWorkspaceAssetPath(request.workspaceDir, request.workspacePath)
+    if (!isGlbOrGltf(normalized.workspacePath)) return { success: false }
+    const thumbnailAbsolutePath = normalized.absolutePath.replace(/\.(glb|gltf)$/i, '.thumb.png')
+    const buffer = await readFile(thumbnailAbsolutePath)
+    return { success: true, dataUrl: `data:image/png;base64,${buffer.toString('base64')}` }
+  } catch {
+    return { success: false }
+  }
+}
+
 function readPayloadRequest(payload: unknown): { workspacePath?: string, sourceWorkspacePath?: string } {
   if (typeof payload !== 'object' || payload === null) return {}
   const values = payload as { workspacePath?: unknown, sourceWorkspacePath?: unknown }
@@ -362,5 +382,10 @@ export function registerWorkspaceAssetLibraryIpcHandlers(deps: WorkspaceAssetLib
     const { workspacePath, sourceWorkspacePath } = readPayloadRequest(payload)
     if (!workspacePath) return { success: false, error: libraryError('invalid-request', 'workspacePath is required.') }
     return openWorkspaceAssetLibraryEntry({ workspaceDir: deps.getWorkspaceDir(), workspacePath, sourceWorkspacePath })
+  })
+  deps.ipcMain.handle('workspace:library:thumbnail', async (_event, payload) => {
+    const { workspacePath } = readPayloadRequest(payload)
+    if (!workspacePath) return { success: false }
+    return readWorkspaceAssetLibraryThumbnail({ workspaceDir: deps.getWorkspaceDir(), workspacePath })
   })
 }

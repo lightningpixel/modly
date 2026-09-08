@@ -3,12 +3,15 @@ import test from 'node:test'
 
 import {
   buildAssetLibraryOpenRequest,
+  clampAssetLibraryPanelWidth,
   createAssetLibraryOpenJob,
   describeAssetLibraryOpenability,
   filterAssetLibraryScopeGroups,
   getDefaultAssetLibraryCollapsedSectionKeys,
+  getStoredAssetLibraryPanelWidth,
   isAssetLibraryEntryOpenable,
   resolveOpenPanelAfterLibrarySelection,
+  storeAssetLibraryPanelWidth,
   toggleAssetLibrarySectionKey,
   type AssetLibrarySortMode,
   type GenerateOpenPanel,
@@ -122,4 +125,13 @@ test('builds linked-source open requests and import jobs for safe sidecars', () 
   const selection = createAssetLibraryOpenJob(sidecar, target, 1718546400001)
   assert.equal(selection?.historyUrl, '/workspace/Workflows/run/hero.glb')
   assert.equal(selection?.job.outputUrl, '/workspace/Workflows/run/hero.glb')
+})
+
+test('Library panel width clamps to sane bounds and degrades silently without a localStorage', () => {
+  assert.equal(clampAssetLibraryPanelWidth(0), 260)
+  assert.equal(clampAssetLibraryPanelWidth(999), 560)
+  assert.equal(clampAssetLibraryPanelWidth(400), 400)
+  // node --test has no `localStorage` global — both helpers must fall back rather than throw.
+  assert.equal(getStoredAssetLibraryPanelWidth(), 320)
+  assert.doesNotThrow(() => storeAssetLibraryPanelWidth(400))
 })
