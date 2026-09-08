@@ -24,6 +24,8 @@ export interface ExtensionNode {
   downloadCheck?:   string
   hfSkipPrefixes?:  string[]
   hfIncludePrefixes?: string[]
+  /** If set, this capability shares weights with the specified owner capability (format: "ext_id/node_id"). Downloads will go to the owner's directory. */
+  weight_owner_id?: string
 }
 
 export interface ModelExtension {

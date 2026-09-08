@@ -16,6 +16,20 @@ export interface InstallProgress {
 }
 
 // ─── Store ────────────────────────────────────────────────────────────────────
+type InstallResult = {
+  success: boolean
+  error?: string
+  extension?: AnyExtension
+  extensionId?: string
+  needsRepair?: boolean
+  cancelled?: boolean
+  partialResults?: Array<{
+    success: boolean
+    error?: string
+    extension?: AnyExtension
+    extensionId?: string
+  }>
+}
 
 interface ExtensionsStore {
   modelExtensions:   ModelExtension[]
@@ -26,8 +40,8 @@ interface ExtensionsStore {
   loadErrors:        Record<string, string>
 
   loadExtensions:    () => Promise<void>
-  installFromGitHub: (url: string) => Promise<{ success: boolean; error?: string }>
-  installFromLocal:  () => Promise<{ success: boolean; error?: string; cancelled?: boolean; needsRepair?: boolean }>
+  installFromGitHub: (url: string) => Promise<InstallResult>
+  installFromLocal:  () => Promise<InstallResult>
   uninstall:         (extensionId: string) => Promise<{ success: boolean; error?: string }>
   reload:            () => Promise<void>
   clearInstallState: () => void
@@ -120,13 +134,7 @@ export const useExtensionsStore = create<ExtensionsStore>((set, get) => ({
 }))
 
 async function installExtension(
-  invoke: () => Promise<{
-    success: boolean
-    error?: string
-    extension?: AnyExtension
-    extensionId?: string
-    needsRepair?: boolean
-  }>,
+  invoke: () => Promise<InstallResult>,
   set: (partial: Partial<ExtensionsStore> | ((state: ExtensionsStore) => Partial<ExtensionsStore>)) => void,
 ) {
     set({ installProgress: { step: 'downloading', percent: 0 }, installError: null })
@@ -142,6 +150,52 @@ async function installExtension(
     try {
       const result = await invoke()
 
+      // Handle bundle install with partial results
+      if (result.partialResults && result.partialResults.length > 0) {
+        const successful = result.partialResults.filter(r => r.success && r.extension)
+        const failed = result.partialResults.filter(r => !r.success)
+
+        // Add successful extensions
+        for (const res of successful) {
+          const ext = res.extension as AnyExtension
+          set((state) => {
+            if (ext.type === 'process') {
+              const filtered = state.processExtensions.filter((e) => e.id !== ext.id)
+              return {
+                processExtensions: [...filtered, ext],
+                modelExtensions: state.modelExtensions.filter((e) => e.id !== ext.id),
+              }
+            } else {
+              const filtered = state.modelExtensions.filter((e) => e.id !== ext.id)
+              return {
+                modelExtensions: [...filtered, ext],
+                processExtensions: state.processExtensions.filter((e) => e.id !== ext.id),
+              }
+            }
+          })
+        }
+
+        // Report partial success/failure
+        if (failed.length > 0 && successful.length > 0) {
+          set({
+            installProgress: { step: 'done', extensionId: successful.map(s => s.extensionId).join(', ') },
+            installError: `${failed.length} of ${result.partialResults.length} extensions failed: ${failed.map(f => f.error).join('; ')}`,
+          })
+        } else if (failed.length > 0) {
+          set({
+            installProgress: null,
+            installError: `All extensions failed: ${failed.map(f => f.error).join('; ')}`,
+          })
+        } else {
+          set({
+            installProgress: { step: 'done', extensionId: successful.map(s => s.extensionId).join(', ') },
+            installError: null,
+          })
+        }
+        return result
+      }
+
+      // Handle single extension (legacy)
       if (result.success && result.extension) {
         const ext = result.extension as AnyExtension
         set((state) => {
@@ -189,4 +243,4 @@ async function installExtension(
     } finally {
       window.electron.extensions.offInstallProgress()
     }
-}
+  }

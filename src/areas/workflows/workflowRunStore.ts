@@ -363,21 +363,6 @@ async function executeExtensionNode(
       throw new Error('No input image selected for model node')
     }
 
-    let blob: Blob
-    let fname: string
-    if (isTextInput || (selectedImageData && nodeInputPath === undefined)) {
-      const base64 = selectedImageData && nodeInputPath === undefined
-        ? selectedImageData
-        : 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==' // 1x1 transparent PNG
-      fname = 'placeholder.png'
-      blob = new Blob([Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))], { type: 'image/png' })
-    } else {
-      const base64 = await window.electron.fs.readFileBase64(activeImagePath as string)
-      const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
-      blob = new Blob([bytes], { type: 'image/png' })
-      fname = activeImagePath?.split(/[\\/]/).pop() ?? 'image.png'
-    }
-
     const extraParams: Record<string, unknown> = {}
     if (nodeInputMeshPath) {
       const norm = nodeInputMeshPath.replace(/\\/g, '/')
@@ -398,19 +383,49 @@ async function executeExtensionNode(
     )
     const effectiveParams = { ...schemaDefaults, ...liveParams }
 
-    const fd = new FormData()
-    fd.append('image', blob, fname)
-    fd.append('model_id', node.data.extensionId ?? '')
-    fd.append('collection', 'Workflows')
-    fd.append('remesh', 'none')
-    fd.append('enable_texture', 'false')
-    fd.append('texture_resolution', '1024')
-    fd.append('params', JSON.stringify({ ...effectiveParams, ...extraParams }))
+    let endpoint = '/generate/from-image'
+    let fd: FormData
+
+    if (isTextInput) {
+      // Use text-to-image endpoint
+      endpoint = '/generate/from-text'
+      fd = new FormData()
+      fd.append('prompt', nodeInputText ?? '')
+      fd.append('model_id', node.data.extensionId ?? '')
+      fd.append('collection', 'Workflows')
+      fd.append('remesh', 'none')
+      fd.append('enable_texture', 'false')
+      fd.append('texture_resolution', '1024')
+      fd.append('params', JSON.stringify({ ...effectiveParams, ...extraParams }))
+    } else {
+      // Use image-to-image endpoint
+      let blob: Blob
+      let fname: string
+      if (selectedImageData && nodeInputPath === undefined) {
+        const base64 = selectedImageData
+        fname = 'placeholder.png'
+        blob = new Blob([Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))], { type: 'image/png' })
+      } else {
+        const base64 = await window.electron.fs.readFileBase64(activeImagePath as string)
+        const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+        blob = new Blob([bytes], { type: 'image/png' })
+        fname = activeImagePath?.split(/[\\/]/).pop() ?? 'image.png'
+      }
+
+      fd = new FormData()
+      fd.append('image', blob, fname)
+      fd.append('model_id', node.data.extensionId ?? '')
+      fd.append('collection', 'Workflows')
+      fd.append('remesh', 'none')
+      fd.append('enable_texture', 'false')
+      fd.append('texture_resolution', '1024')
+      fd.append('params', JSON.stringify({ ...effectiveParams, ...extraParams }))
+    }
 
     setRunState((s) => ({ ...s, blockProgress: 5, blockStep: 'Submitting to model…' }))
 
     const { data } = await client.post<{ job_id: string }>(
-      '/generate/from-image', fd,
+      endpoint, fd,
       { headers: { 'Content-Type': 'multipart/form-data' } },
     )
     _activeJobId.current = data.job_id

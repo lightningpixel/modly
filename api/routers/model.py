@@ -70,6 +70,53 @@ async def model_params(model_id: Optional[str] = None):
         raise HTTPException(404, f"Unknown model ID: {model_id}")
 
 
+@router.get("/readiness/{model_id}")
+async def model_readiness(model_id: str):
+    """
+    Check if a model's runtime is ready (weights downloaded, venv set up, etc.).
+    Returns: { ready: boolean, status: string, details?: object }
+    """
+    try:
+        gen = generator_registry.get_generator(model_id)
+    except ValueError:
+        raise HTTPException(404, f"Unknown model ID: {model_id}")
+
+    manifest = generator_registry.get_manifest(model_id)
+    ext_id = manifest.get("ext_id", model_id.split("/")[0])
+
+    # Check if weights are downloaded
+    weights_downloaded = gen.is_downloaded()
+
+    # Check if setup is needed (for subprocess extensions)
+    setup_needed = False
+    if hasattr(gen, '_proc') and gen._proc is None:
+        # ExtensionProcess - check if venv exists
+        import os
+        from pathlib import Path
+        ext_dir = Path(os.environ.get("EXTENSIONS_DIR", "")) / ext_id
+        if ext_dir.exists():
+            venv_python = ext_dir / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            setup_needed = not venv_python.exists()
+
+    # Determine readiness
+    ready = weights_downloaded and not setup_needed
+
+    status = "ready"
+    if not weights_downloaded:
+        status = "weights_missing"
+    elif setup_needed:
+        status = "setup_required"
+
+    return {
+        "model_id": model_id,
+        "ready": ready,
+        "status": status,
+        "weights_downloaded": weights_downloaded,
+        "setup_needed": setup_needed,
+        "loaded": gen.is_loaded(),
+    }
+
+
 @router.post("/switch")
 async def switch_model(model_id: str):
     """Switch the active model."""
@@ -129,6 +176,7 @@ async def hf_download(
     skip_prefixes: Optional[str] = None,
     include_prefixes: Optional[str] = None,
     token: Optional[str] = None,
+    weight_owner_id: Optional[str] = None,
 ):
     """
     Streams a HuggingFace Hub model download via SSE.
@@ -138,13 +186,16 @@ async def hf_download(
     skip_prefixes:    JSON-encoded list of path prefixes to exclude.
     include_prefixes: JSON-encoded list of path prefixes to include (whitelist).
     token:            HuggingFace access token for gated repos (from Electron settings).
+    weight_owner_id:  If set, download into the owner's directory instead of model_id's.
     All three fall back to the extension's manifest / environment when not supplied.
 
     SSE format: data: {"percent": 0-100, "file": "...", "status": "..."}
     """
     import json as _json
     import os
-    dest_dir  = str(MODELS_DIR / model_id)
+    # Use weight_owner_id if provided, otherwise use model_id
+    effective_model_id = weight_owner_id or model_id
+    dest_dir  = str(MODELS_DIR / effective_model_id)
     # Prefer skip_prefixes passed directly from the client (authoritative, no registry dep)
     if skip_prefixes:
         try:

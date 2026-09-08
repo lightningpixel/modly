@@ -3,7 +3,7 @@ import { buildSync } from 'esbuild'
 import { autoUpdater } from 'electron-updater'
 import { join } from 'path'
 import { rm as rmAsync, readFile, writeFile, mkdir, readdir, rename, cp, symlink, lstat } from 'fs/promises'
-import { existsSync, mkdirSync, readdirSync, statSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'fs'
 import axios from 'axios'
 import * as tar from 'tar'
 import * as os from 'os'
@@ -107,6 +107,623 @@ function detectGpuInfo(): Promise<GpuInfo> {
     proc.on('error', () => resolve({ sm: 0, cudaVersion: 0, accelerator: 'cpu' }))
   })
 }
+
+// ─── Bundle detection ──────────────────────────────────────────────────────────
+
+interface BundleExtension {
+  id: string
+  path: string
+  manifest: ParsedManifest
+}
+
+function detectBundleExtensions(extractDir: string): BundleExtension[] {
+  const extensionsDir = join(extractDir, 'extensions')
+  if (!existsSync(extensionsDir)) return []
+
+  const children = readdirSync(extensionsDir, { withFileTypes: true })
+  const bundles: BundleExtension[] = []
+
+  for (const child of children) {
+    if (!child.isDirectory()) continue
+    const childPath = join(extensionsDir, child.name)
+    const manifestPath = join(childPath, 'manifest.json')
+    if (!existsSync(manifestPath)) continue
+
+    try {
+      const raw = readFileSync(manifestPath, 'utf-8')
+      const manifest = JSON.parse(raw) as ParsedManifest
+      if (!manifest.id) continue
+
+      // Validate folder name matches manifest ID
+      if (manifest.id !== child.name) {
+        console.warn(`[Bundle] Skipping ${child.name}: folder name doesn't match manifest.id (${manifest.id})`)
+        continue
+      }
+
+      bundles.push({ id: manifest.id, path: childPath, manifest })
+    } catch {
+      console.warn(`[Bundle] Failed to parse manifest in ${child.name}`)
+    }
+  }
+
+  return bundles
+}
+
+function detectSingleExtension(extractDir: string): BundleExtension | null {
+  const manifestPath = join(extractDir, 'manifest.json')
+  if (!existsSync(manifestPath)) return null
+
+  try {
+    const raw = readFileSync(manifestPath, 'utf-8')
+    const manifest = JSON.parse(raw) as ParsedManifest
+    if (!manifest.id) return null
+
+    return { id: manifest.id, path: extractDir, manifest }
+  } catch {
+    return null
+  }
+}
+
+// ─── Run an extension's setup.py directly (no FastAPI needed) ─────────────────
+
+function runExtensionSetup(
+  extDir:      string,
+  gpuSm:       number,
+  cudaVersion: number,
+  onLog?:      (line: string) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const userData  = app.getPath('userData')
+    ensureSslPatch(userData)
+    const pythonExe = getVenvPythonExe(userData)
+    const setupPy   = join(extDir, 'setup.py')
+
+    // Shared pip wheel cache: a failed setup retried later reuses the multi-GB
+    // torch wheels instead of re-downloading them (see issue #223). Extension
+    // setup.py scripts that pass --no-cache-dir get it stripped by the launcher.
+    const pipCacheDir = join(getSettings(userData).dependenciesDir, 'pip-cache')
+    try { mkdirSync(pipCacheDir, { recursive: true }) } catch { /* pip creates it too */ }
+
+    const accelerator = process.platform === 'darwin' && process.arch === 'arm64' ? 'mps' : gpuSm > 0 ? 'cuda' : 'cpu'
+    const args = JSON.stringify({
+      python_exe: pythonExe,
+      ext_dir: extDir,
+      gpu_sm: gpuSm,
+      cuda_version: cudaVersion,
+      accelerator,
+      platform: process.platform,
+      arch: process.arch,
+    })
+    const launcher = `
+import runpy
+import subprocess
+import sys
+
+setup_py = sys.argv[1]
+setup_args = sys.argv[2:]
+
+_original_run = subprocess.run
+_original_check_call = subprocess.check_call
+_original_check_output = subprocess.check_output
+
+def _is_cuda_torch_index(value):
+    return isinstance(value, str) and value.startswith("https://download.pytorch.org/whl/cu")
+
+def _mentions_torch(command):
+    if not isinstance(command, (list, tuple)):
+        return False
+    return any(str(part).startswith(("torch==", "torchvision==", "torchaudio==")) for part in command)
+
+def _rewrite_command(command):
+    if sys.platform != "darwin" || !_mentions_torch(command):
+        return command
+    if not isinstance(command, (list, tuple)):
+        return command
+
+    rewritten = []
+    changed = false
+    i = 0
+    while i < len(command):
+        part = command[i]
+        text = str(part)
+        if text in ("--index-url", "-i", "--extra-index-url") and i + 1 < len(command) and _is_cuda_torch_index(str(command[i + 1])):
+            changed = true
+            i += 2
+            continue
+        if text.startswith("--index-url=") or text.startswith("--extra-index-url="):
+            value = text.split("=", 1)[1]
+            if _is_cuda_torch_index(value):
+                changed = true
+                i += 1
+                continue
+        rewritten.append(part)
+        i += 1
+
+    if changed:
+        print("[Modly setup compat] Removed CUDA-only PyTorch index on macOS; pip will use macOS wheels.", file=sys.stderr)
+        return rewritten
+    return command
+
+def _is_pip_command(command):
+    if not isinstance(command, (list, tuple)):
+        return false
+    return any("pip" in str(part).lower() for part in command[:3])
+
+def _strip_no_cache(command):
+    # Extension setup scripts often hardcode --no-cache-dir, which forces pip to
+    # re-download multi-GB wheels on every retry. Modly provides a shared cache
+    # via PIP_CACHE_DIR, so drop the flag and let pip use it.
+    if not _is_pip_command(command):
+        return command
+    if not any(str(part) == "--no-cache-dir" for part in command):
+        return command
+    print("[Modly setup compat] Removed --no-cache-dir so pip reuses the shared wheel cache.", file=sys.stderr)
+    return [part for part in command if str(part) != "--no-cache-dir"]
+
+def _transform_command(command):
+    return _strip_no_cache(_rewrite_command(command))
+
+def _patched_run(*args, **kwargs):
+    args = list(args)
+    if args:
+        args[0] = _transform_command(args[0])
+    return _original_run(*args, **kwargs)
+
+def _patched_check_call(*args, **kwargs):
+    args = list(args)
+    if args:
+        args[0] = _transform_command(args[0])
+    return _original_check_call(*args, **kwargs)
+
+def _patched_check_output(*args, **kwargs):
+    args = list(args)
+    if args:
+        args[0] = _transform_command(args[0])
+    return _original_check_output(*args, **kwargs)
+
+subprocess.run = _patched_run
+subprocess.check_call = _patched_check_call
+subprocess.check_output = _patched_check_output
+
+sys.argv = [setup_py] + setup_args
+runpy.run_path(setup_py, run_name="__main__")
+`
+    const proc = spawn(pythonExe, ['-c', launcher, setupPy, args], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env:   { ...process.env, PIP_CACHE_DIR: pipCacheDir },
+    })
+
+    const handleLine = (line: string) => { if (line) onLog?.(line) }
+
+    let stderr = ''
+    proc.stdout?.on('data', (d: Buffer) => d.toString().split('\n').forEach(handleLine))
+    proc.stderr?.on('data', (d: Buffer) => {
+      const s = d.toString()
+      stderr += s
+      s.split('\n').forEach(handleLine)
+    })
+
+    proc.on('close', (code) => {
+      if (code === 0) resolve()
+      else reject(new Error(`setup.py exited with code ${code}\n${stderr.slice(-2000)}`))
+    })
+    proc.on('error', reject)
+  })
+}
+
+// ─── Install a single extension from extracted directory ───────────────────────
+
+async function installSingleExtension(
+  bundle: BundleExtension,
+  owner: string,
+  repo: string,
+  extensionsDir: string,
+  emit: (data: object) => void,
+  trackedIds: string[],
+  activeInstalls: Set<string>,
+): Promise<{ success: boolean; error?: string; extensionId?: string; extension?: AnyExtension }> {
+  const { id: extensionId, path: extPath, manifest } = bundle
+
+  try {
+    // Validate manifest
+    const { isProcess, entryFile, isPythonProcess, hasNodes } = validateInstallManifest(
+      manifest,
+      {
+        hasEntryFile: (candidate) => existsSync(join(extPath, candidate)),
+        hasGeneratorFile: () => existsSync(join(extPath, 'generator.py')),
+      },
+      `repository (extension: ${extensionId})`,
+    )
+    if (!hasNodes) throw new Error(`manifest.json: required field "nodes" missing or empty for ${extensionId}`)
+    const safeExtensionId = assertSafeExtensionId(extensionId)
+    manifest.id = safeExtensionId
+
+    // Override source field with the actual GitHub URL so trust is based on origin
+    manifest.source = `https://github.com/${owner}/${repo}`
+    const manifestPath = join(extPath, 'manifest.json')
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf-8')
+
+    trackedIds.push(safeExtensionId)
+    activeInstalls.add(safeExtensionId)
+
+    // Stage into a fresh, unique dir next to the final location
+    const installSuffix = String(Date.now())
+    const destDir = resolveExtensionPathWithinRoot(extensionsDir, safeExtensionId)
+    const stagingDir = buildExtensionStagingPath(extensionsDir, safeExtensionId, installSuffix)
+
+    if (existsSync(destDir)) {
+      const currentManifestPath = join(destDir, 'manifest.json')
+      let currentManifestJson: string
+      try {
+        currentManifestJson = await readFile(currentManifestPath, 'utf-8')
+      } catch (error) {
+        throw new Error(
+          `Cannot safely replace extension "${safeExtensionId}" because its existing `
+          + `manifest.json is missing or unreadable. Uninstall it first. ${String(error)}`,
+        )
+      }
+      validateExistingExtensionReplacement(
+        currentManifestJson,
+        manifest,
+        {
+          hasEntryFile: (candidate) => existsSync(join(destDir, candidate)),
+          hasGeneratorFile: () => existsSync(join(destDir, 'generator.py')),
+        },
+        'existing extension folder',
+      )
+    }
+
+    try {
+      await cp(extPath, stagingDir, { recursive: true })
+      // Reserved recovery files are host-owned transaction state, never
+      // repository content. Strip packaged/stale copies before activation.
+      await rmAsync(
+        join(stagingDir, EXT_REGISTRATION_PENDING_MARKER),
+        { recursive: true, force: true },
+      )
+      await rmAsync(
+        join(stagingDir, EXT_VALIDATED_MARKER),
+        { recursive: true, force: true },
+      )
+      await writeFile(join(stagingDir, EXT_INCOMPLETE_MARKER), new Date().toISOString(), 'utf-8')
+
+      // Compile TypeScript entry to JS at install time (once, no runtime overhead)
+      if (isProcess && entryFile.endsWith('.ts')) {
+        emit({ step: 'setting_up', message: `Compiling TypeScript entry for ${safeExtensionId}…` })
+        const compiledEntry = entryFile.replace(/\.ts$/, '.js')
+        buildSync({
+          entryPoints: [join(stagingDir, entryFile)],
+          outfile:     join(stagingDir, compiledEntry),
+          bundle:      true,
+          platform:    'node',
+          format:      'cjs',
+          external:    ['electron'],
+        })
+        manifest.entry = compiledEntry
+        await writeFile(join(stagingDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf-8')
+      }
+    } catch (stageErr) {
+      await rmWithRetry(stagingDir, 'ext-install')
+      throw stageErr
+    }
+
+    // Swap into place (backup the previous version first)
+    terminateProcessRunner(safeExtensionId)
+    const backupDir = existsSync(destDir)
+      ? buildExtensionBackupPath(extensionsDir, safeExtensionId, installSuffix)
+      : null
+    if (backupDir) {
+      const parked = await renameWithRetry(destDir, backupDir, 'ext-install')
+      if (!parked.ok) {
+        await rmWithRetry(stagingDir, 'ext-install')
+        throw new Error(`The current extension folder "${safeExtensionId}" is locked (antivirus or a running process) — close what might be using it and try again.`)
+      }
+    }
+    const activated = await renameWithRetry(stagingDir, destDir, 'ext-install')
+    if (!activated.ok) {
+      await rmWithRetry(stagingDir, 'ext-install')
+      if (backupDir) await renameWithRetry(backupDir, destDir, 'ext-install')
+      throw new Error(`Could not move the staged extension "${safeExtensionId}" into place — the folder is locked. Try again.`)
+    }
+
+    // Persist transaction state beside extension folders
+    const pending = await beginExtensionRegistrationTransaction(
+      extensionsDir,
+      safeExtensionId,
+      installSuffix,
+      logger,
+    )
+    if (!pending.ok) {
+      if (backupDir) {
+        await rollbackFailedExtensionUpdate(
+          extensionsDir,
+          destDir,
+          backupDir,
+          safeExtensionId,
+          `Could not mark the update as pending: ${String(pending.error)}`,
+        )
+      } else {
+        await rmWithRetry(destDir, 'ext-install')
+      }
+      throw new Error(`Could not mark extension registration as pending for "${safeExtensionId}": ${String(pending.error)}`)
+    }
+
+    // Setup runs in the final folder; a failure restores the previous version
+    try {
+      if (isPythonProcess) {
+        if (existsSync(join(destDir, 'setup.py'))) {
+          emit({ step: 'setting_up', message: `Setting up Python environment for ${safeExtensionId}…` })
+          const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
+          await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
+            logger.info(`[ext-setup] ${line}`)
+            emit({ step: 'setting_up', message: line })
+          })
+        }
+      } else if (isProcess) {
+        if (existsSync(join(destDir, 'package.json'))) {
+          emit({ step: 'setting_up', message: `Installing dependencies for ${safeExtensionId}…` })
+          await new Promise<void>((resolve, reject) => {
+            const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+            const child = spawn(npm, ['install', '--omit=dev', '--no-audit', '--no-fund', '--ignore-scripts=false'], {
+              cwd:   destDir,
+              stdio: 'pipe',
+            })
+            let buf = ''
+            const onData = (chunk: Buffer) => {
+              buf += chunk.toString()
+              const lines = buf.split('\n')
+              buf = lines.pop() ?? ''
+              for (const raw of lines) {
+                const line = raw.replace(/\x1b\[[0-9;]*m/g, '').trim()
+                if (line) emit({ step: 'setting_up', message: line })
+              }
+            }
+            child.stdout?.on('data', onData)
+            child.stderr?.on('data', onData)
+            child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`npm install failed (exit ${code})`)))
+            child.on('error', reject)
+          })
+        }
+      } else {
+        if (existsSync(join(destDir, 'setup.py'))) {
+          emit({ step: 'setting_up', message: `Setting up Python environment for ${safeExtensionId}…` })
+          const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
+          await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
+            logger.info(`[ext-setup] ${line}`)
+            emit({ step: 'setting_up', message: line })
+          })
+        }
+      }
+    } catch (setupErr) {
+      if (backupDir) {
+        const restored = await restoreExtensionBackup(destDir, backupDir, logger)
+        if (!restored.ok) {
+          throw new Error(
+            `Extension "${safeExtensionId}" setup failed, and Modly could not restore the previous version `
+            + `during ${restored.stage}: ${String(restored.error)}. `
+            + `Restart Modly to retry recovery. Original failure: ${String(setupErr)}`,
+          )
+        }
+        const cleared = await clearExtensionRegistrationTransaction(
+          extensionsDir,
+          safeExtensionId,
+          logger,
+        )
+        if (!cleared.ok) {
+          throw new Error(
+            `Extension "${safeExtensionId}" setup failed and the previous version was restored, but Modly `
+            + `could not clear recovery state during ${cleared.stage}: ${String(cleared.error)}.`,
+          )
+        }
+      } else {
+        const removed = await rmWithRetry(destDir, 'ext-install')
+        if (removed.ok) {
+          const cleared = await clearExtensionRegistrationTransaction(
+            extensionsDir,
+            safeExtensionId,
+            logger,
+          )
+          if (!cleared.ok) {
+            throw new Error(
+              `Extension "${safeExtensionId}" setup failed and its incomplete folder was removed, but Modly `
+              + `could not clear recovery state during ${cleared.stage}: ${String(cleared.error)}.`,
+            )
+          }
+        }
+      }
+      throw setupErr
+    }
+
+    // Runtime validation passed. Mark cleanup as validated before deleting
+    // rollback copies so startup can safely retry an interrupted deletion.
+    try {
+      await validateExtensionDestinationRegistration(
+        destDir,
+        async () => {
+          if (!isProcess) {
+            await reloadAndValidateModelExtension(
+              manifest,
+              safeExtensionId,
+              pending.validationCapability,
+            )
+          }
+        },
+        'ext-install',
+        logger,
+      )
+    } catch (registrationError) {
+      if (backupDir) {
+        await rollbackFailedExtensionUpdate(
+          extensionsDir,
+          destDir,
+          backupDir,
+          safeExtensionId,
+          registrationError,
+        )
+      } else {
+        const quarantined = await quarantineExtensionRegistrationFailure(
+          extensionsDir,
+          safeExtensionId,
+          logger,
+        )
+        if (!quarantined.ok) {
+          throw new Error(
+            `Runtime registration failed for "${safeExtensionId}", and Modly could not quarantine the extension `
+            + `during ${quarantined.stage}: ${String(quarantined.error)}. `
+            + `Restart Modly to retry recovery. Original failure: ${String(registrationError)}`,
+          )
+        }
+        if (!isProcess) {
+          try {
+            await quarantineModelExtensionRuntime(manifest, safeExtensionId)
+          } catch (runtimeQuarantineError) {
+            throw new Error(
+              `Runtime registration failed for "${safeExtensionId}" and filesystem quarantine was preserved, `
+              + `but Modly could not evict partially registered model state: `
+              + `${String(runtimeQuarantineError)}. `
+              + `Original failure: ${String(registrationError)}`,
+            )
+          }
+        }
+      }
+      throw registrationError
+    }
+
+    await cleanupValidatedBackupsOrThrow(extensionsDir, safeExtensionId)
+
+    emit({ step: 'done', extensionId: safeExtensionId })
+
+    const trustedRepos = await fetchTrustedRepos()
+    const ext = parseExtensionManifest(manifest, safeExtensionId, trustedRepos)
+    return { success: true, extensionId: safeExtensionId, extension: ext }
+  } catch (err) {
+    return { success: false, error: String(err) }
+  }
+}
+
+// ─── Install an extension from a GitHub repo URL ────────────────────────────────
+  ipcMain.handle('extensions:installFromGitHub', async (event, githubUrl: string) => {
+    const win    = getWindow()
+    const emit   = (data: object) => win?.webContents.send('extensions:installProgress', data)
+    const tmpDir = app.getPath('temp')
+
+    let tarPath    = ''
+    let extractDir = ''
+    const trackedExtensionIds: string[] = []
+
+    try {
+      // 1. Parse and validate GitHub URL
+      const parsed  = new URL(githubUrl.trim())
+      if (parsed.hostname !== 'github.com') throw new Error('Invalid URL: must be a GitHub repository (github.com)')
+      const parts = parsed.pathname.split('/').filter(Boolean)
+      if (parts.length < 2) throw new Error('Invalid URL: expected format https://github.com/owner/repo')
+      const [owner, repo] = parts
+
+      emit({ step: 'downloading', percent: 0 })
+
+      // 2. Download tarball via GitHub API
+      const tarballUrl = `https://api.github.com/repos/${owner}/${repo}/tarball/HEAD`
+      tarPath    = join(tmpDir, `modly-ext-${Date.now()}.tar.gz`)
+      extractDir = join(tmpDir, `modly-ext-extract-${Date.now()}`)
+
+      const response = await axios.get(tarballUrl, {
+        responseType: 'arraybuffer',
+        headers: {
+          'Accept':     'application/vnd.github.v3+json',
+          'User-Agent': 'Modly-App',
+        },
+        onDownloadProgress: (evt) => {
+          const pct = evt.total ? Math.round((evt.loaded / evt.total) * 80) : 40
+          emit({ step: 'downloading', percent: pct })
+        },
+      })
+
+      await writeFile(tarPath, Buffer.from(response.data as ArrayBuffer))
+
+      // 3. Extract tarball (GitHub wraps contents in a top-level {owner}-{repo}-{sha}/ folder)
+      emit({ step: 'extracting' })
+      await mkdir(extractDir, { recursive: true })
+      await tar.x({ file: tarPath, cwd: extractDir, strip: 1 })
+
+      // 4. Detect bundle vs single extension
+      const bundles = detectBundleExtensions(extractDir)
+      const extensionsDir = getSettings(app.getPath('userData')).extensionsDir
+      await mkdir(extensionsDir, { recursive: true })
+
+      let results: Array<{ success: boolean; error?: string; extensionId?: string; extension?: any }> = []
+
+      if (bundles.length > 0) {
+        // Bundle install: process each child extension
+        emit({ step: 'validating', message: `Found ${bundles.length} extension(s) in bundle` })
+
+        // Check for duplicate extension IDs
+        const seenIds = new Set<string>()
+        for (const bundle of bundles) {
+          if (seenIds.has(bundle.id)) {
+            throw new Error(`Duplicate extension ID in bundle: "${bundle.id}". Each extension in a bundle must have a unique ID.`)
+          }
+          seenIds.add(bundle.id)
+        }
+
+        // Install each extension
+        let completed = 0
+        for (const bundle of bundles) {
+          emit({ step: 'validating', message: `Installing ${bundle.id} (${++completed}/${bundles.length})` })
+          const result = await installSingleExtension(bundle, owner, repo, extensionsDir, emit, trackedExtensionIds, activeExtensionInstalls)
+          results.push(result)
+        }
+
+        // Check if any extensions failed
+        const failed = results.filter(r => !r.success)
+        const succeeded = results.filter(r => r.success)
+
+        if (failed.length > 0 && succeeded.length > 0) {
+          // Partial success
+          emit({ step: 'error', message: `${failed.length} of ${bundles.length} extensions failed to install` })
+          return {
+            success: false,
+            error: `${failed.length} extension(s) failed: ${failed.map(f => f.error).join('; ')}`,
+            partialResults: results,
+          }
+        } else if (failed.length > 0) {
+          // All failed
+          emit({ step: 'error', message: `All ${bundles.length} extensions failed to install` })
+          return {
+            success: false,
+            error: `All extensions failed: ${failed.map(f => f.error).join('; ')}`,
+            partialResults: results,
+          }
+        } else {
+          // All succeeded - reload extensions once
+          await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
+          emit({ step: 'done', extensionId: results.map(r => r.extensionId).join(', ') })
+          return { success: true, partialResults: results }
+        }
+      } else {
+        // Legacy single extension install
+        const single = detectSingleExtension(extractDir)
+        if (!single) throw new Error('manifest.json missing from repository')
+
+        const result = await installSingleExtension(single, owner, repo, extensionsDir, emit, trackedExtensionIds, activeExtensionInstalls)
+        results = [result]
+
+        if (!result.success) {
+          return { success: false, error: result.error }
+        }
+
+        return { success: true, extensionId: result.extensionId, extension: result.extension }
+      }
+
+    } catch (err) {
+      emit({ step: 'error', message: String(err) })
+      return { success: false, error: String(err) }
+    } finally {
+      for (const id of trackedExtensionIds) activeExtensionInstalls.delete(id)
+      // Cleanup temp files
+      if (tarPath    && existsSync(tarPath))    rmAsync(tarPath,    { force: true }).catch(() => {})
+      if (extractDir && existsSync(extractDir)) rmAsync(extractDir, { recursive: true, force: true }).catch(() => {})
+    }
+  })
 
 // ─── Run an extension's setup.py directly (no FastAPI needed) ─────────────────
 
@@ -498,9 +1115,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     return listDownloadedModels(modelsDir)
   })
 
-  ipcMain.handle('model:isDownloaded', (_, modelId: string, downloadCheck?: string): boolean => {
+  ipcMain.handle('model:isDownloaded', (_, modelId: string, downloadCheck?: string, weightOwnerId?: string): boolean => {
     const modelsDir = getSettings(app.getPath('userData')).modelsDir
-    return isModelDownloaded(modelsDir, modelId, downloadCheck)
+    return isModelDownloaded(modelsDir, modelId, downloadCheck, weightOwnerId)
   })
 
   ipcMain.handle('model:activeDownloads', () =>
@@ -509,8 +1126,30 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   ipcMain.handle('model:download', async (
     event,
-    { repoId, modelId, skipPrefixes, includePrefixes }: { repoId: string; modelId: string; skipPrefixes?: string[]; includePrefixes?: string[] },
+    { repoId, modelId, skipPrefixes, includePrefixes, weightOwnerId }: { repoId: string; modelId: string; skipPrefixes?: string[]; includePrefixes?: string[]; weightOwnerId?: string },
   ) => {
+    // If weightOwnerId not provided, try to resolve from extension manifest
+    let effectiveWeightOwnerId = weightOwnerId
+    if (!effectiveWeightOwnerId) {
+      const parts = modelId.split('/')
+      if (parts.length === 2) {
+        const [extId, nodeId] = parts
+        const extensionsDir = getSettings(app.getPath('userData')).extensionsDir
+        const extDir = resolveExtensionPathWithinRoot(extensionsDir, extId)
+        const manifestPath = join(extDir, 'manifest.json')
+        if (existsSync(manifestPath)) {
+          try {
+            const manifestRaw = await readFile(manifestPath, 'utf-8')
+            const manifest = JSON.parse(manifestRaw) as ParsedManifest
+            const node = manifest.nodes?.find((n: any) => n.id === nodeId)
+            if (node?.weight_owner_id) {
+              effectiveWeightOwnerId = node.weight_owner_id
+            }
+          } catch { /* ignore parse errors */ }
+        }
+      }
+    }
+    
     if (activeDownloads.has(modelId)) {
       return { success: false, error: 'Download already in progress' }
     }
@@ -519,7 +1158,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       await downloadModelFromHF(repoId, modelId, (progress) => {
         activeDownloads.set(modelId, progress)
         event.sender.send('model:downloadProgress', { modelId, ...progress })
-      }, skipPrefixes, includePrefixes)
+      }, skipPrefixes, includePrefixes, effectiveWeightOwnerId)
       return { success: true }
     } catch (err: any) {
       const message = err?.message ?? String(err)
@@ -534,6 +1173,15 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       return { success: false, error: String(err) }
     } finally {
       activeDownloads.delete(modelId)
+    }
+  })
+
+  ipcMain.handle('model:readiness', async (_, modelId: string) => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/model/readiness/${encodeURIComponent(modelId)}`, { timeout: 10000 })
+      return response.data
+    } catch (err) {
+      return { ready: false, status: 'error', error: String(err) }
     }
   })
 
@@ -897,6 +1545,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       download_check?:   string
       hf_skip_prefixes?: string[]
       hf_include_prefixes?: string[]
+      weight_owner_id?:  string
     }[]
   }
 
@@ -925,6 +1574,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       downloadCheck:  n.download_check,
       hfSkipPrefixes: n.hf_skip_prefixes,
       hfIncludePrefixes: n.hf_include_prefixes,
+      weightOwnerId:  n.weight_owner_id,
     }))
 
     if (parsed.type === 'process') {
@@ -1836,6 +2486,59 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         extensions_dir: patch.extensionsDir,
       })
       return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  // Generation API (proxy to FastAPI)
+  ipcMain.handle('generation:from-image', async (_event, formData: FormData) => {
+    try {
+      const response = await axios.post(`${API_BASE_URL}/generate/from-image`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 60000,
+      })
+      return response.data
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle('generation:from-text', async (_event, { prompt, modelId, params, collection, remesh, enableTexture, textureResolution }: {
+    prompt: string; modelId: string; params?: Record<string, unknown>; collection?: string; remesh?: string; enableTexture?: boolean; textureResolution?: number
+  }) => {
+    try {
+      const formData = new FormData()
+      formData.append('prompt', prompt)
+      formData.append('model_id', modelId)
+      formData.append('collection', collection ?? 'Default')
+      formData.append('remesh', remesh ?? 'quad')
+      formData.append('enable_texture', String(enableTexture ?? false))
+      formData.append('texture_resolution', String(textureResolution ?? 1024))
+      formData.append('params', JSON.stringify(params ?? {}))
+      const response = await axios.post(`${API_BASE_URL}/generate/from-text`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 60000,
+      })
+      return response.data
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle('generation:status', async (_event, jobId: string) => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/generate/status/${jobId}`, { timeout: 10000 })
+      return response.data
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle('generation:cancel', async (_event, jobId: string) => {
+    try {
+      const response = await axios.post(`${API_BASE_URL}/generate/cancel/${jobId}`, {}, { timeout: 5000 })
+      return response.data
     } catch (err) {
       return { success: false, error: String(err) }
     }

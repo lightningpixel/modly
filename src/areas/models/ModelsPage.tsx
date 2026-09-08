@@ -163,7 +163,7 @@ export default function ModelsPage(): JSX.Element {
   function handleInstallNode(node: ExtensionNode, fullId: string) {
     if (!node.hfRepo) return
     setDownloading((prev) => ({ ...prev, [fullId]: { ...(prev[fullId] ?? { percent: 0 }), paused: false, status: 'Starting…' } }))
-    window.electron.model.download(node.hfRepo!, fullId, node.hfSkipPrefixes, node.hfIncludePrefixes).then((result: { success: boolean; paused?: boolean; cancelled?: boolean }) => {
+    window.electron.model.download(node.hfRepo!, fullId, node.hfSkipPrefixes, node.hfIncludePrefixes, node.weight_owner_id).then((result: { success: boolean; paused?: boolean; cancelled?: boolean }) => {
       if (!result.success && !result.paused && !result.cancelled) {
         setGhErr('Download failed')
         setDownloading((prev) => { const n = { ...prev }; delete n[fullId]; return n })
@@ -205,7 +205,27 @@ export default function ModelsPage(): JSX.Element {
     setGhErr(null)
     clearInstall()
     const result = await installFromGH(url)
-    if (result.success) {
+    
+    // Handle bundle install with partial results
+    if (result.partialResults && result.partialResults.length > 0) {
+      const successful = result.partialResults.filter(r => r.success)
+      const failed = result.partialResults.filter(r => !r.success)
+      
+      if (failed.length > 0 && successful.length > 0) {
+        // Partial success - show error but keep the form open to show details
+        setGhErr(`${failed.length} of ${result.partialResults.length} extensions failed: ${failed.map(f => f.error).join('; ')}`)
+        // Still close the form since successful extensions were installed
+        setShowGHForm(false)
+        setGhUrl('')
+      } else if (failed.length > 0) {
+        // All failed
+        setGhErr(`All extensions failed: ${failed.map(f => f.error).join('; ')}`)
+      } else {
+        // All succeeded
+        setShowGHForm(false)
+        setGhUrl('')
+      }
+    } else if (result.success) {
       setShowGHForm(false)
       setGhUrl('')
     } else {
