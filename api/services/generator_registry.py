@@ -533,6 +533,7 @@ def _discover_extensions(
                         "download_check":   node.get("download_check", ""),
                         "hf_skip_prefixes": node.get("hf_skip_prefixes", []),
                         "hf_include_prefixes": node.get("hf_include_prefixes", []),
+                        "weight_owner_id":  node.get("weight_owner_id"),
                         "params_schema":    node.get("params_schema", manifest.get("params_schema", [])),
                         "input":            node.get("input", "image"),
                         "output":           node.get("output", "mesh"),

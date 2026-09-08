@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import type { AnyExtension } from '@shared/types/electron.d'
 import type { ExtensionNode } from '@shared/types/electron.d'
 export type { AnyExtension as Extension }
@@ -34,6 +35,29 @@ export function ExtensionCard({
   const isModel = ext.type === 'model'
   const isLocal = typeof ext.source === 'string' && ext.source.startsWith('local://')
   const { total, done, installing, hasAvailable } = extInstallSummary(ext, installedIds, downloading)
+
+  // Readiness state for model nodes
+  const [readiness, setReadiness] = useState<Record<string, { ready: boolean; status: string }>>({})
+
+  useEffect(() => {
+    if (!isModel) return
+    let mounted = true
+    const checkReadiness = async () => {
+      for (const node of ext.nodes) {
+        if (!node.hfRepo) continue
+        const fullId = `${ext.id}/${node.id}`
+        try {
+          const result = await window.electron.model.readiness(fullId)
+          if (mounted) {
+            setReadiness(prev => ({ ...prev, [fullId]: { ready: result.ready, status: result.status } }))
+          }
+        } catch { /* ignore */ }
+      }
+    }
+    checkReadiness()
+    const interval = setInterval(checkReadiness, 30000) // Refresh every 30s
+    return () => { mounted = false; clearInterval(interval) }
+  }, [ext.id, ext.nodes, isModel])
 
   const handleOpen = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest('button')) return
@@ -119,6 +143,7 @@ export function ExtensionCard({
           {ext.nodes.map((node) => {
             const fullId = `${ext.id}/${node.id}`
             const state = getNodeState(ext.id, node, installedIds, downloading)
+            const nodeReadiness = readiness[fullId]
             return (
               <div
                 key={node.id}
@@ -129,7 +154,12 @@ export function ExtensionCard({
                   <IOBadge node={node} />
                 </div>
                 {isModel && (
-                  <div className="shrink-0">
+                  <div className="shrink-0 flex items-center gap-2">
+                    {nodeReadiness && (
+                      <span className={`text-[9px] font-medium px-1.5 py-0.5 rounded ${nodeReadiness.ready ? 'bg-emerald-500/20 text-emerald-400' : nodeReadiness.status === 'weights_missing' ? 'bg-amber-500/20 text-amber-400' : 'bg-violet-500/20 text-violet-400'}`}>
+                        {nodeReadiness.ready ? 'Ready' : nodeReadiness.status === 'weights_missing' ? 'Weights missing' : 'Setup required'}
+                      </span>
+                    )}
                     <NodeInstallControl
                       state={state}
                       disabled={disabled}

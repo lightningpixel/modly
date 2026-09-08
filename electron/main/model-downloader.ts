@@ -21,14 +21,41 @@ export type ProgressCallback = (progress: DownloadProgress) => void
 
 const PYTHON_API_URL = process.env['PYTHON_API_URL'] ?? 'http://127.0.0.1:8765'
 
-// ------------------------------------------------------------------
-// Public API
-// ------------------------------------------------------------------
+// ─── Weight owner utilities ────────────────────────────────────────────────────
 
 /**
- * Check if a model is already downloaded (directory exists and is non-empty).
+ * Resolves the canonical owner directory for a model capability.
+ * If the capability declares a weight_owner_id, returns the owner's directory path.
+ * Otherwise returns the capability's own directory path.
  */
-export function isModelDownloaded(modelsDir: string, modelId: string, downloadCheck?: string): boolean {
+export function resolveModelOwnerDir(modelsDir: string, modelId: string, weightOwnerId?: string): string {
+  if (weightOwnerId) {
+    return join(modelsDir, weightOwnerId)
+  }
+  return join(modelsDir, modelId)
+}
+
+/**
+ * Checks if a model is downloaded, considering weight ownership.
+ * Checks both the capability directory and the owner directory (if different).
+ */
+export function isModelDownloaded(modelsDir: string, modelId: string, downloadCheck?: string, weightOwnerId?: string): boolean {
+  // First check the owner directory if specified
+  if (weightOwnerId) {
+    const ownerDir = join(modelsDir, weightOwnerId)
+    if (existsSync(ownerDir)) {
+      if (downloadCheck && downloadCheck.trim()) {
+        return existsSync(join(ownerDir, downloadCheck))
+      }
+      try {
+        return readdirSync(ownerDir).length > 0
+      } catch {
+        return false
+      }
+    }
+  }
+  
+  // Fall back to capability's own directory
   const modelDir = join(modelsDir, modelId)
   if (!existsSync(modelDir)) return false
   if (downloadCheck && downloadCheck.trim()) {
@@ -39,6 +66,34 @@ export function isModelDownloaded(modelsDir: string, modelId: string, downloadCh
   } catch {
     return false
   }
+}
+
+/**
+ * Gets the effective download directory for a model, considering weight ownership.
+ * Returns the owner directory if weight_owner_id is set, otherwise the capability directory.
+ */
+export function getEffectiveModelDir(modelsDir: string, modelId: string, weightOwnerId?: string): string {
+  return resolveModelOwnerDir(modelsDir, modelId, weightOwnerId)
+}
+
+/**
+ * Counts how many capabilities reference the same weight owner.
+ * Used to determine if weights can be safely deleted.
+ */
+export function countWeightOwnerReferences(modelsDir: string, weightOwnerId: string, allCapabilities: Array<{ modelId: string; weightOwnerId?: string }>): number {
+  return allCapabilities.filter(c => c.weightOwnerId === weightOwnerId || c.modelId === weightOwnerId).length
+}
+
+// ------------------------------------------------------------------
+// Public API
+// ------------------------------------------------------------------
+
+/**
+ * Check if a model is already downloaded (directory exists and is non-empty).
+ * @deprecated Use isModelDownloaded with weightOwnerId parameter
+ */
+export function isModelDownloadedLegacy(modelsDir: string, modelId: string, downloadCheck?: string): boolean {
+  return isModelDownloaded(modelsDir, modelId, downloadCheck)
 }
 
 /**
@@ -119,10 +174,13 @@ export async function downloadModelFromHF(
   onProgress:    ProgressCallback,
   skipPrefixes?: string[],
   includePrefixes?: string[],
+  weightOwnerId?: string,
 ): Promise<void> {
   const { net } = require('electron')
   const STALL_TIMEOUT_MS = 120_000
-  let url = `${PYTHON_API_URL}/model/hf-download?repo_id=${encodeURIComponent(repoId)}&model_id=${encodeURIComponent(modelId)}`
+  // Use the effective model directory (owner directory if weight_owner_id is set)
+  const effectiveModelId = weightOwnerId ?? modelId
+  let url = `${PYTHON_API_URL}/model/hf-download?repo_id=${encodeURIComponent(repoId)}&model_id=${encodeURIComponent(effectiveModelId)}`
   if (skipPrefixes && skipPrefixes.length > 0) {
     url += `&skip_prefixes=${encodeURIComponent(JSON.stringify(skipPrefixes))}`
   }

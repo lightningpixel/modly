@@ -47,6 +47,8 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
     system: {
       memory: (): Promise<{ total: number; used: number; available: number }> =>
         ipcRenderer.invoke('system:memory') as Promise<{ total: number; used: number; available: number }>,
+      gpuMemory: (): Promise<{ total: number; used: number; available: number } | null> =>
+        ipcRenderer.invoke('system:gpuMemory') as Promise<{ total: number; used: number; available: number } | null>,
     },
 
     // Python / FastAPI bridge
@@ -113,18 +115,32 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         ipcRenderer.invoke('api:updatePaths', patch) as Promise<{ success: boolean; error?: string }>,
     },
 
+    // Generation API (direct FastAPI calls)
+    generation: {
+      fromImage: (formData: FormData): Promise<{ job_id: string }> =>
+        ipcRenderer.invoke('generation:from-image', formData) as Promise<{ job_id: string }>,
+      fromText: (prompt: string, modelId: string, params?: Record<string, unknown>, collection?: string, remesh?: string, enableTexture?: boolean, textureResolution?: number): Promise<{ job_id: string }> =>
+        ipcRenderer.invoke('generation:from-text', { prompt, modelId, params, collection, remesh, enableTexture, textureResolution }) as Promise<{ job_id: string }>,
+      status: (jobId: string): Promise<{ job_id: string; status: string; progress: number; step?: string; output_url?: string; error?: string }> =>
+        ipcRenderer.invoke('generation:status', jobId) as Promise<{ job_id: string; status: string; progress: number; step?: string; output_url?: string; error?: string }>,
+      cancel: (jobId: string): Promise<{ cancelled: boolean }> =>
+        ipcRenderer.invoke('generation:cancel', jobId) as Promise<{ cancelled: boolean }>,
+    },
+
     // Model management
     model: {
       export:         (args: { outputUrl: string; format: string }) => ipcRenderer.invoke('model:export', args),
       listDownloaded: () => ipcRenderer.invoke('model:listDownloaded'),
-      isDownloaded:   (modelId: string, downloadCheck?: string) => ipcRenderer.invoke('model:isDownloaded', modelId, downloadCheck),
-      download:       (repoId: string, modelId: string, skipPrefixes?: string[], includePrefixes?: string[]) =>
-        ipcRenderer.invoke('model:download', { repoId, modelId, skipPrefixes, includePrefixes }),
+      isDownloaded:   (modelId: string, downloadCheck?: string, weightOwnerId?: string) => ipcRenderer.invoke('model:isDownloaded', modelId, downloadCheck, weightOwnerId),
+      download:       (repoId: string, modelId: string, skipPrefixes?: string[], includePrefixes?: string[], weightOwnerId?: string) =>
+        ipcRenderer.invoke('model:download', { repoId, modelId, skipPrefixes, includePrefixes, weightOwnerId }),
       pauseDownload:  (modelId: string) => ipcRenderer.invoke('model:pauseDownload', modelId),
       cancelDownload: (modelId: string) => ipcRenderer.invoke('model:cancelDownload', modelId),
       delete:         (modelId: string) => ipcRenderer.invoke('model:delete', modelId),
       unloadAll:      () => ipcRenderer.invoke('model:unloadAll'),
       showInFolder:   (modelId: string) => ipcRenderer.invoke('model:showInFolder', modelId),
+      readiness:      (modelId: string): Promise<{ ready: boolean; status: string; weights_downloaded: boolean; setup_needed: boolean; loaded: boolean; error?: string }> =>
+        ipcRenderer.invoke('model:readiness', modelId) as Promise<{ ready: boolean; status: string; weights_downloaded: boolean; setup_needed: boolean; loaded: boolean; error?: string }>,
       activeDownloads: (): Promise<{ modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]> =>
         ipcRenderer.invoke('model:activeDownloads') as Promise<{ modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]>,
       onProgress:     (cb: (data: {
@@ -207,10 +223,16 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         success: boolean; error?: string; cancelled?: boolean
         extensionId?: string
         extension?: unknown
+        partialResults?: Array<{
+          success: boolean; error?: string; extensionId?: string; extension?: unknown
+        }>
       }> => ipcRenderer.invoke('extensions:installFromGitHub', url) as Promise<{
         success: boolean; error?: string; cancelled?: boolean
         extensionId?: string
         extension?: unknown
+        partialResults?: Array<{
+          success: boolean; error?: string; extensionId?: string; extension?: unknown
+        }>
       }>,
 
       installFromLocal: (): Promise<{

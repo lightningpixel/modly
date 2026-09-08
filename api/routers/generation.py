@@ -131,6 +131,64 @@ async def generate_from_image(
 
 
 
+@router.post("/from-text")
+async def generate_from_text(
+    background_tasks: BackgroundTasks,
+    prompt: str = Form(...),
+    model_id: str = Form("sf3d"),
+    collection: str = Form("Default"),
+    remesh: str = Form("quad"),
+    enable_texture: bool = Form(False),
+    texture_resolution: int = Form(1024),
+    params: str = Form("{}"),
+):
+    if not prompt or not prompt.strip():
+        raise HTTPException(400, "Prompt is required")
+
+    if remesh not in VALID_REMESH_MODES:
+        raise HTTPException(400, "remesh must be 'quad', 'triangle', or 'none'")
+
+    collection = sanitize_collection(collection)
+
+    # Verify the requested model exists in the registry
+    try:
+        generator_registry.get_generator(model_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    generator_registry.switch_model(model_id)
+
+    # Parse model-specific params from JSON and merge with common fields
+    try:
+        model_params = json.loads(params)
+    except (json.JSONDecodeError, TypeError):
+        model_params = {}
+
+    job_id = str(uuid.uuid4())
+    # Use a 1x1 transparent PNG as placeholder for text-to-image
+    import base64
+    placeholder_b64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+    image_bytes = base64.b64decode(placeholder_b64)
+    full_params = {
+        "remesh":             remesh,
+        "enable_texture":     enable_texture,
+        "texture_resolution": texture_resolution,
+        "prompt":             prompt,
+        "text":               prompt,
+        **model_params,
+    }
+
+    _purge_old_jobs()
+
+    job = JobStatus(job_id=job_id, status="pending", progress=0)
+    _jobs[job_id] = job
+    _cancel_events[job_id] = threading.Event()
+
+    background_tasks.add_task(_run_generation, job_id, image_bytes, full_params, collection)
+
+    return {"job_id": job_id}
+
+
 @router.get("/status/{job_id}")
 async def job_status(job_id: str):
     job = _jobs.get(job_id)

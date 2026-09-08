@@ -137,6 +137,8 @@ interface AppState {
   // UI preferences
   showRamIndicator: boolean
   setShowRamIndicator: (v: boolean) => void
+  showVramIndicator: boolean
+  setShowVramIndicator: (v: boolean) => void
 
   // Accessibility
   useAtkinsonFont: boolean
@@ -241,6 +243,8 @@ export const useAppStore = create<AppState>()(
 
       showRamIndicator: true,
       setShowRamIndicator: (v) => set({ showRamIndicator: v }),
+      showVramIndicator: true,
+      setShowVramIndicator: (v) => set({ showVramIndicator: v }),
 
       useAtkinsonFont: false,
       setUseAtkinsonFont: (v) => set({ useAtkinsonFont: v }),
@@ -301,6 +305,7 @@ export const useAppStore = create<AppState>()(
       partialize: (state) => ({
         generationOptions: state.generationOptions,
         showRamIndicator: state.showRamIndicator,
+        showVramIndicator: state.showVramIndicator,
         useAtkinsonFont: state.useAtkinsonFont,
         uiScale: state.uiScale,
         lightSettings: state.lightSettings,
