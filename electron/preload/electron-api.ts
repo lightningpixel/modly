@@ -47,6 +47,8 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
     system: {
       memory: (): Promise<{ total: number; used: number; available: number }> =>
         ipcRenderer.invoke('system:memory') as Promise<{ total: number; used: number; available: number }>,
+      gpuMemory: (): Promise<{ total: number; used: number; available: number } | null> =>
+        ipcRenderer.invoke('system:gpuMemory') as Promise<{ total: number; used: number; available: number } | null>,
     },
 
     // Python / FastAPI bridge

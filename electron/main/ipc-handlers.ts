@@ -629,6 +629,29 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     return { total, used: total - free, available: free }
   })
 
+  // GPU memory (VRAM) — NVIDIA only via nvidia-smi
+  ipcMain.handle('system:gpuMemory', async () => {
+    if (process.platform === 'darwin' && process.arch === 'arm64') {
+      // Apple Silicon: unified memory, no separate VRAM
+      return null
+    }
+    try {
+      const { stdout } = await pExecFile('nvidia-smi', [
+        '--query-gpu=memory.total,memory.used',
+        '--format=csv,noheader,nounits'
+      ])
+      const line = stdout.trim().split('\n')[0].trim()
+      const [totalMiB, usedMiB] = line.split(',').map(s => parseInt(s.trim(), 10))
+      if (isNaN(totalMiB) || isNaN(usedMiB) || totalMiB === 0) return null
+      const total = totalMiB * 1024 * 1024
+      const used = usedMiB * 1024 * 1024
+      const available = total - used
+      return { total, used, available }
+    } catch {
+      return null
+    }
+  })
+
   ipcMain.handle('app:info', () => ({
     version:   app.getVersion(),
     userData:  app.getPath('userData'),
