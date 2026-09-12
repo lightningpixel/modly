@@ -10,7 +10,11 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from fastapi import APIRouter, HTTPException, Request as FastAPIRequest
 from fastapi.responses import StreamingResponse
-from services.generator_registry import generator_registry, MODELS_DIR
+# Import the module (not the name) so MODELS_DIR is read at call time: the
+# settings endpoint rebinds it when the user moves the models folder, and a
+# binding captured at import would keep downloading into the old one.
+import services.generator_registry as registry
+from services.generator_registry import generator_registry
 from services.model_sources import (
     normalize_model_sources,
     resolve_download_path,
@@ -140,10 +144,11 @@ async def hf_download_sources(request: FastAPIRequest, model_id: str):
         if raw_sources is None:
             raise ValueError("sources are required")
         sources = normalize_model_sources({"model_sources": raw_sources})
-        model_root = resolve_model_root(MODELS_DIR, model_id)
+        models_dir = registry.MODELS_DIR
+        model_root = resolve_model_root(models_dir, model_id)
         destinations = {
             source["id"]: resolve_source_destination(
-                MODELS_DIR, model_id, source["destination"]
+                models_dir, model_id, source["destination"]
             )
             for source in sources
         }
@@ -305,7 +310,7 @@ async def hf_download(
     """
     import json as _json
     import os
-    dest_dir  = str(MODELS_DIR / model_id)
+    dest_dir  = str(registry.MODELS_DIR / model_id)
     # Prefer skip_prefixes passed directly from the client (authoritative, no registry dep)
     if skip_prefixes:
         try:
