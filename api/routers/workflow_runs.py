@@ -121,6 +121,10 @@ async def cancel_run(run_id: str):
     if job.status in ("pending", "running"):
         job.status = "cancelled"
         _completed_at[run_id] = time.monotonic()
+    else:
+        # The run already ended, so the active subprocess isn't running it: it
+        # holds the warm model or another job's generation. Leave it alone.
+        return {"cancelled": True}
 
     try:
         gen = generator_registry._generators.get(generator_registry._active_id)
