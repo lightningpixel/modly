@@ -127,23 +127,50 @@ export class ProcessRunner implements IProcessRunner {
     const worker = this.worker!
 
     return new Promise((resolve, reject) => {
+      const settle = () => {
+        worker.off('message', handler)
+        worker.off('error', onError)
+        worker.off('exit', onExit)
+      }
       const handler = (msg: { type: string; result?: ProcessResult; message?: string; percent?: number; label?: string }) => {
         if (msg.type === 'progress') {
           onProgress?.(msg.percent ?? 0, msg.label ?? '')
         } else if (msg.type === 'log') {
           onLog?.(msg.message ?? '')
         } else if (msg.type === 'done') {
-          worker.off('message', handler)
+          settle()
           resolve(msg.result ?? {})
         } else if (msg.type === 'error') {
-          worker.off('message', handler)
+          settle()
           reject(new Error(msg.message))
         }
       }
+      // A worker that dies mid-run (an uncaught error, out of memory,
+      // process.exit) never posts 'done' or 'error'. Settle the run instead of
+      // waiting forever, and drop the dead worker so the next run starts a
+      // fresh one rather than posting into it.
+      const onError = (err: Error) => {
+        settle()
+        this.discardWorker(worker)
+        reject(err)
+      }
+      const onExit = (code: number) => {
+        settle()
+        this.discardWorker(worker)
+        reject(new Error(`Process extension worker exited with code ${code}`))
+      }
 
       worker.on('message', handler)
+      worker.on('error', onError)
+      worker.on('exit', onExit)
       worker.postMessage({ action: 'run', input, params })
     })
+  }
+
+  private discardWorker(worker: Worker): void {
+    if (this.worker !== worker) return
+    this.worker = null
+    this.ready  = false
   }
 
   terminate(): void {
