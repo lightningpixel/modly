@@ -8,9 +8,10 @@
     "strict": true,
     "skipLibCheck": true,
     "types": ["electron-vite/node"],
+    "rewriteRelativeImportExtensions": true,
     "paths": {
       "@main/*": ["./electron/main/*"]
     }
   },
-  "include": ["electron.vite.config.*", "electron/**/*"]
+  "include": ["electron.vite.config.*", "electron/**/*", "src/shared/types/**/*"]
 }

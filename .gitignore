@@ -43,3 +43,6 @@ Thumbs.db
 # Local dev helpers
 install.bat
 launch.bat
+
+# Session continuity (local)
+.claude/plan.md

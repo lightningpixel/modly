@@ -104,12 +104,12 @@ export function filterAssetLibraryScopeGroups(
   const visibleEntries = filterVisibleAssetLibraryEntries(entries)
 
   return ASSET_LIBRARY_SOURCE_SCOPE_SECTIONS
-    .map((scopeSection) => {
+    .map((scopeSection): AssetLibrarySourceScopeGroup | null => {
       const scopeEntries = visibleEntries.filter((entry) => entry.sourceScope === scopeSection.sourceScope)
       const scopeMatches = normalizedSearchQuery.length > 0 && matchesAssetLibrarySearch(scopeSection.label, normalizedSearchQuery)
 
       const entryGroups = ASSET_LIBRARY_CAPABILITY_SECTIONS
-        .map((capabilitySection) => {
+        .map((capabilitySection): AssetLibraryEntryGroup | null => {
           const capabilityEntries = scopeEntries.filter((entry) => entry.capability === capabilitySection.capability)
           if (capabilityEntries.length === 0) return null
 

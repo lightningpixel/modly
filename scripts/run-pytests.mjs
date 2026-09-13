@@ -8,7 +8,17 @@ import { dirname, join } from 'node:path'
 
 const apiDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'api')
 
+// Prefer a project-local venv (api/.venv) when present: system Python usually
+// lacks the API dependencies (fastapi, …) and the test import fails.
+const venvPython = join(
+  apiDir,
+  '.venv',
+  process.platform === 'win32' ? 'Scripts' : 'bin',
+  process.platform === 'win32' ? 'python.exe' : 'python',
+)
+
 const candidates = [
+  [venvPython, []],
   ['python3', []],
   ['python', []],
   ['py', ['-3']],
