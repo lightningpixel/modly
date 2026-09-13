@@ -39,7 +39,7 @@ class OptimizeMeshOpsRouteTests(unittest.TestCase):
             registry = _FakeRegistry(output_path)
 
             with (
-                patch.object(optimize, "WORKSPACE_DIR", workspace),
+                patch.object(optimize.registry, "WORKSPACE_DIR", workspace),
                 patch.object(optimize, "mesh_ops_registry", registry),
             ):
                 descriptions = optimize.list_mesh_operations()
@@ -75,7 +75,7 @@ class OptimizeMeshOpsRouteTests(unittest.TestCase):
             registry = _FakeRegistry(fallback_output)
 
             with (
-                patch.object(optimize, "WORKSPACE_DIR", workspace),
+                patch.object(optimize.registry, "WORKSPACE_DIR", workspace),
                 patch.object(optimize, "mesh_ops_registry", registry),
             ):
                 optimize_response = optimize.optimize_mesh(
@@ -115,7 +115,7 @@ class OptimizeMeshOpsRouteTests(unittest.TestCase):
             input_path = workspace / "input.glb"
             input_path.touch()
             with (
-                patch.object(optimize, "WORKSPACE_DIR", workspace),
+                patch.object(optimize.registry, "WORKSPACE_DIR", workspace),
                 patch.object(optimize, "mesh_ops_registry", MissingRegistry()),
                 self.assertRaises(HTTPException) as raised,
             ):
@@ -158,7 +158,7 @@ class OptimizeMeshOpsRouteTests(unittest.TestCase):
             input_path = workspace / "input.glb"
             input_path.touch()
             with (
-                patch.object(optimize, "WORKSPACE_DIR", workspace),
+                patch.object(optimize.registry, "WORKSPACE_DIR", workspace),
                 patch.object(optimize, "mesh_ops_registry", registry),
             ):
                 optimize.run_mesh_operation(
@@ -191,7 +191,7 @@ class OptimizeMeshOpsRouteTests(unittest.TestCase):
             input_path = workspace / "input.glb"
             input_path.touch()
             with (
-                patch.object(optimize, "WORKSPACE_DIR", workspace),
+                patch.object(optimize.registry, "WORKSPACE_DIR", workspace),
                 patch.object(optimize, "mesh_ops_registry", registry),
                 self.assertRaises(HTTPException) as raised,
             ):
