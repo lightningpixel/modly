@@ -78,6 +78,7 @@ class BaseGenerator(ABC):
     # Metadata — override in each subclass
     # ------------------------------------------------------------------ #
     MODEL_ID:     str = ""
+    MODEL_NODE_ID: str = ""
     DISPLAY_NAME: str = ""
     VRAM_GB:      int = 0   # Minimum recommended VRAM (in GB)
 
@@ -90,6 +91,9 @@ class BaseGenerator(ABC):
         self.hf_skip_prefixes: list = []
         self.download_check:   str  = ""   # relative path to check in model_dir
         self._params_schema:   list = []   # params declared in the manifest
+        # Host-resolved extension-scoped shared weight roots, keyed by group id.
+        # Model identity and the private model_dir remain unchanged.
+        self.shared_model_dirs: dict[str, Path] = {}
 
     # ------------------------------------------------------------------ #
     # Model lifecycle

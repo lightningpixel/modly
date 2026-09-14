@@ -23,7 +23,7 @@ export type NodeUiState =
   | { kind: 'installed' }
 
 export function nodeHasManagedWeights(node: ExtensionNode): boolean {
-  return Boolean(node.hfRepo || node.hasModelSources)
+  return Boolean(node.hfRepo || node.hasModelSources || node.weightGroups?.length)
 }
 
 export function getNodeState(

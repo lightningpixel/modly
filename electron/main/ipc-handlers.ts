@@ -14,14 +14,28 @@ import {
   listDownloadedModels,
   downloadModelFromHF,
   downloadModelSourcesFromHF,
+  type DownloadProgress,
 } from './model-downloader'
-import { resolveInstalledModelDownloadPlan } from './model-download-plan'
+import {
+  resolveInstalledExtensionSharedWeightGroups,
+  resolveInstalledModelDownloadPlan,
+} from './model-download-plan'
 import {
   areModelSourcesDownloaded,
+  areModelSourcesDownloadedAtRoot,
+  areWeightGroupSourcesDownloaded,
   modelHasLocalData,
   normalizeModelSources,
+  normalizeWeightGroupReferences,
+  normalizeWeightGroups,
+  validateModelNodeIds,
   removePartialDownloadArtifacts,
+  resolveExtensionModelRoot,
   resolveModelRoot,
+  resolveWeightGroupRoot,
+  resolveWeightStorageRoot,
+  safeModelSourceId,
+  weightStorageHasLocalData,
 } from './model-sources'
 import { getSettings, setSettings } from './settings-store'
 import { checkSetupNeeded, markSetupDone, runFullSetup, getVenvPythonExe, ensureSslPatch } from './python-setup'
@@ -67,6 +81,7 @@ import {
 } from './extension-install-recovery'
 import { registerWorkspaceAssetLibraryIpcHandlers } from './artifact-registry-service'
 import { updatesSupported } from './updater'
+import { ModelWeightOperations } from './model-weight-operations'
 
 type WindowGetter = () => BrowserWindow | null
 const pExecFile = promisify(execFile)
@@ -149,11 +164,29 @@ const renameWithRetry = (from: string, to: string, label: string) =>
 
 export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGetter): void {
   type ActiveDownload = {
-    progress: { percent: number; file?: string; fileIndex?: number; totalFiles?: number }
+    progress: DownloadProgress
     done: Promise<void>
     finish: () => void
+    targetRoots: string[]
+    currentTargetId?: string
+    stopRequested?: 'pause' | 'cancel'
   }
   const activeDownloads = new Map<string, ActiveDownload>()
+  const weightOperations = new ModelWeightOperations()
+  // Paused/error sessions retain their original paths even after settings change.
+  const interruptedTargets = new Map<string, string[]>()
+  const notifyWeightChange = () => {
+    getWindow()?.webContents.send('model:weightsChanged')
+  }
+  async function unloadForRemoval(modelIds?: string[]) {
+    const urls = modelIds
+      ? modelIds.map((id) => `${API_BASE_URL}/model/unload/${encodeURIComponent(id)}`)
+      : [`${API_BASE_URL}/model/unload-all`]
+    for (const url of urls) {
+      const response = await axios.post(url, {}, { timeout: 40_000 })
+      if (response.data?.unloaded !== true) throw new Error('Model unload was not confirmed; weights were preserved')
+    }
+  }
   // Logging from renderer
   ipcMain.on('log:error', (_event, message: string) => logger.error(`[Renderer] ${message}`))
   ipcMain.handle('log:getPath', () => join(app.getPath('userData'), 'logs', 'modly.log'))
@@ -350,23 +383,16 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       return { success: false, error: String(err) }
     }
 
-    // Unload the model and wait for confirmation so file handles are released
     try {
-      await axios.post(`${API_BASE_URL}/model/unload/${encodeURIComponent(modelId)}`, {}, { timeout: 10_000 })
-      // Give the OS a moment to release file locks (Windows holds handles briefly after close)
-      await new Promise(resolve => setTimeout(resolve, 1_500))
-    } catch {
-      // Unload failed (model may not be loaded) — still attempt deletion
-    }
-
-    // Retry removal — Windows may return EBUSY/EPERM if handles linger
-    const removed = await rmWithRetry(modelDir, 'model-delete')
-    if (removed.ok) return { success: true }
-    return {
-      success: false,
-      error: removed.locked
-        ? 'Model files are still locked after several attempts. Close any programs using the model and try again.'
-        : String(removed.error),
+      const removed = await weightOperations.remove(
+        [modelDir], () => unloadForRemoval([modelId]), () => rmWithRetry(modelDir, 'model-delete'),
+      )
+      notifyWeightChange()
+      return removed.ok ? { success: true } : {
+        success: false, error: removed.locked ? 'Model files are still locked. Try again after closing the model.' : String(removed.error),
+      }
+    } catch (err) {
+      return { success: false, error: String(err) }
     }
   })
 
@@ -409,9 +435,14 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         builtinExtensionsDir: getBuiltinExtensionsDir(),
         blockedExtensionIds: activeExtensionInstalls,
       })
-      return plan.kind === 'multi-source'
-        ? areModelSourcesDownloaded(modelsDir, modelId, plan.sources)
-        : isModelDownloaded(modelsDir, modelId, plan.downloadCheck)
+      if (plan.kind === 'multi-source') {
+        const privateReady = plan.sources.length === 0
+          || areModelSourcesDownloaded(modelsDir, modelId, plan.sources)
+        return privateReady && plan.sharedGroups.every((group) => (
+          areWeightGroupSourcesDownloaded(modelsDir, plan.extensionId, group)
+        ))
+      }
+      return isModelDownloaded(modelsDir, modelId, plan.downloadCheck)
     } catch {
       return false
     }
@@ -431,6 +462,93 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     }
   })
 
+  ipcMain.handle('model:sharedGroups', async (_, extensionId: string) => {
+    try {
+      const groups = await resolveInstalledExtensionSharedWeightGroups({
+        extensionId,
+        userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
+        builtinExtensionsDir: getBuiltinExtensionsDir(),
+        blockedExtensionIds: activeExtensionInstalls,
+      })
+      const modelsDir = getSettings(app.getPath('userData')).modelsDir
+      return groups.map((group) => ({
+        id: group.id,
+        targetId: group.targetId,
+        dependentModelIds: group.dependentModelIds,
+        downloaded: areWeightGroupSourcesDownloaded(modelsDir, extensionId, group),
+        hasLocalData: weightStorageHasLocalData(modelsDir, group.targetId),
+      }))
+    } catch {
+      return []
+    }
+  })
+
+  ipcMain.handle('model:deleteSharedGroup', async (
+    _,
+    extensionId: string,
+    groupId: string,
+  ): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const groups = await resolveInstalledExtensionSharedWeightGroups({
+        extensionId,
+        userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
+        builtinExtensionsDir: getBuiltinExtensionsDir(),
+        blockedExtensionIds: activeExtensionInstalls,
+      })
+      const group = groups.find((candidate) => candidate.id === groupId)
+      if (!group) return { success: false, error: `Unknown shared weight group: ${groupId}` }
+      const groupRoot = resolveWeightGroupRoot(
+        getSettings(app.getPath('userData')).modelsDir,
+        extensionId,
+        group.id,
+      )
+      const removed = await weightOperations.remove(
+        [groupRoot],
+        () => unloadForRemoval(group.dependentModelIds),
+        () => rmWithRetry(groupRoot, 'shared-model-delete'),
+      )
+      notifyWeightChange()
+      if (removed.ok) return { success: true }
+      return {
+        success: false,
+        error: removed.locked
+          ? 'Shared model files are still locked. Close any programs using them and try again.'
+          : String(removed.error),
+      }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle('model:deleteExtensionWeights', async (
+    _,
+    extensionId: string,
+  ): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const safeExtensionId = assertSafeExtensionId(extensionId)
+      if ([...activeDownloads.keys()].some((modelId) => modelId.split('/', 1)[0] === safeExtensionId)) {
+        return { success: false, error: 'Cannot remove extension weights while a download is active' }
+      }
+      const extensionRoot = resolveExtensionModelRoot(
+        getSettings(app.getPath('userData')).modelsDir,
+        safeExtensionId,
+      )
+      const removed = await weightOperations.remove(
+        [extensionRoot], () => unloadForRemoval(), () => rmWithRetry(extensionRoot, 'extension-model-delete'),
+      )
+      notifyWeightChange()
+      if (removed.ok) return { success: true }
+      return {
+        success: false,
+        error: removed.locked
+          ? 'Extension model files are still locked. Close any programs using them and try again.'
+          : String(removed.error),
+      }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
   ipcMain.handle('model:activeDownloads', () =>
     [...activeDownloads.entries()].map(([modelId, active]) => ({ modelId, ...active.progress }))
   )
@@ -442,24 +560,83 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     if (activeDownloads.has(modelId)) {
       return { success: false, error: 'Download already in progress' }
     }
-    let finish!: () => void
-    const done = new Promise<void>((resolveDone) => { finish = resolveDone })
-    const active: ActiveDownload = { progress: { percent: 0 }, done, finish }
-    activeDownloads.set(modelId, active)
+    let plan: Awaited<ReturnType<typeof resolveInstalledModelDownloadPlan>>
     try {
-      const plan = await resolveInstalledModelDownloadPlan({
+      plan = await resolveInstalledModelDownloadPlan({
         modelId,
         userExtensionsDir: getSettings(app.getPath('userData')).extensionsDir,
         builtinExtensionsDir: getBuiltinExtensionsDir(),
         blockedExtensionIds: activeExtensionInstalls,
       })
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+    if (activeDownloads.has(modelId)) {
+      return { success: false, error: 'Download already in progress' }
+    }
+
+    const modelsDir = getSettings(app.getPath('userData')).modelsDir
+    const allTargets = plan.kind === 'multi-source'
+      ? [
+          ...plan.sharedGroups.map((group) => ({
+            targetId: group.targetId,
+            label: `Shared · ${group.id}`,
+            sources: group.sources,
+          })),
+          ...(plan.sources.length > 0 ? [{
+            targetId: modelId,
+            label: 'Node-specific',
+            sources: plan.sources,
+          }] : []),
+        ]
+      : []
+    const targetRoots = plan.kind === 'multi-source'
+      ? allTargets.map((target) => resolveWeightStorageRoot(modelsDir, target.targetId))
+      : [resolveModelRoot(modelsDir, modelId)]
+    let release: () => void
+    try {
+      release = weightOperations.acquire(`downloading ${modelId}`, targetRoots)
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+    const managedTargets = allTargets.filter((target) => !areModelSourcesDownloadedAtRoot(
+      resolveWeightStorageRoot(modelsDir, target.targetId), target.sources,
+    ))
+
+    let finish!: () => void
+    const done = new Promise<void>((resolveDone) => { finish = resolveDone })
+    const active: ActiveDownload = { progress: { percent: 0 }, done, finish, targetRoots }
+    activeDownloads.set(modelId, active)
+    interruptedTargets.set(modelId, targetRoots)
+    try {
       const onProgress = (progress: typeof active.progress) => {
         active.progress = progress
         event.sender.send('model:downloadProgress', { modelId, ...progress })
       }
       if (plan.kind === 'multi-source') {
-        await downloadModelSourcesFromHF(modelId, plan.sources, onProgress)
+        if (managedTargets.length === 0) {
+          onProgress({ percent: 100 })
+        }
+        for (const [index, target] of managedTargets.entries()) {
+          if (active.stopRequested) throw new Error(`Model download ${active.stopRequested === 'pause' ? 'paused' : 'cancelled'}`)
+          active.currentTargetId = target.targetId
+          await downloadModelSourcesFromHF(target.targetId, target.sources, (progress) => {
+            const aggregatePercent = Math.min(
+              99,
+              Math.round(((index + progress.percent / 100) / managedTargets.length) * 100),
+            )
+            onProgress({
+              ...progress,
+              percent: aggregatePercent,
+              status: progress.status ? `${target.label} · ${progress.status}` : target.label,
+            })
+          })
+          notifyWeightChange()
+        }
+        if (active.stopRequested) throw new Error(`Model download ${active.stopRequested === 'pause' ? 'paused' : 'cancelled'}`)
+        if (managedTargets.length > 0) onProgress({ percent: 100, status: 'done' })
       } else {
+        active.currentTargetId = modelId
         await downloadModelFromHF(
           plan.repoId,
           modelId,
@@ -468,6 +645,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
           plan.includePrefixes,
         )
       }
+      interruptedTargets.delete(modelId)
       return { success: true }
     } catch (err: any) {
       const message = err?.message ?? String(err)
@@ -482,14 +660,20 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       return { success: false, error: String(err) }
     } finally {
       if (activeDownloads.get(modelId) === active) activeDownloads.delete(modelId)
+      release()
       active.finish()
+      notifyWeightChange()
     }
   })
 
   ipcMain.handle('model:pauseDownload', async (_, modelId: string): Promise<{ success: boolean; error?: string }> => {
     try {
+      const active = activeDownloads.get(modelId)
+      const targetId = active?.currentTargetId
+      if (!active || !targetId) return { success: false, error: 'No active download target' }
+      active.stopRequested = 'pause'
       await axios.post(`${API_BASE_URL}/model/hf-download/pause`, null, {
-        params: { model_id: modelId },
+        params: { model_id: targetId },
         timeout: 5000,
       })
       return { success: true }
@@ -501,23 +685,38 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   ipcMain.handle('model:cancelDownload', async (_, modelId: string): Promise<{ success: boolean; error?: string }> => {
     try {
       const active = activeDownloads.get(modelId)
-      await axios.post(`${API_BASE_URL}/model/hf-download/cancel`, null, {
-        params: { model_id: modelId },
-        timeout: 5000,
-      })
-      if (active) {
-        await Promise.race([
-          active.done,
-          new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error('Timed out waiting for the download to stop')), 30_000)
-          }),
-        ])
+      if (active) active.stopRequested = 'cancel'
+      if (active?.currentTargetId) {
+        await axios.post(`${API_BASE_URL}/model/hf-download/cancel`, null, {
+          params: { model_id: active.currentTargetId },
+          timeout: 5000,
+        })
       }
-      const modelDir = resolveModelRoot(getSettings(app.getPath('userData')).modelsDir, modelId)
-      // Only remove in-progress `.part` files — a model can now have multiple sources
-      // sharing this directory, and any source that already finished downloading
-      // must survive cancelling the ones still in flight.
-      await removePartialDownloadArtifacts(modelDir)
+      if (active) {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        try {
+          await Promise.race([
+            active.done,
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new Error('Timed out waiting for the download to stop')), 30_000)
+            }),
+          ])
+        } finally {
+          clearTimeout(timer)
+        }
+      }
+      const roots = active?.targetRoots ?? interruptedTargets.get(modelId) ?? [resolveModelRoot(
+        getSettings(app.getPath('userData')).modelsDir, modelId,
+      )]
+      // Another sibling may have resumed these targets after our session stopped.
+      const release = weightOperations.acquire(`cancelling ${modelId}`, roots)
+      try {
+        await Promise.all(roots.map((root) => removePartialDownloadArtifacts(root)))
+        interruptedTargets.delete(modelId)
+      } finally {
+        release()
+        notifyWeightChange()
+      }
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -611,6 +810,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   ipcMain.handle('settings:set', async (_event, patch: { modelsDir?: string; workspaceDir?: string; extensionsDir?: string; hfToken?: string }) => {
+    if (patch.modelsDir !== undefined && weightOperations.busy) {
+      throw new Error('Cannot change model storage while model weights are busy')
+    }
     const updated = setSettings(app.getPath('userData'), patch)
     // Keep main-process env in sync so child processes spawned after token change inherit it
     if (patch.hfToken !== undefined) {
@@ -818,6 +1020,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     type?:  'model' | 'process'
     entry?: string
     model_sources?: unknown
+    weight_groups?: unknown
     // Optional top-level fallbacks — applied to each node if not set on the node
     params_schema?:  unknown[]
     param_defaults?: Record<string, unknown>
@@ -835,6 +1038,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       hf_skip_prefixes?: string[]
       hf_include_prefixes?: string[]
       model_sources?: unknown
+      weight_groups?: unknown
     }[]
   }
 
@@ -853,13 +1057,37 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     if (parsed.model_sources !== undefined) {
       throw new Error('manifest.json: model_sources must be declared on a model node')
     }
+    if (parsed.type === 'process' && parsed.weight_groups !== undefined) {
+      throw new Error('manifest.json: weight_groups is supported only for model extensions')
+    }
+    const weightGroups = normalizeWeightGroups(parsed)
+    if (weightGroups || parsed.nodes?.some((node) => node.model_sources !== undefined || node.weight_groups !== undefined)) {
+      validateModelNodeIds(parsed.nodes ?? [])
+    }
     const nodes = (parsed.nodes ?? []).map(n => {
-      if (parsed.type === 'process' && n.model_sources !== undefined) {
-        throw new Error('manifest.json: model_sources is supported only for model nodes')
+      const usesManagedWeights = weightGroups !== undefined
+        || n.model_sources !== undefined
+        || n.weight_groups !== undefined
+      if (weightGroups !== undefined && typeof n.id === 'string' && n.id.toLowerCase() === '_shared') {
+        throw new Error('manifest.json: model node id "_shared" is reserved')
+      }
+      const nodeId = usesManagedWeights ? safeModelSourceId(n.id, 'model node id') : n.id
+      if (parsed.type === 'process' && (n.model_sources !== undefined || n.weight_groups !== undefined)) {
+        throw new Error('manifest.json: model_sources and weight_groups are supported only for model nodes')
       }
       const modelSources = normalizeModelSources(n)
+      const groupRefs = normalizeWeightGroupReferences(
+        n,
+        weightGroups,
+        `nodes[${n.id}].weight_groups`,
+      )
+      if (groupRefs && n.hf_repo !== undefined) {
+        throw new Error(
+          `manifest.json: model node "${nodeId}" must use model_sources for private weights when weight_groups are declared`,
+        )
+      }
       return {
-        id:             n.id,
+        id:             nodeId,
         name:           n.name ?? n.id,
         input:          n.input  ?? 'image' as const,
         inputs:         n.inputs,
@@ -872,6 +1100,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         hfSkipPrefixes: n.hf_skip_prefixes,
         hfIncludePrefixes: n.hf_include_prefixes,
         hasModelSources: modelSources !== undefined,
+        weightGroups: groupRefs,
       }
     })
 
@@ -879,7 +1108,17 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       return { ...common, type: 'process' as const, entry: parsed.entry ?? 'processor.js', nodes }
     }
 
-    return { ...common, type: 'model' as const, nodes }
+    return {
+      ...common,
+      type: 'model' as const,
+      nodes,
+      weightGroups: (weightGroups ?? []).map((group) => ({
+        id: group.id,
+        dependentNodeIds: nodes
+          .filter((node) => node.weightGroups?.includes(group.id))
+          .map((node) => node.id),
+      })),
+    }
   }
 
   async function reloadAndValidateModelExtension(
@@ -1783,6 +2022,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   // Update FastAPI paths at runtime (without restarting)
   ipcMain.handle('api:updatePaths', async (_event, patch: { modelsDir?: string; workspaceDir?: string; extensionsDir?: string }) => {
     try {
+      if (patch.modelsDir !== undefined && weightOperations.busy) {
+        throw new Error('Cannot change model storage while model weights are busy')
+      }
       await axios.post(`${API_BASE_URL}/settings/paths`, {
         models_dir:     patch.modelsDir,
         workspace_dir:  patch.workspaceDir,

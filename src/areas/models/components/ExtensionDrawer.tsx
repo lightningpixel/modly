@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { AnyExtension, ExtensionNode } from '@shared/types/electron.d'
+import type { AnyExtension, ExtensionNode, SharedWeightGroupState } from '@shared/types/electron.d'
 import { useNavStore } from '@shared/stores/navStore'
 import {
   DownloadMap,
@@ -18,6 +18,7 @@ interface Props {
   installedIds:     string[]
   localDataIds:     string[]
   downloading:      DownloadMap
+  sharedGroups:     SharedWeightGroupState[]
   loadError?:       string
   disabled?:        boolean
   onInstall:        (node: ExtensionNode, fullId: string) => void
@@ -25,6 +26,7 @@ interface Props {
   onPauseDownload:  (fullId: string) => void
   onCancelDownload: (fullId: string) => void
   onUninstallNode:  (fullId: string) => void
+  onDeleteSharedGroup: (extensionId: string, groupId: string) => Promise<{ success: boolean; error?: string }>
   onUninstall:      (extId: string) => void
   onRepaired:       () => void | Promise<void>
   onSynced:         () => void
@@ -32,9 +34,9 @@ interface Props {
 }
 
 export function ExtensionDrawer({
-  ext, installedIds, localDataIds, downloading, loadError, disabled,
+  ext, installedIds, localDataIds, downloading, sharedGroups, loadError, disabled,
   onInstall, onInstallAll, onPauseDownload, onCancelDownload,
-  onUninstallNode, onUninstall, onRepaired, onSynced, onClose,
+  onUninstallNode, onDeleteSharedGroup, onUninstall, onRepaired, onSynced, onClose,
 }: Props): JSX.Element {
   const navigate = useNavStore((s) => s.navigate)
   const [repairing,   setRepairing]   = useState(false)
@@ -83,6 +85,16 @@ export function ExtensionDrawer({
     } finally {
       setSyncing(false)
     }
+  }
+
+  async function handleDeleteSharedGroup(group: SharedWeightGroupState) {
+    const dependents = group.dependentModelIds.join(', ')
+    if (!window.confirm(
+      `Remove shared weights "${group.id}"? The following nodes will become unavailable: ${dependents}`,
+    )) return
+    setSyncError(null)
+    const result = await onDeleteSharedGroup(ext.id, group.id)
+    if (!result.success) setSyncError(result.error ?? 'Could not remove shared model weights.')
   }
 
   const error = syncError ?? repairError ?? loadError
@@ -169,6 +181,46 @@ export function ExtensionDrawer({
           </div>
 
           {/* Nodes */}
+          {isModel && sharedGroups.length > 0 && (
+            <div className="mb-6">
+              <div className="text-[10.5px] font-semibold uppercase tracking-[0.07em] text-zinc-600 mb-2.5">
+                Shared weights
+              </div>
+              <div className="flex flex-col gap-2">
+                {sharedGroups.map((group) => (
+                  <div key={group.id} className="px-3.5 py-3 rounded-[10px] bg-zinc-900/70 border border-zinc-800">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-[13px] font-semibold text-zinc-200 truncate">{group.id}</div>
+                        <div className="text-[11px] text-zinc-600 mt-0.5 truncate">
+                          Shared by {group.dependentModelIds.length} node{group.dependentModelIds.length === 1 ? '' : 's'}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className={`text-[11px] font-semibold ${group.downloaded ? 'text-emerald-400' : 'text-amber-400'}`}>
+                          {group.downloaded ? 'Shared · Installed' : 'Shared · Required'}
+                        </span>
+                        {group.hasLocalData && (
+                          <button
+                            onClick={() => handleDeleteSharedGroup(group)}
+                            disabled={disabled || isCorrupted}
+                            title="Remove shared weights from all dependent nodes"
+                            className="p-1 rounded-md text-zinc-600 hover:text-red-400 hover:bg-red-950/40 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                          >
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                              <polyline points="3 6 5 6 21 6" />
+                              <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" />
+                            </svg>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="mb-6">
             <div className="text-[10.5px] font-semibold uppercase tracking-[0.07em] text-zinc-600 mb-2.5">
               {isModel ? `Nodes · ${done}/${total} installed` : `Actions · ${total}`}

@@ -34,6 +34,15 @@ MODLY_API_DIR = os.environ.get("MODLY_API_DIR", "")
 # MODEL_DIR is set by ExtensionProcess to match its own model_dir (composite node id path).
 # Falls back to MODELS_DIR/manifest_id for standalone/legacy use.
 _MODEL_DIR_OVERRIDE = os.environ.get("MODEL_DIR", "")
+_MODEL_ID_OVERRIDE = os.environ.get("MODEL_ID", "")
+_MODEL_NODE_ID_OVERRIDE = os.environ.get("MODEL_NODE_ID", "")
+try:
+    _SHARED_MODEL_DIRS = {
+        str(group_id): Path(path)
+        for group_id, path in json.loads(os.environ.get("SHARED_MODEL_DIRS", "{}")).items()
+    }
+except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+    _SHARED_MODEL_DIRS = {}
 
 # Inject Modly's api/ so generator.py can do:
 #   from services.generators.base import BaseGenerator, ...
@@ -87,8 +96,12 @@ def load_generator(manifest: dict):
     return getattr(mod, manifest["generator_class"])
 
 
-def _select_node(manifest: dict, model_dir_override: str) -> dict:
+def _select_node(
+    manifest: dict, model_dir_override: str, node_id_override: str = ""
+) -> dict:
     nodes = manifest.get("nodes") or []
+    if nodes and node_id_override:
+        return next((n for n in nodes if n.get("id") == node_id_override), nodes[0])
     if nodes and model_dir_override:
         node_id = Path(model_dir_override).name
         return next((n for n in nodes if n.get("id") == node_id), nodes[0])
@@ -157,7 +170,7 @@ def _apply_manifest_metadata(gen, manifest: dict, node: dict) -> None:
 
 def main() -> None:
     manifest = json.loads((EXT_DIR / "manifest.json").read_text(encoding="utf-8"))
-    model_id = manifest["id"]
+    model_id = _MODEL_ID_OVERRIDE or manifest["id"]
 
     try:
         GenClass = load_generator(manifest)
@@ -167,11 +180,9 @@ def main() -> None:
               "traceback": traceback.format_exc()})
         return
 
-    # Support both flat manifest (legacy) and nodes[] format.
-    # Use MODEL_DIR to find the correct node for multi-node extensions:
-    # MODEL_DIR is set by ExtensionProcess to MODELS_DIR/ext_id/node_id,
-    # so its last component matches the node id.
-    node = _select_node(manifest, _MODEL_DIR_OVERRIDE)
+    # Support both flat manifest (legacy) and nodes[] format. The host passes an
+    # explicit node id; MODEL_DIR name inference remains only as a legacy fallback.
+    node = _select_node(manifest, _MODEL_DIR_OVERRIDE, _MODEL_NODE_ID_OVERRIDE)
 
     # Announce readiness and send params_schema so ExtensionProcess
     # can serve it without needing to query the subprocess later.
@@ -184,6 +195,9 @@ def main() -> None:
     # Falls back to MODELS_DIR/manifest_id for legacy / standalone use.
     model_dir = Path(_MODEL_DIR_OVERRIDE) if _MODEL_DIR_OVERRIDE else MODELS_DIR / model_id
     gen = GenClass(model_dir, WORKSPACE_DIR)
+    gen.MODEL_ID = model_id
+    gen.MODEL_NODE_ID = node.get("id", "")
+    gen.shared_model_dirs = dict(_SHARED_MODEL_DIRS)
     _apply_manifest_metadata(gen, manifest, node)
 
     # Active cancel events keyed by request id

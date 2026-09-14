@@ -45,6 +45,7 @@ class ExtensionProcess:
         self.manifest      = manifest
         self.model_dir     = None   # set by registry after init
         self.outputs_dir   = None   # set by registry after init
+        self.shared_model_dirs: dict[str, Path] = {}
 
         self._proc:   Optional[subprocess.Popen] = None
         self._queue:  queue.Queue                = queue.Queue()
@@ -84,11 +85,17 @@ class ExtensionProcess:
             # Setting it inside generator.py is too late, since generator.py
             # itself imports torch before calling select_device().
             env.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
-        # Pass the exact model_dir so runner.py doesn't have to re-derive it
-        # from manifest["id"] (which is the ext_id, not the composite node id).
-        # runner.py extracts the node id from MODEL_DIR's trailing path component.
+        # Keep capability identity separate from storage identity. MODEL_DIR
+        # retains its node-private meaning; shared roots are passed explicitly.
         if self.model_dir is not None:
             env["MODEL_DIR"] = str(self.model_dir)
+        env["MODEL_ID"] = self.MODEL_ID
+        env["MODEL_NODE_ID"] = self.manifest.get(
+            "node_id", self.MODEL_ID.split("/", 1)[-1]
+        )
+        env["SHARED_MODEL_DIRS"] = json.dumps(
+            {group_id: str(path) for group_id, path in self.shared_model_dirs.items()}
+        )
         # Extension venvs are based on python-embed which ships without a CA bundle.
         # Only set SSL_CERT_FILE if not already provided (preserves corporate/custom certs).
         if "SSL_CERT_FILE" not in env:

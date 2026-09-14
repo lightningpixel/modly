@@ -10,12 +10,14 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from fastapi import APIRouter, HTTPException, Request as FastAPIRequest
 from fastapi.responses import StreamingResponse
-from services.generator_registry import generator_registry, MODELS_DIR
+from services.generator_registry import generator_registry
+import services.generator_registry as registry_module
+from services.extension_process import ExtensionProcess
 from services.model_sources import (
     normalize_model_sources,
     resolve_download_path,
-    resolve_model_root,
-    resolve_source_destination,
+    resolve_source_destination_at_root,
+    resolve_weight_storage_root,
     validate_source_file_plan,
 )
 
@@ -109,10 +111,19 @@ async def unload_model(model_id: str):
     """Unloads a model from memory so its files can be safely deleted."""
     try:
         gen = generator_registry.get_generator(model_id)
+    except ValueError as exc:
+        if model_id in generator_registry._generators:
+            raise HTTPException(409, str(exc)) from exc
+        return {"unloaded": True}  # No runtime registered for these files.
+    # unload() on ExtensionProcess deliberately swallows IPC errors; deletion
+    # needs a confirmed process exit so no worker can retain file handles.
+    if isinstance(gen, ExtensionProcess):
+        gen.stop()
+    else:
         gen.unload()
-        return {"unloaded": True}
-    except ValueError:
-        return {"unloaded": True}  # already not loaded, that's fine
+        if gen.is_loaded():
+            raise HTTPException(409, "Model is still loaded; weights were preserved")
+    return {"unloaded": True}
 
 
 @router.post("/hf-download/pause")
@@ -131,7 +142,7 @@ async def cancel_hf_download(model_id: str):
 
 @router.post("/hf-download-sources")
 async def hf_download_sources(request: FastAPIRequest, model_id: str):
-    """Download all Hugging Face sources declared for one model node."""
+    """Download sources into one validated node or extension-shared target."""
     try:
         body = await request.json()
         if not isinstance(body, dict):
@@ -140,10 +151,10 @@ async def hf_download_sources(request: FastAPIRequest, model_id: str):
         if raw_sources is None:
             raise ValueError("sources are required")
         sources = normalize_model_sources({"model_sources": raw_sources})
-        model_root = resolve_model_root(MODELS_DIR, model_id)
+        model_root = resolve_weight_storage_root(registry_module.MODELS_DIR, model_id)
         destinations = {
-            source["id"]: resolve_source_destination(
-                MODELS_DIR, model_id, source["destination"]
+            source["id"]: resolve_source_destination_at_root(
+                model_root, source["destination"]
             )
             for source in sources
         }
@@ -305,7 +316,7 @@ async def hf_download(
     """
     import json as _json
     import os
-    dest_dir  = str(MODELS_DIR / model_id)
+    dest_dir  = str(registry_module.MODELS_DIR / model_id)
     # Prefer skip_prefixes passed directly from the client (authoritative, no registry dep)
     if skip_prefixes:
         try:

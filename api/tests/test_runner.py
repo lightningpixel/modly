@@ -32,6 +32,17 @@ class RunnerTests(unittest.TestCase):
 
         self.assertEqual(node["id"], "quality")
 
+    def test_select_node_prefers_explicit_node_id_over_storage_path(self) -> None:
+        manifest = {"nodes": [{"id": "fast"}, {"id": "quality"}]}
+
+        node = _select_node(
+            manifest,
+            str(Path("/tmp/ext/_shared/base")),
+            "quality",
+        )
+
+        self.assertEqual(node["id"], "quality")
+
     def test_ready_schema_falls_back_to_selected_node_schema(self) -> None:
         class GenClass:
             @classmethod
@@ -237,6 +248,23 @@ class _RunnerDriver:
             if original_module is not None:
                 sys.modules["generator"] = original_module
         return [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+
+
+class RuntimeIdentityTests(unittest.TestCase):
+    def test_runner_exposes_selected_identity_independently_of_storage(self):
+        from unittest.mock import patch
+        driver = _RunnerDriver(_FAKE_TEXGEN_GENERATOR, "FakeTexGen")
+        manifest = {"id": "demo-ext", "generator_class": "FakeTexGen",
+                    "nodes": [{"id": "a"}, {"id": "b"}]}
+        (driver.ext_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        with patch.object(runner, "_MODEL_ID_OVERRIDE", "demo-ext/b"), \
+             patch.object(runner, "_MODEL_NODE_ID_OVERRIDE", "b"), \
+             patch.object(runner, "_MODEL_DIR_OVERRIDE", str(driver.ext_dir / "unrelated-storage")):
+            driver.run([])
+        gen = driver.generator_module.INSTANCES[0]
+        self.assertEqual(gen.MODEL_ID, "demo-ext/b")
+        self.assertEqual(gen.MODEL_NODE_ID, "b")
+        self.assertEqual(gen.model_dir.name, "unrelated-storage")
 
 
 class GeneratorLoadedStateTests(unittest.TestCase):

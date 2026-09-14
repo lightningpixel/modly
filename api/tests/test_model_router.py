@@ -69,12 +69,12 @@ class MultiSourceRouterTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory(prefix="modly-model-router-")
         self.models_dir = Path(self.tempdir.name) / "models"
         self.models_dir.mkdir()
-        self.old_models_dir = model_router.MODELS_DIR
-        model_router.MODELS_DIR = self.models_dir
+        self.old_models_dir = model_router.registry_module.MODELS_DIR
+        model_router.registry_module.MODELS_DIR = self.models_dir
         self.old_hf_module = sys.modules.get("huggingface_hub")
 
     def tearDown(self) -> None:
-        model_router.MODELS_DIR = self.old_models_dir
+        model_router.registry_module.MODELS_DIR = self.old_models_dir
         model_router._download_controls.clear()
         if self.old_hf_module is None:
             sys.modules.pop("huggingface_hub", None)
@@ -177,6 +177,29 @@ class MultiSourceRouterTests(unittest.TestCase):
         self.assertEqual(resumed[-1], {"percent": 100, "status": "done"})
         self.assertTrue((self.models_dir / "pixal3d/generate/main.bin").is_file())
 
+    def test_shared_target_downloads_under_extension_reserved_root(self) -> None:
+        calls: list[str] = []
+        self.install_hf_stub({"org/main": ["main.bin"]}, calls)
+
+        def fake_download(**kwargs):
+            target = Path(kwargs["dest_dir"]) / kwargs["filename"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"shared")
+            return target.stat().st_size
+
+        async def run():
+            with patch.object(model_router, "_download_file_streamed", fake_download):
+                response = await model_router.hf_download_sources(
+                    request_for([SOURCES[0]]), "pixal3d/_shared/base"
+                )
+                return await collect_events(response)
+
+        events = asyncio.run(run())
+        self.assertEqual(events[-1], {"percent": 100, "status": "done"})
+        self.assertTrue(
+            (self.models_dir / "pixal3d/_shared/base/main.bin").is_file()
+        )
+
     def test_rejects_a_check_filtered_out_of_the_source_plan(self) -> None:
         calls: list[str] = []
         self.install_hf_stub({"org/main": ["other.bin"]}, calls)
@@ -190,6 +213,50 @@ class MultiSourceRouterTests(unittest.TestCase):
         events = asyncio.run(run())
         self.assertIn("excluded from its download plan", events[-1]["error"])
         self.assertFalse((self.models_dir / "pixal3d/generate/other.bin").exists())
+
+    def test_download_uses_live_storage_after_settings_update(self):
+        calls = []
+        self.install_hf_stub({"org/main": ["main.bin"]}, calls)
+        relocated = self.models_dir.parent / "relocated"
+        registry = model_router.registry_module.GeneratorRegistry()
+        registry.update_paths(relocated, None)
+
+        def fake_download(**kwargs):
+            target = Path(kwargs["dest_dir"]) / kwargs["filename"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"complete")
+            return target.stat().st_size
+
+        async def run():
+            with patch.object(model_router, "_download_file_streamed", fake_download):
+                for target_id in ("pixal3d/generate", "pixal3d/_shared/base"):
+                    response = await model_router.hf_download_sources(request_for([SOURCES[0]]), target_id)
+                    await collect_events(response)
+                    self.assertTrue((relocated / target_id / "main.bin").is_file())
+                    self.assertFalse((self.models_dir / target_id).exists())
+        asyncio.run(run())
+
+    def test_removal_unload_requires_confirmed_process_stop(self):
+        from unittest.mock import Mock
+        from services.extension_process import ExtensionProcess
+        gen = Mock(spec=ExtensionProcess)
+        with patch.object(model_router.generator_registry, "get_generator", return_value=gen):
+            self.assertEqual(asyncio.run(model_router.unload_model("demo/a")), {"unloaded": True})
+            gen.stop.assert_called_once()
+            gen.unload.assert_not_called()
+            gen.stop.side_effect = RuntimeError("still running")
+            with self.assertRaisesRegex(RuntimeError, "still running"):
+                asyncio.run(model_router.unload_model("demo/a"))
+
+    def test_removal_rejects_direct_generator_that_remains_loaded(self):
+        from unittest.mock import Mock
+        from fastapi import HTTPException
+        gen = Mock()
+        gen.is_loaded.return_value = True
+        with patch.object(model_router.generator_registry, "get_generator", return_value=gen):
+            with self.assertRaises(HTTPException) as error:
+                asyncio.run(model_router.unload_model("demo/a"))
+            self.assertEqual(error.exception.status_code, 409)
 
     def test_composite_model_unload_route_uses_path_converter(self) -> None:
         paths = {route.path for route in model_router.router.routes}

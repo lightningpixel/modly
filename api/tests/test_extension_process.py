@@ -1,4 +1,5 @@
 import io
+import json
 import platform
 import queue
 import unittest
@@ -101,6 +102,23 @@ class BuildEnvTests(unittest.TestCase):
         proc.model_dir = Path("/tmp/models/ext/node")
         env = proc._build_env()
         self.assertEqual(env.get("MODEL_DIR"), str(Path("/tmp/models/ext/node")))
+
+    def test_sets_explicit_node_identity_and_shared_weight_dirs(self) -> None:
+        proc = ExtensionProcess(
+            ext_dir=Path("/tmp/extensions/ext"),
+            manifest={"id": "ext/quality", "node_id": "quality"},
+        )
+        proc.model_dir = Path("/tmp/models/ext/quality")
+        proc.shared_model_dirs = {"base": Path("/tmp/models/ext/_shared/base")}
+
+        env = proc._build_env()
+
+        self.assertEqual(env["MODEL_ID"], "ext/quality")
+        self.assertEqual(env["MODEL_NODE_ID"], "quality")
+        self.assertEqual(
+            json.loads(env["SHARED_MODEL_DIRS"]),
+            {"base": "/tmp/models/ext/_shared/base"},
+        )
 
 
 class MissingModuleExtractionTests(unittest.TestCase):

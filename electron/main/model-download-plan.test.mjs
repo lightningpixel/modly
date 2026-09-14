@@ -90,3 +90,94 @@ test('keeps legacy sibling checks and wildcard filters unchanged', async () => {
     rmSync(fixture.root, { recursive: true, force: true })
   }
 })
+
+test('composes shared base groups with private node sources and dependency metadata', async () => {
+  const {
+    resolveInstalledExtensionSharedWeightGroups,
+    resolveInstalledModelDownloadPlan,
+  } = loadModule()
+  const fixture = setupExtension({
+    id: 'pixal3d',
+    type: 'model',
+    weight_groups: [{
+      id: 'base',
+      model_sources: [{
+        id: 'base-model', provider: 'huggingface', repo_id: 'org/base',
+        destination: '.', checks: ['pipeline.json'],
+      }],
+    }],
+    nodes: [
+      { id: 'generate', weight_groups: ['base'] },
+      {
+        id: 'worldsculpt',
+        weight_groups: ['base'],
+        model_sources: [{
+          id: 'adapter', provider: 'huggingface', repo_id: 'org/adapter',
+          destination: '.', checks: ['adapter.bin'],
+        }],
+      },
+    ],
+  })
+  try {
+    const plan = await resolveInstalledModelDownloadPlan({
+      modelId: 'pixal3d/worldsculpt',
+      userExtensionsDir: fixture.user,
+      builtinExtensionsDir: fixture.builtin,
+    })
+    assert.equal(plan.kind, 'multi-source')
+    assert.equal(plan.sources[0].repo_id, 'org/adapter')
+    assert.equal(plan.sharedGroups[0].targetId, 'pixal3d/_shared/base')
+    assert.deepEqual(plan.sharedGroups[0].dependentModelIds, [
+      'pixal3d/generate',
+      'pixal3d/worldsculpt',
+    ])
+
+    const groups = await resolveInstalledExtensionSharedWeightGroups({
+      extensionId: 'pixal3d',
+      userExtensionsDir: fixture.user,
+      builtinExtensionsDir: fixture.builtin,
+    })
+    assert.equal(groups.length, 1)
+    assert.equal(groups[0].sources[0].repo_id, 'org/base')
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('rejects unknown groups, reserved node ids, and legacy private aliases', async () => {
+  const { resolveInstalledModelDownloadPlan } = loadModule()
+  for (const manifest of [
+    {
+      id: 'unknown-group', type: 'model', nodes: [{ id: 'generate', weight_groups: ['missing'] }],
+    },
+    {
+      id: 'reserved-node', type: 'model', nodes: [{ id: '_shared', hf_repo: 'org/model' }],
+    },
+    {
+      id: 'legacy-private', type: 'model',
+      weight_groups: [{
+        id: 'base',
+        model_sources: [{
+          id: 'base', provider: 'huggingface', repo_id: 'org/base',
+          destination: '.', checks: ['base.bin'],
+        }],
+      }],
+      nodes: [{ id: 'generate', weight_groups: ['base'], hf_repo: 'org/private' }],
+    },
+  ]) {
+    const fixture = setupExtension(manifest)
+    const nodeId = manifest.nodes[0].id
+    try {
+      await assert.rejects(
+        resolveInstalledModelDownloadPlan({
+          modelId: `${manifest.id}/${nodeId}`,
+          userExtensionsDir: fixture.user,
+          builtinExtensionsDir: fixture.builtin,
+        }),
+        /unknown weight group|reserved|must use model_sources/i,
+      )
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true })
+    }
+  }
+})

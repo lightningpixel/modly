@@ -119,10 +119,13 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
       listDownloaded: () => ipcRenderer.invoke('model:listDownloaded'),
       isDownloaded:   (modelId: string) => ipcRenderer.invoke('model:isDownloaded', modelId),
       hasLocalData:    (modelId: string) => ipcRenderer.invoke('model:hasLocalData', modelId),
+      sharedGroups:    (extensionId: string) => ipcRenderer.invoke('model:sharedGroups', extensionId),
       download:       (modelId: string) => ipcRenderer.invoke('model:download', modelId),
       pauseDownload:  (modelId: string) => ipcRenderer.invoke('model:pauseDownload', modelId),
       cancelDownload: (modelId: string) => ipcRenderer.invoke('model:cancelDownload', modelId),
       delete:         (modelId: string) => ipcRenderer.invoke('model:delete', modelId),
+      deleteSharedGroup: (extensionId: string, groupId: string) => ipcRenderer.invoke('model:deleteSharedGroup', extensionId, groupId),
+      deleteExtensionWeights: (extensionId: string) => ipcRenderer.invoke('model:deleteExtensionWeights', extensionId),
       unloadAll:      () => ipcRenderer.invoke('model:unloadAll'),
       showInFolder:   (modelId: string) => ipcRenderer.invoke('model:showInFolder', modelId),
       activeDownloads: (): Promise<{ modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]> =>
@@ -155,6 +158,8 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         }))
       },
       offProgress:    () => ipcRenderer.removeAllListeners('model:downloadProgress'),
+      onWeightsChanged: (cb: () => void) => ipcRenderer.on('model:weightsChanged', cb),
+      offWeightsChanged: () => ipcRenderer.removeAllListeners('model:weightsChanged'),
     },
 
     // App metadata

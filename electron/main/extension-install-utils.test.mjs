@@ -83,6 +83,13 @@ test('validateInstallManifest accepts multi-source nodes and preserves legacy sh
       hf_skip_prefixes: ['weights/**'],
     }],
   }, { hasEntryFile: () => false, hasGeneratorFile: () => true }, 'repository'))
+
+  // Nodes that do not opt into managed sources keep the pre-existing validation path.
+  assert.doesNotThrow(() => mod.validateInstallManifest({
+    id: 'legacy-unmanaged',
+    generator_class: 'Generator',
+    nodes: [{ id: 'legacy node' }],
+  }, { hasEntryFile: () => false, hasGeneratorFile: () => true }, 'repository'))
 })
 
 test('validateInstallManifest rejects malformed or process model_sources', () => {
@@ -100,6 +107,56 @@ test('validateInstallManifest rejects malformed or process model_sources', () =>
     id: 'process', type: 'process', entry: 'processor.js',
     nodes: [{ id: 'run', model_sources: [{ ...source, destination: '.' }] }],
   }, { hasEntryFile: () => true, hasGeneratorFile: () => false }, 'repository'), /only for model nodes/i)
+})
+
+test('validateInstallManifest accepts shared groups with private sources', () => {
+  const mod = loadModule()
+  assert.doesNotThrow(() => mod.validateInstallManifest({
+    id: 'shared-model',
+    generator_class: 'Generator',
+    weight_groups: [{
+      id: 'base',
+      model_sources: [{
+        id: 'base', provider: 'huggingface', repo_id: 'org/base',
+        destination: '.', checks: ['base.bin'],
+      }],
+    }],
+    nodes: [
+      { id: 'base-node', weight_groups: ['base'] },
+      {
+        id: 'adapter-node',
+        weight_groups: ['base'],
+        model_sources: [{
+          id: 'adapter', provider: 'huggingface', repo_id: 'org/adapter',
+          destination: '.', checks: ['adapter.bin'],
+        }],
+      },
+    ],
+  }, { hasEntryFile: () => false, hasGeneratorFile: () => true }, 'repository'))
+})
+
+test('validateInstallManifest rejects unsafe shared-weight contracts', () => {
+  const mod = loadModule()
+  const group = {
+    id: 'base',
+    model_sources: [{
+      id: 'base', provider: 'huggingface', repo_id: 'org/base',
+      destination: '.', checks: ['base.bin'],
+    }],
+  }
+  const files = { hasEntryFile: () => true, hasGeneratorFile: () => true }
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'unknown', generator_class: 'Generator',
+    weight_groups: [group], nodes: [{ id: 'generate', weight_groups: ['missing'] }],
+  }, files, 'repository'), /unknown weight group/i)
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'reserved', generator_class: 'Generator',
+    weight_groups: [group], nodes: [{ id: '_shared', weight_groups: ['base'] }],
+  }, files, 'repository'), /reserved/i)
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'process', type: 'process', entry: 'processor.py', weight_groups: [group],
+    nodes: [{ id: 'run' }],
+  }, files, 'repository'), /only for model extensions/i)
 })
 
 test('python process setup failures are treated as fatal', () => {
@@ -365,4 +422,17 @@ test('incompleteInstallRecoveryAction chooses restore, removal, or no-op', () =>
     destinationIncomplete: false,
     backupExists: true,
   }), 'none')
+})
+
+test('managed model node ids reject portable aliases before installation', () => {
+  const { validateInstallManifest } = loadModule()
+  const opts = { hasGeneratorFile: () => true, hasEntryFile: () => true }
+  for (const ids of [['Fast', 'fast'], ['fast', 'fast']]) {
+    const manifest = {
+      id: 'demo', type: 'model', generator_class: 'Generator',
+      weight_groups: [{ id: 'base', model_sources: [{ id: 'main', provider: 'huggingface', repo_id: 'org/base', destination: '.', checks: ['weights.bin'] }] }],
+      nodes: ids.map((id) => ({ id, weight_groups: ['base'] })),
+    }
+    assert.throws(() => validateInstallManifest(manifest, opts, 'test'), /portable-unique/)
+  }
 })

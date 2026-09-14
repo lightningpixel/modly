@@ -1,7 +1,10 @@
 import {
   normalizeModelSources,
+  normalizeWeightGroupReferences,
+  normalizeWeightGroups,
+  validateModelNodeIds,
   safeModelSourceId,
-  type ModelSourceNode,
+  type ModelWeightNode,
 } from './model-sources'
 
 export interface InstallManifest {
@@ -10,7 +13,13 @@ export interface InstallManifest {
   entry?: string
   generator_class?: string
   model_sources?: unknown
-  nodes?: Array<{ id?: string; model_sources?: unknown } & ModelSourceNode>
+  weight_groups?: unknown
+  nodes?: Array<{
+    id?: string
+    hf_repo?: unknown
+    model_sources?: unknown
+    weight_groups?: unknown
+  } & ModelWeightNode>
 }
 
 export interface ValidatedInstallManifest {
@@ -49,13 +58,30 @@ export function validateInstallManifest(
   if (manifest.model_sources !== undefined) {
     throw new Error('manifest.json: model_sources must be declared on a model node')
   }
+  if (isProcess && manifest.weight_groups !== undefined) {
+    throw new Error('manifest.json: weight_groups is supported only for model extensions')
+  }
+  const weightGroups = normalizeWeightGroups(manifest)
+  if (weightGroups || nodes.some((node) => node.model_sources !== undefined || node.weight_groups !== undefined)) {
+    validateModelNodeIds(manifest.nodes ?? [])
+  }
   for (const node of Array.isArray(manifest.nodes) ? manifest.nodes : []) {
-    if (node.model_sources === undefined) continue
-    if (isProcess) {
-      throw new Error('manifest.json: model_sources is supported only for model nodes')
+    const usesSharedWeights = weightGroups !== undefined || node.weight_groups !== undefined
+    if (usesSharedWeights && typeof node.id === 'string' && node.id.toLowerCase() === '_shared') {
+      throw new Error('manifest.json: model node id "_shared" is reserved')
     }
-    safeModelSourceId(node.id, 'model node id')
-    normalizeModelSources(node)
+    if (isProcess && (node.model_sources !== undefined || node.weight_groups !== undefined)) {
+      throw new Error('manifest.json: model_sources and weight_groups are supported only for model nodes')
+    }
+    if (!usesSharedWeights && node.model_sources === undefined) continue
+    const nodeId = safeModelSourceId(node.id, 'model node id')
+    if (node.model_sources !== undefined) normalizeModelSources(node)
+    normalizeWeightGroupReferences(node, weightGroups, `nodes[${nodeId}].weight_groups`)
+    if (node.weight_groups !== undefined && node.hf_repo !== undefined) {
+      throw new Error(
+        `manifest.json: model node "${nodeId}" must use model_sources for private weights when weight_groups are declared`,
+      )
+    }
   }
 
   if (isProcess) {

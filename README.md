@@ -148,6 +148,65 @@ supported provider is `huggingface`. Existing nodes that use `hf_repo`,
 `download_check`, `hf_include_prefixes`, and `hf_skip_prefixes` keep their
 original behavior.
 
+### Shared weights inside one model extension
+
+Multi-node model extensions can declare extension-scoped `weight_groups` and
+reference them from any sibling node. Shared files are downloaded once under
+`<models-dir>/<extension-id>/_shared/<group-id>`, while node-specific
+`model_sources` stay under the node's existing model directory.
+
+```json
+{
+  "id": "pixal3d",
+  "type": "model",
+  "weight_groups": [
+    {
+      "id": "pixal3d-base",
+      "model_sources": [
+        {
+          "id": "base",
+          "provider": "huggingface",
+          "repo_id": "TencentARC/Pixal3D",
+          "revision": "<pinned-revision>",
+          "destination": ".",
+          "checks": ["pipeline.json"]
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "id": "generate",
+      "weight_groups": ["pixal3d-base"]
+    },
+    {
+      "id": "worldsculpt",
+      "weight_groups": ["pixal3d-base"],
+      "model_sources": [
+        {
+          "id": "adapter",
+          "provider": "huggingface",
+          "repo_id": "AlayaLab/WorldSculpt",
+          "revision": "<pinned-revision>",
+          "destination": ".",
+          "checks": ["model.safetensors"]
+        }
+      ]
+    }
+  ]
+}
+```
+
+At runtime, `MODEL_DIR` remains the selected node's private directory.
+Subprocess extensions also receive `MODEL_ID`, `MODEL_NODE_ID`, and a JSON
+`SHARED_MODEL_DIRS` map in their environment. Both direct and subprocess generator
+instances receive `MODEL_ID`, `MODEL_NODE_ID`, and the resolved mapping in
+`shared_model_dirs` before `load()`. Direct generators use these instance attributes,
+not process-global environment variables, to distinguish sibling nodes.
+Shared groups are installed through their dependent nodes; the drawer exposes
+shared-group status and explicit removal. Removing private node data never removes a shared group;
+shared-group removal is a separate action that identifies every affected node.
+
 ---
 
 ## Workflows

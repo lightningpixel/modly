@@ -17,6 +17,19 @@ export interface ModelSourceNode {
   model_sources?: unknown
 }
 
+export interface ModelWeightGroup {
+  id: string
+  sources: ModelSource[]
+}
+
+export interface ModelWeightManifest {
+  weight_groups?: unknown
+}
+
+export interface ModelWeightNode extends ModelSourceNode {
+  weight_groups?: unknown
+}
+
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const WINDOWS_DEVICE = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i
 const WINDOWS_UNSAFE = /[<>"|?*\u0000-\u001f]/
@@ -91,15 +104,18 @@ function safeRevision(value: unknown, field: string): string | undefined {
   return value
 }
 
-export function normalizeModelSources(node: ModelSourceNode): ModelSource[] | undefined {
+export function normalizeModelSources(
+  node: ModelSourceNode,
+  fieldName = 'model_sources',
+): ModelSource[] | undefined {
   if (!Object.prototype.hasOwnProperty.call(node, 'model_sources')) return undefined
   if (!Array.isArray(node.model_sources) || node.model_sources.length === 0) {
-    throw new Error('model_sources must be a non-empty array')
+    throw new Error(`${fieldName} must be a non-empty array`)
   }
 
   const seen = new Map<string, string>()
   return node.model_sources.map((raw, index) => {
-    const field = `model_sources[${index}]`
+    const field = `${fieldName}[${index}]`
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
       throw new Error(`${field} must be an object`)
     }
@@ -133,6 +149,71 @@ export function normalizeModelSources(node: ModelSourceNode): ModelSource[] | un
   })
 }
 
+export function validateModelNodeIds(nodes: Array<{ id?: unknown }>): void {
+  const seen = new Set<string>()
+  for (const node of nodes) {
+    if (typeof node?.id === 'string' && node.id.toLowerCase() === '_shared') {
+      throw new Error('model node id "_shared" is reserved')
+    }
+    const id = safeModelSourceId(node?.id, 'model node id')
+    const alias = id.toLowerCase()
+    if (seen.has(alias)) throw new Error(`model node id "${id}" is not portable-unique`)
+    seen.add(alias)
+  }
+}
+
+export function normalizeWeightGroups(manifest: ModelWeightManifest): ModelWeightGroup[] | undefined {
+  if (!Object.prototype.hasOwnProperty.call(manifest, 'weight_groups')) return undefined
+  if (!Array.isArray(manifest.weight_groups) || manifest.weight_groups.length === 0) {
+    throw new Error('weight_groups must be a non-empty array')
+  }
+
+  const seen = new Map<string, string>()
+  return manifest.weight_groups.map((raw, index) => {
+    const field = `weight_groups[${index}]`
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      throw new Error(`${field} must be an object`)
+    }
+    const value = raw as Record<string, unknown>
+    if (typeof value.id === 'string' && value.id.toLowerCase() === '_shared') {
+      throw new Error(`${field}.id uses the reserved identifier "_shared"`)
+    }
+    const id = safeModelSourceId(value.id, `${field}.id`)
+    const alias = id.normalize('NFC').toLowerCase()
+    const previous = seen.get(alias)
+    if (previous) throw new Error(`weight group ids "${previous}" and "${id}" are not portable-unique`)
+    seen.set(alias, id)
+    const sources = normalizeModelSources(
+      { model_sources: value.model_sources },
+      `${field}.model_sources`,
+    )
+    return { id, sources: sources! }
+  })
+}
+
+export function normalizeWeightGroupReferences(
+  node: ModelWeightNode,
+  groups: ModelWeightGroup[] | undefined,
+  fieldName = 'weight_groups',
+): string[] | undefined {
+  if (!Object.prototype.hasOwnProperty.call(node, 'weight_groups')) return undefined
+  if (!Array.isArray(node.weight_groups) || node.weight_groups.length === 0) {
+    throw new Error(`${fieldName} must be a non-empty array of weight group ids`)
+  }
+  const available = new Map((groups ?? []).map((group) => [group.id.normalize('NFC').toLowerCase(), group.id]))
+  const seen = new Map<string, string>()
+  return node.weight_groups.map((raw, index) => {
+    const id = safeModelSourceId(raw, `${fieldName}[${index}]`)
+    const alias = id.normalize('NFC').toLowerCase()
+    const previous = seen.get(alias)
+    if (previous) throw new Error(`weight group references "${previous}" and "${id}" are not portable-unique`)
+    seen.set(alias, id)
+    const canonical = available.get(alias)
+    if (!canonical) throw new Error(`${fieldName}[${index}] references unknown weight group "${id}"`)
+    return canonical
+  })
+}
+
 function pathHasSymlink(root: string, candidate: string): boolean {
   const rootPath = resolve(root)
   const rel = relative(rootPath, resolve(candidate))
@@ -155,17 +236,55 @@ export function resolveModelRoot(modelsDir: string, modelId: string): string {
   const parts = modelId.split('/')
   if (parts.length !== 2) throw new Error('Model id must identify one extension node')
   const extensionId = safeModelSourceId(parts[0], 'extension id')
+  if (parts[1].toLowerCase() === '_shared') throw new Error('Model node id "_shared" is reserved')
   const nodeId = safeModelSourceId(parts[1], 'model node id')
   const root = resolve(modelsDir)
-  const modelRoot = resolve(root, extensionId, nodeId)
+  const extensionRoot = resolveExtensionModelRoot(modelsDir, extensionId)
+  const modelRoot = resolve(extensionRoot, nodeId)
   if (pathHasSymlink(root, modelRoot)) throw new Error('Model path resolves through a symlink')
   return modelRoot
 }
 
-export function areModelSourcesDownloaded(modelsDir: string, modelId: string, sources: ModelSource[]): boolean {
+export function resolveExtensionModelRoot(modelsDir: string, extensionId: string): string {
+  const safeExtensionId = safeModelSourceId(extensionId, 'extension id')
+  const root = resolve(modelsDir)
+  const extensionRoot = resolve(root, safeExtensionId)
+  if (pathHasSymlink(root, extensionRoot)) throw new Error('Extension model path resolves through a symlink')
+  return extensionRoot
+}
+
+export function resolveWeightGroupRoot(modelsDir: string, extensionId: string, groupId: string): string {
+  const safeExtensionId = safeModelSourceId(extensionId, 'extension id')
+  if (typeof groupId === 'string' && groupId.toLowerCase() === '_shared') {
+    throw new Error('Weight group id "_shared" is reserved')
+  }
+  const safeGroupId = safeModelSourceId(groupId, 'weight group id')
+  const root = resolve(modelsDir)
+  const extensionRoot = resolveExtensionModelRoot(modelsDir, safeExtensionId)
+  const groupRoot = resolve(extensionRoot, '_shared', safeGroupId)
+  if (pathHasSymlink(root, groupRoot)) throw new Error('Weight group path resolves through a symlink')
+  return groupRoot
+}
+
+export function weightGroupTargetId(extensionId: string, groupId: string): string {
+  const safeExtensionId = safeModelSourceId(extensionId, 'extension id')
+  const safeGroupId = safeModelSourceId(groupId, 'weight group id')
+  return `${safeExtensionId}/_shared/${safeGroupId}`
+}
+
+export function resolveWeightStorageRoot(modelsDir: string, targetId: string): string {
+  if (typeof targetId !== 'string') throw new Error('Weight target id must be a string')
+  const parts = targetId.split('/')
+  if (parts.length === 2) return resolveModelRoot(modelsDir, targetId)
+  if (parts.length === 3 && parts[1] === '_shared') {
+    return resolveWeightGroupRoot(modelsDir, parts[0], parts[2])
+  }
+  throw new Error('Weight target id must identify one model node or extension weight group')
+}
+
+export function areModelSourcesDownloadedAtRoot(modelRoot: string, sources: ModelSource[]): boolean {
   try {
-    const modelRoot = resolveModelRoot(modelsDir, modelId)
-    if (!existsSync(modelRoot)) return false
+    if (!existsSync(modelRoot) || pathHasSymlink(modelRoot, modelRoot)) return false
     return sources.every((source) => {
       const destination = source.destination === '.'
         ? modelRoot
@@ -187,10 +306,43 @@ export function areModelSourcesDownloaded(modelsDir: string, modelId: string, so
   }
 }
 
+export function areModelSourcesDownloaded(modelsDir: string, modelId: string, sources: ModelSource[]): boolean {
+  try {
+    const modelRoot = resolveModelRoot(modelsDir, modelId)
+    return areModelSourcesDownloadedAtRoot(modelRoot, sources)
+  } catch {
+    return false
+  }
+}
+
+export function areWeightGroupSourcesDownloaded(
+  modelsDir: string,
+  extensionId: string,
+  group: ModelWeightGroup,
+): boolean {
+  try {
+    return areModelSourcesDownloadedAtRoot(
+      resolveWeightGroupRoot(modelsDir, extensionId, group.id),
+      group.sources,
+    )
+  } catch {
+    return false
+  }
+}
+
 export function modelHasLocalData(modelsDir: string, modelId: string): boolean {
   try {
     const modelRoot = resolveModelRoot(modelsDir, modelId)
     return existsSync(modelRoot) && readdirSync(modelRoot).length > 0
+  } catch {
+    return false
+  }
+}
+
+export function weightStorageHasLocalData(modelsDir: string, targetId: string): boolean {
+  try {
+    const root = resolveWeightStorageRoot(modelsDir, targetId)
+    return existsSync(root) && readdirSync(root).length > 0
   } catch {
     return false
   }

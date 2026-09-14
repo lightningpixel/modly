@@ -211,6 +211,79 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Model sources are incomplete"):
             self.registry.get_active()
 
+    def test_shared_groups_gate_all_dependents_and_keep_private_dirs_separate(self) -> None:
+        extension = self._make_extension("shared-model")
+        manifest = {
+            "id": "shared-model",
+            "name": "shared-model",
+            "type": "model",
+            "generator_class": "TestGenerator",
+            "weight_groups": [{
+                "id": "base",
+                "model_sources": [{
+                    "id": "base",
+                    "provider": "huggingface",
+                    "repo_id": "org/base",
+                    "destination": ".",
+                    "checks": ["base.bin"],
+                }],
+            }],
+            "nodes": [
+                {"id": "generate", "weight_groups": ["base"]},
+                {
+                    "id": "adapter",
+                    "weight_groups": ["base"],
+                    "model_sources": [{
+                        "id": "adapter",
+                        "provider": "huggingface",
+                        "repo_id": "org/adapter",
+                        "destination": ".",
+                        "checks": ["adapter.bin"],
+                    }],
+                },
+            ],
+        }
+        (extension / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (extension / "generator.py").write_text(
+            "\n".join([
+                "from services.generators.base import BaseGenerator",
+                "class TestGenerator(BaseGenerator):",
+                "    def load(self): self._model = object()",
+                "    def generate(self, image_bytes, params, progress_cb=None, cancel_event=None):",
+                "        return self.outputs_dir / 'result.glb'",
+            ]),
+            encoding="utf-8",
+        )
+
+        self.registry.initialize()
+        base_root = self.models_dir / "shared-model" / "_shared" / "base"
+        generate = self.registry.get_generator("shared-model/generate")
+        adapter = self.registry.get_generator("shared-model/adapter")
+        self.assertEqual(generate.shared_model_dirs, {"base": base_root})
+        self.assertEqual(adapter.shared_model_dirs, {"base": base_root})
+        self.assertEqual(generate.MODEL_ID, "shared-model/generate")
+        self.assertEqual(generate.MODEL_NODE_ID, "generate")
+        self.assertEqual(adapter.MODEL_ID, "shared-model/adapter")
+        self.assertEqual(adapter.MODEL_NODE_ID, "adapter")
+        self.assertFalse(self.registry._is_downloaded("shared-model/generate", generate))
+        self.assertFalse(self.registry._is_downloaded("shared-model/adapter", adapter))
+
+        base_root.mkdir(parents=True)
+        (base_root / "base.bin").write_bytes(b"base")
+        self.assertTrue(self.registry._is_downloaded("shared-model/generate", generate))
+        self.assertFalse(self.registry._is_downloaded("shared-model/adapter", adapter))
+
+        private_root = self.models_dir / "shared-model" / "adapter"
+        private_root.mkdir(parents=True)
+        (private_root / "adapter.bin").write_bytes(b"adapter")
+        self.assertTrue(self.registry._is_downloaded("shared-model/adapter", adapter))
+        relocated = self.root / "relocated-models"
+        self.registry.update_paths(relocated, None)
+        self.assertEqual(adapter.model_dir, relocated / "shared-model/adapter")
+        self.assertEqual(adapter.shared_model_dirs, {"base": relocated / "shared-model/_shared/base"})
+        self.assertEqual(adapter.MODEL_NODE_ID, "adapter")
+        self.assertFalse(self.registry._is_downloaded("shared-model/adapter", adapter))
+
     def test_reload_preserves_legacy_path_owned_by_the_host(self) -> None:
         extension = self._make_extension("host-owned-path")
         self._write_manifest(extension, extension_id="host-owned-path")

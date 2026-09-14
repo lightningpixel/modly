@@ -25,6 +25,12 @@ export interface ExtensionNode {
   hfSkipPrefixes?:  string[]
   hfIncludePrefixes?: string[]
   hasModelSources?: boolean
+  weightGroups?:    string[]
+}
+
+export interface SharedWeightGroup {
+  id: string
+  dependentNodeIds: string[]
 }
 
 export interface ModelExtension {
@@ -39,6 +45,7 @@ export interface ModelExtension {
   source?:      string
   localPath?:   string
   nodes:        ExtensionNode[]
+  weightGroups?: SharedWeightGroup[]
   /** Folder exists but is not a loadable extension — see manifestError */
   corrupted?:   boolean
   /** Why the folder is corrupted: manifest gone, manifest unparseable, or install never completed */
@@ -210,10 +217,13 @@ declare global {
         activeDownloads: () => Promise<{ modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]>
         isDownloaded:   (modelId: string) => Promise<boolean>
         hasLocalData:    (modelId: string) => Promise<boolean>
+        sharedGroups:    (extensionId: string) => Promise<SharedWeightGroupState[]>
         download:       (modelId: string) => Promise<{ success: boolean; error?: string; paused?: boolean; cancelled?: boolean }>
         pauseDownload:  (modelId: string) => Promise<{ success: boolean; error?: string }>
         cancelDownload: (modelId: string) => Promise<{ success: boolean; error?: string }>
         delete:         (modelId: string) => Promise<{ success: boolean; error?: string }>
+        deleteSharedGroup: (extensionId: string, groupId: string) => Promise<{ success: boolean; error?: string }>
+        deleteExtensionWeights: (extensionId: string) => Promise<{ success: boolean; error?: string }>
         unloadAll:      () => Promise<{ success: boolean; error?: string }>
         showInFolder:   (modelId: string) => Promise<void>
         onProgress:     (cb: (data: {
@@ -230,6 +240,8 @@ declare global {
           cancelled?: boolean
         }) => void) => void
         offProgress:    () => void
+        onWeightsChanged: (cb: () => void) => void
+        offWeightsChanged: () => void
       }
       app: {
         info: () => Promise<{
@@ -321,4 +333,12 @@ declare global {
       }
     }
   }
+}
+
+export interface SharedWeightGroupState {
+  id: string
+  targetId: string
+  dependentModelIds: string[]
+  downloaded: boolean
+  hasLocalData: boolean
 }
