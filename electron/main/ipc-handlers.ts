@@ -595,6 +595,21 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   // Shell
   ipcMain.handle('shell:openExternal', (_, url: string) => shell.openExternal(url))
 
+  // Open a model in OrcaSlicer via its orcaslicer://open?file=<url> deeplink.
+  // Returns success/error so the renderer can surface a fallback (e.g. when
+  // OrcaSlicer is not installed and no app is registered for the scheme).
+  ipcMain.handle('slicer:open', async (_, url: string): Promise<{ success: boolean; error?: string }> => {
+    if (typeof url !== 'string' || !url.startsWith('orcaslicer://')) {
+      return { success: false, error: 'slicer:open requires an orcaslicer:// URL' }
+    }
+    try {
+      await shell.openExternal(url)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
   // App info
   // System memory (used/available/total bytes).
   // On macOS, matches Activity Monitor's "Memory Used":

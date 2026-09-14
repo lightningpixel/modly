@@ -154,6 +154,9 @@ declare global {
       shell: {
         openExternal: (url: string) => Promise<void>
       }
+      slicer: {
+        open: (url: string) => Promise<{ success: boolean; error?: string }>
+      }
       system: {
         memory: () => Promise<{ total: number; used: number; available: number }>
       }

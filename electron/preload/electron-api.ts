@@ -43,6 +43,12 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
     // Shell utilities
     shell: { openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url) },
 
+    // Slicer integration — open a model in OrcaSlicer via its deeplink
+    slicer: {
+      open: (url: string): Promise<{ success: boolean; error?: string }> =>
+        ipcRenderer.invoke('slicer:open', url) as Promise<{ success: boolean; error?: string }>,
+    },
+
     // System info
     system: {
       memory: (): Promise<{ total: number; used: number; available: number }> =>
