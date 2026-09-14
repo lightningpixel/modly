@@ -8,6 +8,7 @@ import GenerationHUD from './components/GenerationHUD'
 import Viewer3D from './components/Viewer3D'
 import WorkflowPanel from './components/WorkflowPanel'
 import { getDefaultAssetLibraryService } from './assetLibraryService'
+import { buildOrcaSlicerDeepLink, canOpenInOrcaSlicer } from './orcaSlicerLink'
 import { resolveAssetLibraryOpenTarget, type ProjectedAssetLibraryEntry } from './assetLibraryProjection'
 import {
   ASSET_LIBRARY_SORT_OPTIONS,
@@ -53,9 +54,13 @@ const EXPORT_FORMATS = [
 function ExportDropdown({
   onExport,
   onClose,
+  onOpenInSlicer,
+  canOpenInSlicer,
 }: {
   onExport: (f: 'glb' | 'obj' | 'stl' | 'ply') => void
   onClose: () => void
+  onOpenInSlicer: () => void
+  canOpenInSlicer: boolean
 }) {
   return (
     <div className="absolute top-full left-0 mt-1 z-50 bg-zinc-900 border border-zinc-700/60 rounded-xl p-1 flex flex-col gap-0.5 min-w-[150px] shadow-xl">
@@ -69,6 +74,23 @@ function ExportDropdown({
           <span className="text-[10px] text-zinc-500">{desc}</span>
         </button>
       ))}
+      {canOpenInSlicer && (
+        <>
+          <div className="my-1 h-px bg-zinc-700/60" />
+          <button
+            onClick={() => { onOpenInSlicer(); onClose() }}
+            title="Convert to STL and open in OrcaSlicer"
+            className="px-3 py-2 text-left hover:bg-zinc-800 rounded-lg transition-colors flex items-center gap-2.5"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" className="text-zinc-400 shrink-0">
+              <path d="M15 3h6v6" />
+              <path d="M10 14 21 3" />
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+            </svg>
+            <span className="text-xs text-zinc-200 whitespace-nowrap">Open in OrcaSlicer</span>
+          </button>
+        </>
+      )}
     </div>
   )
 }
@@ -692,6 +714,7 @@ export default function GeneratePage(): JSX.Element {
   }, [undoMesh, redoMesh])
 
   const hasModel = currentJob?.status === 'done' && !!currentJob.outputUrl
+  const showOpenInSlicer = hasModel && canOpenInOrcaSlicer(currentJob?.outputUrl)
 
   // Selecting a point light (from the 3D marker or the light panel list) —
   // also drops the active gizmo tool so it doesn't silently carry over from
@@ -751,6 +774,19 @@ export default function GeneratePage(): JSX.Element {
     }
     link.download = `${stem}.${format}`
     link.click()
+  }
+
+  async function handleOpenInOrcaSlicer() {
+    if (!currentJob?.outputUrl) return
+    try {
+      const link = buildOrcaSlicerDeepLink(apiUrl, currentJob.outputUrl)
+      const result = await window.electron.slicer.open(link)
+      if (!result.success) {
+        showError(result.error ?? 'Could not open OrcaSlicer. Make sure it is installed.')
+      }
+    } catch (err) {
+      showError(err instanceof Error ? err.message : 'Could not open OrcaSlicer.')
+    }
   }
 
   function getOptimizePath(url: string): string {
@@ -1064,6 +1100,8 @@ export default function GeneratePage(): JSX.Element {
                   <ExportDropdown
                     onExport={handleExport as (f: 'glb' | 'obj' | 'stl' | 'ply') => void}
                     onClose={() => setOpenPanel(null)}
+                    onOpenInSlicer={() => { void handleOpenInOrcaSlicer() }}
+                    canOpenInSlicer={showOpenInSlicer}
                   />
                 )}
               </div>
