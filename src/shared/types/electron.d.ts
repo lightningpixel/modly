@@ -14,10 +14,10 @@ import type {
 export interface ExtensionNode {
   id:               string
   name:             string
-  input:            'image' | 'text' | 'mesh' | 'audio'
-  inputs?:          ('image' | 'text' | 'mesh' | 'audio')[]   // multi-input nodes; overrides input when set
+  input:            'image' | 'text' | 'mesh' | 'audio' | 'scene' | 'video'
+  inputs?:          ('image' | 'text' | 'mesh' | 'audio' | 'scene' | 'video')[]   // multi-input nodes; overrides input when set
   inputLabels?:     string[]   // display labels per input slot (e.g. positive/negative)
-  output:           'image' | 'text' | 'mesh' | 'audio'
+  output:           'image' | 'text' | 'mesh' | 'audio' | 'scene'
   paramsSchema:     ParamSchema[]
   paramDefaults?:   Record<string, number | string>
   hfRepo?:          string
@@ -185,6 +185,7 @@ declare global {
       }
       fs: {
         selectImage:     () => Promise<string | null>
+        selectVideo:     () => Promise<{ workspacePath: string; absolutePath: string } | null>
         selectMeshFile:  () => Promise<string | null>
         saveModel:       (defaultName: string) => Promise<string | null>
         readFileBase64:  (filePath: string) => Promise<string>

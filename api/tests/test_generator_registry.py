@@ -155,6 +155,73 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
         self.registry.reload()
         self.assertNotIn(str(extension.resolve()), sys.path)
 
+    def test_scene_and_video_inputs_are_registered_but_capture_is_rejected(self) -> None:
+        for extension_id, input_kind, output_kind in (("scene-io", "scene", "scene"), ("capture-io", "capture", "mesh"), ("video-io", "video", "mesh")):
+            extension = self._make_extension(extension_id)
+            manifest = {
+                "id": extension_id, "name": extension_id, "type": "model",
+                "generator_class": "TestGenerator",
+                "nodes": [{"id": "generate", "input": input_kind, "output": output_kind}],
+            }
+            (extension / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            (extension / "generator.py").write_text(
+                "from services.generators.base import BaseGenerator\n"
+                "class TestGenerator(BaseGenerator):\n"
+                " def load(self): self._model = object()\n"
+                " def generate(self, value, params, progress_cb=None, cancel_event=None): return self.outputs_dir\n",
+                encoding="utf-8",
+            )
+
+        self.registry.initialize()
+        self.assertEqual(self.registry.get_manifest("scene-io/generate")["input"], "scene")
+        self.assertEqual(self.registry.get_manifest("video-io/generate")["input"], "video")
+        self.assertIn("capture-io/generate", self.registry.load_errors())
+
+    def test_video_input_rejects_arrays_and_video_output(self) -> None:
+        cases = {
+            "video-array": {"input": "video", "inputs": ["video"], "output": "mesh"},
+            "video-mixed": {"input": "video", "inputs": ["video", "text"], "output": "mesh"},
+            "video-output": {"input": "image", "output": "video"},
+        }
+        for extension_id, node in cases.items():
+            extension = self._make_extension(extension_id)
+            (extension / "manifest.json").write_text(json.dumps({
+                "id": extension_id, "name": extension_id, "type": "model",
+                "generator_class": "TestGenerator", "nodes": [{"id": "generate", **node}],
+            }), encoding="utf-8")
+            (extension / "generator.py").write_text(
+                "from services.generators.base import BaseGenerator\nclass TestGenerator(BaseGenerator):\n pass\n",
+                encoding="utf-8",
+            )
+        self.registry.initialize()
+        for extension_id in cases:
+            self.assertIn(f"{extension_id}/generate", self.registry.load_errors())
+
+    def test_scene_input_rejects_multi_input_shapes_but_image_multi_can_output_scene(self) -> None:
+        cases = {
+            "scene-mixed": {"input": "scene", "inputs": ["scene", "text"], "output": "mesh"},
+            "scene-array": {"input": "scene", "inputs": ["scene"], "output": "mesh"},
+            "images-scene": {"input": "image", "inputs": ["image", "image"], "output": "scene"},
+        }
+        for extension_id, node in cases.items():
+            extension = self._make_extension(extension_id)
+            (extension / "manifest.json").write_text(json.dumps({
+                "id": extension_id, "name": extension_id, "type": "model",
+                "generator_class": "TestGenerator",
+                "nodes": [{"id": "generate", **node}],
+            }), encoding="utf-8")
+            (extension / "generator.py").write_text(
+                "from services.generators.base import BaseGenerator\n"
+                "class TestGenerator(BaseGenerator):\n"
+                " def load(self): self._model = object()\n"
+                " def generate(self, value, params, progress_cb=None, cancel_event=None): return self.outputs_dir\n",
+                encoding="utf-8",
+            )
+        self.registry.initialize()
+        self.assertIn("scene-mixed/generate", self.registry.load_errors())
+        self.assertIn("scene-array/generate", self.registry.load_errors())
+        self.assertIn("images-scene/generate", self.registry._generators)
+
     def test_declared_sources_block_generation_even_when_generator_overrides_readiness(self) -> None:
         extension = self._make_extension("multi-source")
         manifest = {

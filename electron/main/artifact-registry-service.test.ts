@@ -64,6 +64,18 @@ test('lists Workflows and Exports assets while skipping hidden, cache, and inter
   assert.equal(result.success && result.entries.find((entry) => entry.workspacePath.endsWith('exported.ply'))?.openable, false)
 }))
 
+test('registers a generated scene directory through its canonical manifest artifact', () => withWorkspace(async (workspaceDir) => {
+  await mkdir(path.join(workspaceDir, 'Workflows/world'), { recursive: true })
+  await writeFile(path.join(workspaceDir, 'Workflows/world/scene-manifest.json'), JSON.stringify({
+    schema: 'modly.scene-manifest.v1', sceneRoot: '.', assets: [],
+  }))
+  const result = await listWorkspaceAssetLibrary({ workspaceDir })
+  assert.equal(result.success, true)
+  const scene = result.success && result.entries.find((entry) => entry.workspacePath === 'Workflows/world/scene-manifest.json')
+  assert.equal(scene && scene.capability, 'scene-manifest')
+  assert.equal(scene && scene.state, 'ready')
+}))
+
 test('reads and opens only safe GLB/GLTF workspace assets', () => withWorkspace(async (workspaceDir) => {
   await mkdir(path.join(workspaceDir, 'Workflows/checkpoints'), { recursive: true })
   await mkdir(path.join(workspaceDir, 'Exports'), { recursive: true })

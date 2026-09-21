@@ -5,8 +5,12 @@ import sys
 import json
 import tempfile
 import importlib
+from unittest.mock import patch
 from contextlib import redirect_stdout
 from pathlib import Path
+from services.generators.base import BaseGenerator
+from services.artifact_input import validate_artifact_input
+from services.video_input import video_snapshot_to_dict
 
 
 _tmp_ext_dir = tempfile.mkdtemp(prefix="modly-runner-test-")
@@ -20,6 +24,84 @@ _select_node = runner._select_node
 
 
 class RunnerTests(unittest.TestCase):
+    def test_legacy_generator_fails_actionably_for_video_artifact(self) -> None:
+        class Legacy(BaseGenerator):
+            def load(self): pass
+            def generate(self, image_bytes, params, progress_cb=None, cancel_event=None): return Path("result.glb")
+        with tempfile.TemporaryDirectory() as tmp:
+            generator = Legacy(Path(tmp), Path(tmp))
+            with self.assertRaisesRegex(NotImplementedError, "typed artifact input 'video'"):
+                generator.generate_artifact("video", Path(tmp) / "clip.mp4", {})
+
+    def test_decode_typed_scene_revalidates_worker_workspace_and_keeps_legacy_image(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            scene = workspace / "Workflows" / "room"
+            scene.mkdir(parents=True)
+            manifest = scene / "scene-manifest.json"
+            manifest.write_text(json.dumps({
+                "schema": "modly.scene-manifest.v1", "sceneRoot": ".", "assets": [],
+            }))
+            with patch.object(runner, "WORKSPACE_DIR", workspace):
+                typed = runner.decode_model_input({"input": {"kind": "scene", "path": str(manifest)}})
+                self.assertEqual(typed.kind, "scene")
+                self.assertEqual(typed.path, manifest.resolve())
+                self.assertEqual(runner.decode_model_input({"image_b64": "aW1hZ2U="}), b"image")
+                with self.assertRaises(ValueError):
+                    runner.decode_model_input({"input": {"kind": "video", "path": str(manifest)}})
+
+    def test_runner_model_envelope_rejects_cross_node_dispatch(self) -> None:
+        manifest = {"id": "pixal3d"}
+        node = {"id": "worldsculpt"}
+        runner.validate_requested_model({"model_id": "pixal3d/worldsculpt"}, manifest, node)
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            runner.validate_requested_model({"model_id": "pixal3d/generate"}, manifest, node)
+
+    def test_runner_decodes_and_revalidates_video_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            video = workspace / "Workflows" / "clip.mp4"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2")
+            queued = validate_artifact_input(workspace, "video", "Workflows/clip.mp4")
+            with patch.object(runner, "WORKSPACE_DIR", workspace):
+                typed = runner.decode_model_input({"input": {
+                    "kind": "video", "path": str(video),
+                    "snapshot": video_snapshot_to_dict(queued.snapshot),
+                }})
+            self.assertEqual(typed.kind, "video")
+            self.assertEqual(typed.path, video.resolve())
+
+    def test_runner_rejects_swapped_video_using_queued_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            video = workspace / "Workflows" / "clip.mp4"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2")
+            queued = validate_artifact_input(workspace, "video", "Workflows/clip.mp4")
+            replacement = video.with_suffix(".replacement")
+            replacement.write_bytes(b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2changed")
+            os.replace(replacement, video)
+            with patch.object(runner, "WORKSPACE_DIR", workspace), self.assertRaisesRegex(ValueError, "changed"):
+                runner.decode_model_input({"input": {
+                    "kind": "video", "path": str(video),
+                    "snapshot": video_snapshot_to_dict(queued.snapshot),
+                }})
+
+    def test_runner_requires_well_formed_video_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            video = workspace / "Workflows" / "clip.mp4"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2")
+            for input_value in (
+                {"kind": "video", "path": str(video)},
+                {"kind": "video", "path": str(video), "snapshot": {}},
+                {"kind": "video", "path": str(video), "snapshot": {"size": True}},
+            ):
+                with self.subTest(input_value=input_value), patch.object(runner, "WORKSPACE_DIR", workspace), self.assertRaisesRegex(ValueError, "snapshot"):
+                    runner.decode_model_input({"input": input_value})
+
     def test_select_node_uses_model_dir_override(self) -> None:
         manifest = {
             "nodes": [

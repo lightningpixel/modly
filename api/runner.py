@@ -151,6 +151,42 @@ def _apply_manifest_metadata(gen, manifest: dict, node: dict) -> None:
     gen._params_schema = node.get("params_schema") or manifest.get("params_schema", [])
 
 
+def decode_model_input(msg: dict):
+    """Decode legacy image bytes or revalidate a typed artifact in the worker."""
+    if "input" not in msg:
+        return base64.b64decode(msg["image_b64"])
+    value = msg["input"]
+    if not isinstance(value, dict):
+        raise ValueError("Typed artifact input must contain exactly kind and path")
+    kind = value.get("kind")
+    expected_fields = {"kind", "path", "snapshot"} if kind == "video" else {"kind", "path"}
+    if set(value) != expected_fields:
+        if kind == "video":
+            raise ValueError("Video artifact input requires a well-formed snapshot")
+        raise ValueError("Typed artifact input must contain exactly kind and path")
+    from services.artifact_input import TypedArtifactInput, revalidate_artifact_input
+    snapshot = None
+    if kind == "video":
+        from services.video_input import video_snapshot_from_dict
+        snapshot = video_snapshot_from_dict(value["snapshot"])
+    typed = TypedArtifactInput(kind=kind, path=Path(value.get("path", "")), snapshot=snapshot)
+    return revalidate_artifact_input(WORKSPACE_DIR, typed)
+
+
+def validate_requested_model(msg: dict, manifest: dict, node: dict) -> None:
+    """Reject requests routed to a worker for a different manifest node."""
+    requested = msg.get("model_id")
+    if requested is None:  # Backward compatibility with already-running legacy hosts.
+        return
+    expected = manifest["id"]
+    if node.get("id"):
+        expected = f"{expected}/{node['id']}"
+    if requested != expected:
+        raise ValueError(
+            f"Generation request model '{requested}' does not match worker model '{expected}'"
+        )
+
+
 # ------------------------------------------------------------------ #
 # Main loop
 # ------------------------------------------------------------------ #
@@ -201,10 +237,18 @@ def main() -> None:
 
             # ---- generate --------------------------------------------
             elif action == "generate":
+                validate_requested_model(msg, manifest, node)
                 cancel_evt = threading.Event()
                 _cancel[rid] = cancel_evt
-                image_bytes  = base64.b64decode(msg["image_b64"])
+                model_input  = decode_model_input(msg)
                 params       = msg.get("params", {})
+                if hasattr(model_input, "kind"):
+                    if not isinstance(params, dict):
+                        raise ValueError("Model params must be an object")
+                    reserved = {"artifact_path", "input_kind", "input_path", "scene_path", "scene_manifest_path", "video_path"}
+                    params = {key: value for key, value in params.items() if key not in reserved}
+                    if model_input.kind == "scene":
+                        params["scene_manifest_path"] = str(model_input.path)
                 if msg.get("outputs_dir"):
                     gen.outputs_dir = Path(msg["outputs_dir"])
                     gen.outputs_dir.mkdir(parents=True, exist_ok=True)
@@ -217,7 +261,20 @@ def main() -> None:
                         send({"type": "log", "level": "warning",
                               "message": ("Model was not loaded (earlier setup failure?); "
                                           "reloaded before generating.")})
-                    output_path = gen.generate(image_bytes, params, progress_cb, cancel_evt)
+                    if hasattr(model_input, "kind"):
+                        output_path = gen.generate_artifact(
+                            model_input.kind, model_input.path, params, progress_cb, cancel_evt
+                        )
+                    else:
+                        output_path = gen.generate(model_input, params, progress_cb, cancel_evt)
+                    if node.get("output") == "scene":
+                        from services.scene_input import validate_scene_input
+                        resolved_output = Path(output_path).resolve(strict=True)
+                        try:
+                            relative_output = resolved_output.relative_to(WORKSPACE_DIR.resolve(strict=True))
+                        except (OSError, ValueError) as exc:
+                            raise ValueError("Generated scene output is outside the workspace") from exc
+                        output_path = validate_scene_input(WORKSPACE_DIR, relative_output.as_posix())
                     send({"type": "done", "id": rid, "output_path": str(output_path)})
                 except Exception as exc:
                     # Detect GenerationCancelled by name to avoid import issues

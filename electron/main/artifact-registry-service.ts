@@ -124,7 +124,7 @@ export function classifyAssetLibraryCandidate(candidate: AssetLibraryClassificat
   if (candidate.workspacePath.endsWith('.world.json')) {
     return { capability: 'generated-world', state: 'ready', previewKind: 'text', openable: false, nonOpenableReason: 'Generated worlds are list-only in this release.' }
   }
-  if (candidate.workspacePath.endsWith('.scene.json')) {
+  if (candidate.workspacePath.endsWith('.scene.json') || candidate.workspacePath.endsWith('/scene-manifest.json')) {
     return { capability: 'scene-manifest', state: 'ready', previewKind: 'text', openable: false, nonOpenableReason: 'Scene manifests are list-only in this release.' }
   }
   if (INTRINSIC_MOTION_EXTENSIONS.has(extension)) {
@@ -153,6 +153,7 @@ function objectField(value: unknown): Record<string, unknown> | undefined {
 function manifestCapabilityFor(workspacePath: string): 'generated-world' | 'scene-manifest' | undefined {
   if (workspacePath.endsWith('.world.json')) return 'generated-world'
   if (workspacePath.endsWith('.scene.json')) return 'scene-manifest'
+  if (workspacePath.endsWith('/scene-manifest.json')) return 'scene-manifest'
   return undefined
 }
 

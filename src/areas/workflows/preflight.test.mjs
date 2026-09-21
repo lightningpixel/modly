@@ -131,3 +131,58 @@ test('multi-input extension requires every declared input type', () => {
   assert.ok(!issues.some((i) => i.key === 'proc:missing:image'))
   assert.ok(issues.some((i) => i.key === 'proc:missing:text'))
 })
+
+test('scene input requires a validated Load Scene source and rejects image wiring', () => {
+  const { validateWorkflowPreflight } = loadModule()
+  const model = { id: 'model', type: 'extensionNode', position: { x: 0, y: 0 }, data: { extensionId: 'pack/process-node' } }
+  const scene = { id: 'scene', type: 'sceneNode', position: { x: 0, y: 0 }, data: { params: { manifestPath: 'Workflows/room/scene-manifest.json' } } }
+  for (const output of ['scene', 'mesh']) {
+    const extension = ext({ input: 'scene', output, type: 'model' })
+    assert.deepEqual(validateWorkflowPreflight(wf([scene, model], [{ id: 'scene-edge', source: 'scene', target: 'model' }]), [extension]), [])
+  }
+
+  const extension = ext({ input: 'scene', output: 'scene', type: 'model' })
+  const issues = validateWorkflowPreflight(wf([imageNode(), model], [{ id: 'image-edge', source: 'img', target: 'model' }]), [extension])
+  assert.ok(issues.some((issue) => issue.key === 'model:missing:scene'))
+  assert.ok(issues.some((issue) => issue.key === 'model:type:image-edge'))
+})
+
+test('Load Scene must be validated before a workflow can run', () => {
+  const { validateWorkflowPreflight } = loadModule()
+  const scene = { id: 'scene', type: 'sceneNode', position: { x: 0, y: 0 }, data: { params: { path: 'Workflows/room' } } }
+  const issues = validateWorkflowPreflight(wf([scene], []), [])
+  assert.equal(issues[0].key, 'scene:scene-invalid')
+})
+
+test('renderer fails closed for unsupported process and mixed scene node shapes', () => {
+  const { validateWorkflowPreflight } = loadModule()
+  const scene = { id: 'scene', type: 'sceneNode', position: { x: 0, y: 0 }, data: { params: { manifestPath: 'Workflows/room/scene-manifest.json' } } }
+  const target = { id: 'target', type: 'extensionNode', position: { x: 0, y: 0 }, data: { extensionId: 'pack/process-node' } }
+  for (const extension of [
+    ext({ input: 'scene', output: 'mesh', type: 'process' }),
+    ext({ input: 'scene', inputs: ['scene', 'text'], output: 'mesh', type: 'model' }),
+  ]) {
+    const issues = validateWorkflowPreflight(wf([scene, target], [{ id: 'e', source: 'scene', target: 'target' }]), [extension])
+    assert.ok(issues.some((issue) => issue.key === 'target:unsupported-scene-shape'))
+  }
+})
+
+test('video input accepts only a validated Load Video source and fails closed on unsupported shapes', () => {
+  const { validateWorkflowPreflight } = loadModule()
+  const video = { id: 'video', type: 'videoNode', position: { x: 0, y: 0 }, data: { params: { workspacePath: 'Workflows/Videos/clip.mp4' } } }
+  const target = { id: 'target', type: 'extensionNode', position: { x: 0, y: 0 }, data: { extensionId: 'pack/process-node' } }
+  const valid = ext({ input: 'video', output: 'mesh', type: 'model' })
+  assert.deepEqual(validateWorkflowPreflight(wf([video, target], [{ id: 'e', source: 'video', target: 'target' }]), [valid]), [])
+  for (const extension of [
+    ext({ input: 'video', output: 'mesh', type: 'process' }),
+    ext({ input: 'video', inputs: ['video'], output: 'mesh', type: 'model' }),
+    ext({ input: 'image', output: 'video', type: 'model' }),
+  ]) {
+    const issues = validateWorkflowPreflight(wf([video, target], [{ id: 'e', source: 'video', target: 'target' }]), [extension])
+    assert.ok(issues.some((issue) => issue.key === 'target:unsupported-video-shape'))
+  }
+  for (const params of [{ path: '/tmp/clip.mp4' }, { workspacePath: '../clip.mp4' }, { workspacePath: 'Workflows/clip.exe' }]) {
+    const invalid = { ...video, data: { params } }
+    assert.ok(validateWorkflowPreflight(wf([invalid], []), []).some((issue) => issue.key === 'video:video-invalid'))
+  }
+})

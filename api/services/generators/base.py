@@ -143,7 +143,6 @@ class BaseGenerator(ABC):
     # Inference
     # ------------------------------------------------------------------ #
 
-    @abstractmethod
     def generate(
         self,
         image_bytes: bytes,
@@ -157,7 +156,29 @@ class BaseGenerator(ABC):
         progress_cb(percent: int, step_label: str)
         cancel_event: set this to interrupt generation between steps.
         """
-        ...
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement legacy image generation"
+        )
+
+    def generate_artifact(
+        self,
+        input_kind: str,
+        artifact_path: Path,
+        params: dict,
+        progress_cb: Optional[Callable[[int, str], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Path:
+        """Generate from a validated typed artifact.
+
+        New extensions should override this method. The default delegates to
+        ``generate`` with the canonical path so scene-capable extensions built
+        against the pre-release contract remain compatible.
+        """
+        if input_kind != "scene":
+            raise NotImplementedError(
+                f"{type(self).__name__} does not implement typed artifact input '{input_kind}'"
+            )
+        return self.generate(artifact_path, params, progress_cb, cancel_event)  # type: ignore[arg-type]
 
     def _check_cancelled(self, cancel_event: Optional[threading.Event]) -> None:
         """Raises GenerationCancelled if cancel_event is set."""

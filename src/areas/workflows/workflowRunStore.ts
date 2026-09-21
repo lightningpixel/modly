@@ -6,6 +6,7 @@ import { showCompletionNotification } from '@shared/utils/notification'
 import type { WorkflowExtension } from './mockExtensions'
 import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
 import { isBranchStarter, isSceneOutput, resolveDataSource, reachesSceneOutput, nearestUpstreamWaits } from './nodeBehaviors'
+import { normalizeVideoSource } from './workflowVideoSource'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -305,6 +306,20 @@ async function executeExtensionNode(
           selectedImagePath, selectedImageData } = ctx
 
   const ext = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
+  if (ext) {
+    const usesSceneInput = ext.input === 'scene' || ext.inputs?.includes('scene') === true
+    const usesVideoInput = ext.input === 'video' || ext.inputs?.includes('video') === true
+    if ((ext.type === 'process' && (usesSceneInput || ext.output === 'scene'))
+        || (ext.type === 'model' && usesSceneInput
+          && (ext.inputs !== undefined || ext.input !== 'scene'))) {
+      throw new Error(`${ext.name} uses an unsupported scene input or output declaration`)
+    }
+    if (ext.output === 'video' || (ext.type === 'process' && usesVideoInput)
+        || (ext.type === 'model' && usesVideoInput
+          && (ext.inputs !== undefined || ext.input !== 'video'))) {
+      throw new Error(`${ext.name} uses an unsupported video input or output declaration`)
+    }
+  }
   // Freshest params at the moment the node starts (so loop iterations / Retry pick
   // up edits made while paused, not the values captured at run start).
   const liveParams = _liveParams.current.get(node.id) ?? node.data.params ?? {}
@@ -317,6 +332,8 @@ async function executeExtensionNode(
   let nodeInputPath:     string | undefined
   let nodeInputText:     string | undefined
   let nodeInputMeshPath: string | undefined
+  let nodeInputScenePath: string | undefined
+  let nodeInputVideoPath: string | undefined
   // Per-slot texts for multi-text-input nodes (e.g. positive/negative prompts).
   // Indexed by target handle: input-0 → texts[0], input-1 → texts[1].
   const nodeInputTexts: (string | undefined)[] = []
@@ -349,6 +366,10 @@ async function executeExtensionNode(
       if (!fp) continue
       if (inputTypes[i] === 'mesh') {
         nodeInputMeshPath = fp
+      } else if (inputTypes[i] === 'scene') {
+        nodeInputScenePath = fp
+      } else if (inputTypes[i] === 'video') {
+        nodeInputVideoPath = fp
       } else if (inputTypes[i] === 'image') {
         if (!nodeInputPath) nodeInputPath = fp
         else extraImagePaths.push(fp)
@@ -359,21 +380,29 @@ async function executeExtensionNode(
       const src = resolveSource(edge.source)
       if (src?.filePath !== undefined) nodeInputPath = src.filePath
       if (src?.text !== undefined && src.text.trim().length > 0) nodeInputText = src.text
+      if (src?.outputType === 'scene') nodeInputScenePath = src.filePath
+      if (src?.outputType === 'video') nodeInputVideoPath = src.filePath
     }
   }
 
   const isModelNode = ext?.type === 'model'
 
   if (isModelNode) {
+    const isSceneInput = ext?.inputs ? ext.inputs.includes('scene') : ext?.input === 'scene'
+    const isVideoInput = ext?.inputs ? ext.inputs.includes('video') : ext?.input === 'video'
     const isTextInput = ext?.inputs ? ext.inputs.every((i) => i === 'text') : ext?.input === 'text'
-    const activeImagePath = isTextInput ? undefined : (nodeInputPath ?? selectedImagePath)
-    if (!isTextInput && !selectedImageData && (!activeImagePath || activeImagePath.trim().length === 0)) {
+    if (isSceneInput && !nodeInputScenePath) throw new Error(`${ext?.name ?? 'Model'} needs an incoming scene connection`)
+    if (isVideoInput && !nodeInputVideoPath) throw new Error(`${ext?.name ?? 'Model'} needs an incoming video connection`)
+    const activeImagePath = (isTextInput || isSceneInput || isVideoInput) ? undefined : (nodeInputPath ?? selectedImagePath)
+    if (!isTextInput && !isSceneInput && !isVideoInput && !selectedImageData && (!activeImagePath || activeImagePath.trim().length === 0)) {
       throw new Error('No input image selected for model node')
     }
 
-    let blob: Blob
-    let fname: string
-    if (isTextInput || (selectedImageData && nodeInputPath === undefined)) {
+    let blob: Blob | undefined
+    let fname: string | undefined
+    if (isSceneInput || isVideoInput) {
+      // Typed artifacts cross the dedicated JSON boundary; never manufacture image bytes.
+    } else if (isTextInput || (selectedImageData && nodeInputPath === undefined)) {
       const base64 = selectedImageData && nodeInputPath === undefined
         ? selectedImageData
         : 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==' // 1x1 transparent PNG
@@ -406,21 +435,42 @@ async function executeExtensionNode(
     )
     const effectiveParams = { ...schemaDefaults, ...liveParams }
 
-    const fd = new FormData()
-    fd.append('image', blob, fname)
-    fd.append('model_id', node.data.extensionId ?? '')
-    fd.append('collection', 'Workflows')
-    fd.append('remesh', 'none')
-    fd.append('enable_texture', 'false')
-    fd.append('texture_resolution', '1024')
-    fd.append('params', JSON.stringify({ ...effectiveParams, ...extraParams }))
-
     setRunState((s) => ({ ...s, blockProgress: 5, blockStep: 'Submitting to model…' }))
-
-    const { data } = await client.post<{ job_id: string }>(
-      '/generate/from-image', fd,
-      { headers: { 'Content-Type': 'multipart/form-data' } },
-    )
+    let submission: { data: { job_id: string } }
+    if (isSceneInput) {
+      const normalized = nodeInputScenePath!.replace(/\\/g, '/')
+      const workspaceRoot = workspaceDir.replace(/\\/g, '/').replace(/\/+$/, '')
+      const inputPath = normalized.startsWith(`${workspaceRoot}/`)
+        ? normalized.slice(workspaceRoot.length + 1)
+        : normalized.replace(/^\/workspace\//, '')
+      submission = await client.post('/generate/from-artifact', {
+        input_kind: 'scene', input_path: inputPath,
+        model_id: node.data.extensionId ?? '', collection: 'Workflows',
+        params: { ...effectiveParams, ...extraParams },
+      })
+    } else if (isVideoInput) {
+      const normalized = nodeInputVideoPath!.replace(/\\/g, '/')
+      const workspaceRoot = workspaceDir.replace(/\\/g, '/').replace(/\/+$/, '')
+      const inputPath = normalized.startsWith(`${workspaceRoot}/`)
+        ? normalized.slice(workspaceRoot.length + 1)
+        : normalized.replace(/^\/workspace\//, '')
+      submission = await client.post('/generate/from-artifact', {
+        input_kind: 'video', input_path: inputPath,
+        model_id: node.data.extensionId ?? '', collection: 'Workflows',
+        params: { ...effectiveParams, ...extraParams },
+      })
+    } else {
+      const fd = new FormData()
+      fd.append('image', blob!, fname!)
+      fd.append('model_id', node.data.extensionId ?? '')
+      fd.append('collection', 'Workflows')
+      fd.append('remesh', 'none')
+      fd.append('enable_texture', 'false')
+      fd.append('texture_resolution', '1024')
+      fd.append('params', JSON.stringify({ ...effectiveParams, ...extraParams }))
+      submission = await client.post('/generate/from-image', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+    }
+    const { data } = submission
     _activeJobId.current = data.job_id
 
     while (true) {
@@ -599,7 +649,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
     if (!outputUrl) {
       for (const [, o] of ctx.nodeOutputs) {
         if (o.filePath) {
-          if (o.outputType === 'audio') {
+          if (o.outputType === 'audio' || o.outputType === 'scene') {
             outputPath = o.filePath
             continue
           }
@@ -806,6 +856,21 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
               const fp = node.data.params?.filePath as string | undefined
               if (fp) nodeOutputs.set(node.id, { filePath: fp, outputType: 'mesh' })
             }
+          }
+          if (node.type === 'sceneNode') {
+            const manifestPath = node.data.params?.manifestPath as string | undefined
+            if (manifestPath) nodeOutputs.set(node.id, {
+              filePath: `${workspaceDir}/${manifestPath.replace(/^\/+/, '')}`,
+              outputType: 'scene',
+            })
+          }
+          if (node.type === 'videoNode') {
+            const workspacePath = node.data.params?.workspacePath as string | undefined
+            const video = normalizeVideoSource(workspacePath, workspaceDir)
+            if (video) nodeOutputs.set(node.id, {
+              filePath: video.absolutePath,
+              outputType: 'video',
+            })
           }
         }
 

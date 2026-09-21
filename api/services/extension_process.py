@@ -18,7 +18,10 @@ import sys
 import threading
 import uuid
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from services.video_input import VideoSnapshot
 
 _RUNNER_PATH = Path(__file__).parent.parent / "runner.py"
 _MISSING_MODULE_RE = re.compile(r"No module named ['\"]([^'\"]+)['\"]")
@@ -291,16 +294,18 @@ class ExtensionProcess:
         progress_cb: Optional[Callable[[int, str], None]] = None,
         cancel_event: Optional[threading.Event] = None,
     ) -> Path:
-        from services.generators.base import GenerationCancelled
+        return self._generate_request(
+            {"image_b64": base64.b64encode(image_bytes).decode()},
+            params, progress_cb, cancel_event,
+        )
 
-        req_id = str(uuid.uuid4())
-        self._send({
-            "action":      "generate",
-            "id":          req_id,
-            "image_b64":   base64.b64encode(image_bytes).decode(),
-            "params":      params,
-            "outputs_dir": str(self.outputs_dir) if self.outputs_dir else None,
-        })
+    def _receive_generation(
+        self,
+        req_id: str,
+        progress_cb: Optional[Callable[[int, str], None]],
+        cancel_event: Optional[threading.Event],
+    ) -> Path:
+        from services.generators.base import GenerationCancelled
 
         # Grace period after sending a cooperative cancel before hard-killing
         # the subprocess. Long enough to let generators that check cancel_event
@@ -376,6 +381,49 @@ class ExtensionProcess:
 
             elif t == "log":
                 print(f"[{self.MODEL_ID}] {msg.get('message', '')}", file=sys.stderr)
+
+    def generate_artifact(
+        self,
+        input_kind: str,
+        artifact_path: Path,
+        params: dict,
+        progress_cb: Optional[Callable[[int, str], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
+        artifact_snapshot: Optional["VideoSnapshot"] = None,
+    ) -> Path:
+        """Send a typed artifact envelope to the isolated runner."""
+        from services.artifact_input import TypedArtifactInput, revalidate_artifact_input
+        from services.generator_registry import WORKSPACE_DIR
+        from services.video_input import video_snapshot_to_dict
+
+        snapshot_payload = (video_snapshot_to_dict(artifact_snapshot)
+                            if input_kind == "video" else None)
+        validated = revalidate_artifact_input(
+            WORKSPACE_DIR,
+            TypedArtifactInput(kind=input_kind, path=artifact_path, snapshot=artifact_snapshot),
+        )
+        input_payload = {"kind": validated.kind, "path": str(validated.path)}
+        if validated.kind == "video":
+            input_payload["snapshot"] = snapshot_payload
+        return self._generate_request(
+            {"input": input_payload},
+            params, progress_cb, cancel_event,
+        )
+
+    def _generate_request(
+        self,
+        input_payload: dict,
+        params: dict,
+        progress_cb: Optional[Callable[[int, str], None]],
+        cancel_event: Optional[threading.Event],
+    ) -> Path:
+        req_id = str(uuid.uuid4())
+        self._send({
+            "action": "generate", "id": req_id, "model_id": self.MODEL_ID,
+            **input_payload, "params": params,
+            "outputs_dir": str(self.outputs_dir) if self.outputs_dir else None,
+        })
+        return self._receive_generation(req_id, progress_cb, cancel_event)
 
     def params_schema(self) -> list:
         return self._params_schema

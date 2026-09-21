@@ -1,8 +1,9 @@
 import type { Workflow, WFNode } from '@shared/types/electron.d'
 import { getWorkflowExtension, type WorkflowExtension } from './mockExtensions'
 import { isPassthrough, isBranchConsumer, resolveDataSource, nearestUpstreamWaits } from './nodeBehaviors'
+import { normalizeVideoSource } from './workflowVideoSource'
 
-type DataType = 'image' | 'text' | 'mesh' | 'audio'
+type DataType = 'image' | 'text' | 'mesh' | 'audio' | 'scene' | 'video'
 
 export interface WorkflowPreflightIssue {
   key: string
@@ -14,6 +15,8 @@ function nodeLabel(node: WFNode, allExtensions: WorkflowExtension[]): string {
   if (node.type === 'imageNode') return 'Image'
   if (node.type === 'textNode') return 'Text'
   if (node.type === 'meshNode') return 'Load 3D Mesh'
+  if (node.type === 'sceneNode') return 'Load Scene'
+  if (node.type === 'videoNode') return 'Load Video'
   if (node.type === 'outputNode') return 'Add to Scene'
   if (node.type === 'previewNode') return 'Preview Views'
   if (node.type === 'imagePreviewNode') return 'Preview Image'
@@ -28,6 +31,8 @@ function nodeLabel(node: WFNode, allExtensions: WorkflowExtension[]): string {
 }
 
 function formatType(type: DataType): string {
+  if (type === 'scene') return 'scene'
+  if (type === 'video') return 'video'
   if (type === 'mesh') return 'mesh'
   if (type === 'image') return 'image'
   if (type === 'audio') return 'audio'
@@ -44,6 +49,8 @@ function getNodeOutputType(node: WFNode, allExtensions: WorkflowExtension[]): Da
   if (node.type === 'imageNode') return 'image'
   if (node.type === 'textNode') return 'text'
   if (node.type === 'meshNode' || node.type === 'outputNode') return 'mesh'
+  if (node.type === 'sceneNode') return 'scene'
+  if (node.type === 'videoNode') return 'video'
   if (node.type === 'previewNode') return 'image'
   if (node.type === 'imagePreviewNode') return 'image'
   if (node.type === 'forEachNode') {
@@ -96,6 +103,21 @@ export function validateWorkflowPreflight(
       })
     }
 
+    if (node.type === 'sceneNode' && !((node.data.params?.manifestPath as string | undefined)?.trim())) {
+      pushIssue(issues, {
+        key: `${node.id}:scene-invalid`, nodeId: node.id,
+        message: 'Load Scene needs a validated scene directory.',
+      })
+    }
+    if (node.type === 'videoNode' && !normalizeVideoSource(
+      node.data.params?.workspacePath as string | undefined, '/workspace',
+    )) {
+      pushIssue(issues, {
+        key: `${node.id}:video-invalid`, nodeId: node.id,
+        message: 'Load Video needs an imported workspace video file.',
+      })
+    }
+
     // A node fed by two different Wait branches can't be scheduled into a single
     // branch — it would run before either branch produces its mesh.
     if (
@@ -117,6 +139,33 @@ export function validateWorkflowPreflight(
         key: `${node.id}:missing-extension`,
         nodeId: node.id,
         message: `${nodeLabel(node, allExtensions)} is unavailable. Reload extensions or remove the node.`,
+      })
+      continue
+    }
+
+    const usesSceneInput = ext.input === 'scene' || ext.inputs?.includes('scene') === true
+    const unsupportedSceneShape =
+      (ext.type === 'process' && (usesSceneInput || ext.output === 'scene'))
+      || (ext.type === 'model' && usesSceneInput
+        && (ext.inputs !== undefined || ext.input !== 'scene'))
+    if (unsupportedSceneShape) {
+      pushIssue(issues, {
+        key: `${node.id}:unsupported-scene-shape`,
+        nodeId: node.id,
+        message: `${ext.name} uses an unsupported scene input or output declaration.`,
+      })
+      continue
+    }
+    const usesVideoInput = ext.input === 'video' || ext.inputs?.includes('video') === true
+    const unsupportedVideoShape = ext.output === 'video'
+      || (ext.type === 'process' && usesVideoInput)
+      || (ext.type === 'model' && usesVideoInput
+        && (ext.inputs !== undefined || ext.input !== 'video'))
+    if (unsupportedVideoShape) {
+      pushIssue(issues, {
+        key: `${node.id}:unsupported-video-shape`,
+        nodeId: node.id,
+        message: `${ext.name} uses an unsupported video input or output declaration.`,
       })
       continue
     }

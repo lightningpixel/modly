@@ -49,6 +49,9 @@ class _FakeRegistry:
     def get_generator(self, model_id: str) -> _FakeGenerator:
         return self._gen
 
+    def get_manifest(self, model_id: str) -> dict:
+        return {"output": "mesh"}
+
     def switch_model(self, model_id: str) -> None:
         pass
 

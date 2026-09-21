@@ -452,6 +452,33 @@ def _discover_extensions(
                 node for node in raw_nodes
                 if isinstance(node, dict) and node.get("id")
             ]
+            allowed_inputs = {"image", "text", "mesh", "audio", "scene", "video"}
+            allowed_outputs = {"image", "text", "mesh", "audio", "scene"}
+            for node in nodes:
+                declared_inputs = node.get("inputs") or [node.get("input", "image")]
+                if (not isinstance(declared_inputs, list)
+                        or any(value not in allowed_inputs for value in declared_inputs)):
+                    raise ValueError(
+                        f'model node "{node.get("id", "unknown")}" has an unsupported input type'
+                    )
+                if node.get("output", "mesh") not in allowed_outputs:
+                    raise ValueError(
+                        f'model node "{node.get("id", "unknown")}" has an unsupported output type'
+                    )
+                if "scene" in declared_inputs and (
+                    "inputs" in node or node.get("input", "image") != "scene"
+                ):
+                    raise ValueError(
+                        f'model node "{node.get("id", "unknown")}" must declare scene '
+                        'as its single input field'
+                    )
+                if "video" in declared_inputs and (
+                    "inputs" in node or node.get("input", "image") != "video"
+                ):
+                    raise ValueError(
+                        f'model node "{node.get("id", "unknown")}" must declare video '
+                        'as its single input field'
+                    )
 
             # Markers left while setup or runtime registration is unfinished:
             # the folder is not ready to be loaded. The readable manifest lets
@@ -540,6 +567,7 @@ def _discover_extensions(
                         "hf_include_prefixes": node.get("hf_include_prefixes", []),
                         "params_schema":    node.get("params_schema", manifest.get("params_schema", [])),
                         "input":            node.get("input", "image"),
+                        "inputs":           node.get("inputs"),
                         "output":           node.get("output", "mesh"),
                     }
                     if model_sources is not None:
@@ -612,6 +640,9 @@ class GeneratorRegistry:
                         )
                     # Subprocess mode: wrap in ExtensionProcess
                     gen = ExtensionProcess(ext_dir, manifest)
+                    # Pin the subprocess envelope to the exact registry key;
+                    # multi-node workers must never fall back to an extension ID.
+                    gen.MODEL_ID    = model_id
                     gen.model_dir   = MODELS_DIR / model_id
                     gen.outputs_dir = WORKSPACE_DIR
                 else:
@@ -704,10 +735,13 @@ class GeneratorRegistry:
 
     def get_active(self) -> BaseGenerator:
         """Returns the active generator. Downloads and loads if necessary."""
-        self._assert_not_quarantined(self._active_id)
-        gen = self._generators[self._active_id]
-        downloaded = self._is_downloaded(self._active_id, gen)
-        if "model_sources" in self._manifests[self._active_id] and not downloaded:
+        return self.get_ready_generator(self._active_id)
+
+    def get_ready_generator(self, model_id: str) -> BaseGenerator:
+        """Load and return exactly ``model_id`` without consulting active state."""
+        gen = self.get_generator(model_id)
+        downloaded = self._is_downloaded(model_id, gen)
+        if "model_sources" in self._manifests[model_id] and not downloaded:
             raise RuntimeError(
                 "Model sources are incomplete. Download this node's weights "
                 "from the Modly Models page before generation."
@@ -723,6 +757,16 @@ class GeneratorRegistry:
                     gen._auto_download()
             gen.load()
         return gen
+
+    def model_status(self, model_id: str) -> dict:
+        gen = self.get_generator(model_id)
+        manifest = self._manifests[model_id]
+        return {
+            "id": model_id,
+            "name": manifest.get("name", gen.DISPLAY_NAME),
+            "downloaded": self._is_downloaded(model_id, gen),
+            "loaded": gen.is_loaded(),
+        }
 
     def get_generator(self, model_id: str) -> BaseGenerator:
         self._assert_not_quarantined(model_id)
@@ -765,14 +809,7 @@ class GeneratorRegistry:
         return gen.is_downloaded()
 
     def active_status(self) -> dict:
-        gen      = self._generators[self._active_id]
-        manifest = self._manifests[self._active_id]
-        return {
-            "id":         self._active_id,
-            "name":       manifest.get("name", gen.DISPLAY_NAME),
-            "downloaded": self._is_downloaded(self._active_id, gen),
-            "loaded":     gen.is_loaded(),
-        }
+        return self.model_status(self._active_id)
 
     def all_status(self) -> list:
         result = []

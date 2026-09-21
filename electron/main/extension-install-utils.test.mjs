@@ -85,6 +85,71 @@ test('validateInstallManifest accepts multi-source nodes and preserves legacy sh
   }, { hasEntryFile: () => false, hasGeneratorFile: () => true }, 'repository'))
 })
 
+test('validateInstallManifest accepts scene IO and rejects undeclared future artifact kinds', () => {
+  const mod = loadModule()
+  const files = { hasEntryFile: () => false, hasGeneratorFile: () => true }
+  assert.doesNotThrow(() => mod.validateInstallManifest({
+    id: 'scene-model', generator_class: 'Generator',
+    nodes: [{ id: 'normalize', input: 'scene', output: 'scene' }],
+  }, files, 'repository'))
+  for (const input of ['capture']) {
+    assert.throws(() => mod.validateInstallManifest({
+      id: 'future-model', generator_class: 'Generator',
+      nodes: [{ id: 'future', input, output: 'scene' }],
+    }, files, 'repository'), /supported artifact type/)
+  }
+})
+
+test('scene is model-only, single-input, while image-multi to scene stays valid', () => {
+  const mod = loadModule()
+  const modelFiles = { hasEntryFile: () => false, hasGeneratorFile: () => true }
+  const processFiles = { hasEntryFile: () => true, hasGeneratorFile: () => false }
+  for (const node of [
+    { id: 'mixed', input: 'scene', inputs: ['scene', 'text'], output: 'mesh' },
+    { id: 'duplicate', input: 'scene', inputs: ['scene', 'scene'], output: 'mesh' },
+    { id: 'hidden', input: 'image', inputs: ['scene'], output: 'mesh' },
+  ]) {
+    assert.throws(() => mod.validateInstallManifest({ id: 'bad', generator_class: 'Generator', nodes: [node] }, modelFiles, 'repository'), /scene.*single|single.*scene/i)
+  }
+  for (const node of [
+    { id: 'input', input: 'scene', output: 'mesh' },
+    { id: 'output', input: 'image', output: 'scene' },
+  ]) {
+    assert.throws(() => mod.validateInstallManifest({ id: 'proc', type: 'process', entry: 'processor.js', nodes: [node] }, processFiles, 'repository'), /scene.*model|model.*scene/i)
+  }
+  assert.doesNotThrow(() => mod.validateInstallManifest({
+    id: 'images-to-scene', generator_class: 'Generator',
+    nodes: [{ id: 'prepare', input: 'image', inputs: ['image', 'image'], output: 'scene' }],
+  }, modelFiles, 'repository'))
+  for (const output of ['scene', 'mesh']) {
+    assert.doesNotThrow(() => mod.validateInstallManifest({
+      id: `scene-to-${output}`, generator_class: 'Generator',
+      nodes: [{ id: 'generate', input: 'scene', output }],
+    }, modelFiles, 'repository'))
+  }
+})
+
+test('video is model-input-only and must use the singular input field', () => {
+  const mod = loadModule()
+  const modelFiles = { hasEntryFile: () => false, hasGeneratorFile: () => true }
+  const processFiles = { hasEntryFile: () => true, hasGeneratorFile: () => false }
+  assert.doesNotThrow(() => mod.validateInstallManifest({
+    id: 'video-model', generator_class: 'Generator',
+    nodes: [{ id: 'generate', input: 'video', output: 'mesh' }],
+  }, modelFiles, 'repository'))
+  for (const node of [
+    { id: 'array', input: 'video', inputs: ['video'], output: 'mesh' },
+    { id: 'mixed', input: 'video', inputs: ['video', 'text'], output: 'mesh' },
+    { id: 'hidden', input: 'image', inputs: ['video'], output: 'mesh' },
+    { id: 'output', input: 'image', output: 'video' },
+  ]) {
+    assert.throws(() => mod.validateInstallManifest({ id: 'bad', generator_class: 'Generator', nodes: [node] }, modelFiles, 'repository'), /video/i)
+  }
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'process', type: 'process', entry: 'processor.js', nodes: [{ id: 'run', input: 'video', output: 'mesh' }],
+  }, processFiles, 'repository'), /video.*model|model.*video/i)
+})
+
 test('validateInstallManifest rejects malformed or process model_sources', () => {
   const mod = loadModule()
   const source = {

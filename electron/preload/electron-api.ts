@@ -75,6 +75,8 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
     fs: {
       selectImage:       (): Promise<string | null> =>
         ipcRenderer.invoke('fs:selectImage') as Promise<string | null>,
+      selectVideo:       (): Promise<{ workspacePath: string; absolutePath: string } | null> =>
+        ipcRenderer.invoke('fs:selectVideo') as Promise<{ workspacePath: string; absolutePath: string } | null>,
       selectMeshFile:    (): Promise<string | null> =>
         ipcRenderer.invoke('fs:selectMeshFile') as Promise<string | null>,
       saveModel:         (defaultName: string): Promise<string | null> =>

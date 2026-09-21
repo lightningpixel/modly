@@ -8,6 +8,8 @@ const HANDLE_COLOR: Record<string, string> = {
   image: '#38bdf8',
   mesh:  '#a78bfa',
   text:  '#fbbf24',
+  scene: '#34d399',
+  video: '#f472b6',
 }
 
 export default function WorkflowEdge({
@@ -33,6 +35,10 @@ export default function WorkflowEdge({
     ? HANDLE_COLOR.text
     : sourceNode?.type === 'meshNode'
     ? HANDLE_COLOR.mesh
+    : sourceNode?.type === 'sceneNode'
+    ? HANDLE_COLOR.scene
+    : sourceNode?.type === 'videoNode'
+    ? HANDLE_COLOR.video
     : (HANDLE_COLOR[allExtensions.find((e) => e.id === sourceNode?.data?.extensionId)?.output ?? ''] ?? '#52525b')
 
   // For multi-input nodes pick the color of the specific connected handle

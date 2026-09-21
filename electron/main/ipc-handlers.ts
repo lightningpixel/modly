@@ -9,6 +9,7 @@ import * as tar from 'tar'
 import * as os from 'os'
 import { promisify } from 'util'
 import { PythonBridge, API_BASE_URL } from './python-bridge'
+import { importVideoToWorkspace } from './video-import'
 import {
   isModelDownloaded,
   listDownloadedModels,
@@ -49,6 +50,8 @@ import {
   validateExtensionReloadPayload,
   validateExistingExtensionReplacement,
   validateInstallManifest,
+  assertSupportedSceneNodeShape,
+  assertSupportedVideoNodeShape,
 } from './extension-install-utils'
 import {
   beginExtensionRegistrationTransaction,
@@ -281,6 +284,19 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     })
 
     return result.canceled ? null : result.filePaths[0]
+  })
+
+  ipcMain.handle('fs:selectVideo', async () => {
+    const win = getWindow()
+    if (!win) return null
+    const result = await dialog.showOpenDialog(win, {
+      title: 'Import a video',
+      filters: [{ name: 'Videos', extensions: ['mp4', 'm4v', 'mov', 'webm', 'mkv', 'avi'] }],
+      properties: ['openFile'],
+    })
+    if (result.canceled) return null
+    const workspaceDir = getSettings(app.getPath('userData')).workspaceDir
+    return importVideoToWorkspace(result.filePaths[0], workspaceDir)
   })
 
   ipcMain.handle('fs:selectMeshFile', async () => {
@@ -844,10 +860,10 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     nodes?: {
       id:                string
       name?:             string
-      input?:            'mesh' | 'image' | 'text' | 'audio'
-      inputs?:           ('mesh' | 'image' | 'text' | 'audio')[]
+      input?:            'mesh' | 'image' | 'text' | 'audio' | 'scene' | 'video'
+      inputs?:           ('mesh' | 'image' | 'text' | 'audio' | 'scene' | 'video')[]
       input_labels?:     string[]
-      output?:           'mesh' | 'image' | 'text' | 'audio'
+      output?:           'mesh' | 'image' | 'text' | 'audio' | 'scene'
       params_schema?:    unknown[]
       param_defaults?:   Record<string, unknown>
       hf_repo?:          string
@@ -873,7 +889,17 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     if (parsed.model_sources !== undefined) {
       throw new Error('manifest.json: model_sources must be declared on a model node')
     }
+    const allowedInputs = new Set(['image', 'text', 'mesh', 'audio', 'scene', 'video'])
+    const allowedOutputs = new Set(['image', 'text', 'mesh', 'audio', 'scene'])
     const nodes = (parsed.nodes ?? []).map(n => {
+      const declaredInputs = n.inputs ?? [n.input ?? 'image']
+      for (const input of declaredInputs) {
+        if (!allowedInputs.has(input)) throw new Error(`manifest.json: unsupported node input type "${input}"`)
+      }
+      const output = n.output ?? 'mesh'
+      assertSupportedSceneNodeShape(parsed.type === 'process' ? 'process' : 'model', n, declaredInputs, output)
+      assertSupportedVideoNodeShape(parsed.type === 'process' ? 'process' : 'model', n, declaredInputs, output)
+      if (!allowedOutputs.has(output)) throw new Error(`manifest.json: unsupported node output type "${output}"`)
       if (parsed.type === 'process' && n.model_sources !== undefined) {
         throw new Error('manifest.json: model_sources is supported only for model nodes')
       }

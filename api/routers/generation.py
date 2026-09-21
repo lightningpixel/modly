@@ -4,7 +4,8 @@ import threading
 import time
 import traceback
 import uuid
-from typing import Dict
+from pathlib import Path
+from typing import Dict, Optional, Union
 from fastapi import APIRouter, File, Form, UploadFile, HTTPException, BackgroundTasks
 from services.generators.base import smooth_progress, GenerationCancelled
 
@@ -14,7 +15,8 @@ import re as _re
 # binding captured at import would keep writing output to the old directory.
 import services.generator_registry as registry
 from services.generator_registry import generator_registry
-from schemas.generation import JobStatus
+from schemas.generation import GenerateFromArtifactRequest, JobStatus
+from services.artifact_input import TypedArtifactInput, validate_artifact_input
 
 router = APIRouter(tags=["generation"])
 
@@ -105,6 +107,7 @@ async def generate_from_image(
     # Verify the requested model exists in the registry
     try:
         generator_registry.get_generator(model_id)
+        output_kind = generator_registry.get_manifest(model_id).get("output", "mesh")
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -131,8 +134,47 @@ async def generate_from_image(
     _jobs[job_id] = job
     _cancel_events[job_id] = threading.Event()
 
-    background_tasks.add_task(_run_generation, job_id, image_bytes, full_params, collection)
+    background_tasks.add_task(
+        _run_generation, job_id, image_bytes, full_params, collection, output_kind, model_id
+    )
 
+    return {"job_id": job_id}
+
+
+_RESERVED_ARTIFACT_PARAMS = {
+    "artifact_path", "input_kind", "input_path", "scene_path", "scene_manifest_path", "video_path",
+}
+
+
+@router.post("/from-artifact")
+async def generate_from_artifact(
+    request: GenerateFromArtifactRequest,
+    background_tasks: BackgroundTasks,
+):
+    """Queue a validated typed artifact without serializing it as image bytes."""
+    try:
+        manifest = generator_registry.get_manifest(request.model_id)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    declared = manifest.get("inputs") or [manifest.get("input", "image")]
+    if request.input_kind not in declared:
+        raise HTTPException(400, f"Model {request.model_id} does not accept {request.input_kind} input")
+    try:
+        artifact = validate_artifact_input(registry.WORKSPACE_DIR, request.input_kind, request.input_path)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    params = {k: v for k, v in request.params.items() if k not in _RESERVED_ARTIFACT_PARAMS}
+    if artifact.kind == "scene":
+        params["scene_manifest_path"] = str(artifact.path)
+    collection = sanitize_collection(request.collection)
+    job_id = str(uuid.uuid4())
+    _purge_old_jobs()
+    _jobs[job_id] = JobStatus(job_id=job_id, status="pending", progress=0)
+    _cancel_events[job_id] = threading.Event()
+    background_tasks.add_task(
+        _run_generation, job_id, artifact, params, collection, manifest.get("output", "mesh"), request.model_id
+    )
     return {"job_id": job_id}
 
 
@@ -170,7 +212,14 @@ async def cancel_job(job_id: str):
     return {"cancelled": True}
 
 
-async def _run_generation(job_id: str, image_bytes: bytes, params: dict, collection: str = "Default") -> None:
+async def _run_generation(
+    job_id: str,
+    model_input: Union[bytes, TypedArtifactInput],
+    params: dict,
+    collection: str = "Default",
+    output_kind: str = "mesh",
+    model_id: Optional[str] = None,
+) -> None:
     job = _jobs[job_id]
     job.status = "running"
 
@@ -189,8 +238,14 @@ async def _run_generation(job_id: str, image_bytes: bytes, params: dict, collect
         # Check if the model needs to be loaded BEFORE calling get_active(),
         # because get_active() loads the model in a blocking manner.
         # active_status() is an instantaneous operation (simple dict lookup).
-        if not generator_registry.active_status()["loaded"]:
-            active = generator_registry.active_status()
+        get_generator = (lambda: generator_registry.get_ready_generator(model_id)) \
+            if model_id is not None else generator_registry.get_active
+        status_reader = getattr(generator_registry, "model_status", None)
+        status = (status_reader(model_id) if model_id is not None and status_reader
+                  else generator_registry.active_status() if model_id is None
+                  else {"name": model_id, "downloaded": True, "loaded": False})
+        if not status["loaded"]:
+            active = status
             model_name = active['name']
             init_label = f"Downloading {model_name}…" if not active['downloaded'] else f"Loading {model_name}…"
             progress_cb(0, init_label)
@@ -202,11 +257,11 @@ async def _run_generation(job_id: str, image_bytes: bytes, params: dict, collect
             )
             load_thread.start()
             try:
-                gen = await loop.run_in_executor(None, generator_registry.get_active)
+                gen = await loop.run_in_executor(None, get_generator)
             finally:
                 stop_load_evt.set()
         else:
-            gen = await loop.run_in_executor(None, generator_registry.get_active)
+            gen = await loop.run_in_executor(None, get_generator)
 
         if job_id in _cancelled:
             return
@@ -217,17 +272,49 @@ async def _run_generation(job_id: str, image_bytes: bytes, params: dict, collect
         gen.outputs_dir = coll_dir
 
         cancel_event = _cancel_events.get(job_id)
-        import inspect
-        supports_cancel = "cancel_event" in inspect.signature(gen.generate).parameters
-        output_path = await loop.run_in_executor(
-            None,
-            lambda: gen.generate(image_bytes, params, progress_cb, cancel_event)
-                    if supports_cancel
-                    else gen.generate(image_bytes, params, progress_cb),
-        )
+        if isinstance(model_input, TypedArtifactInput):
+            # Revalidate just before crossing the inference boundary. The
+            # subprocess runner repeats this check inside the worker.
+            from services.artifact_input import revalidate_artifact_input
+            model_input = revalidate_artifact_input(registry.WORKSPACE_DIR, model_input)
+            import inspect
+            artifact_parameters = inspect.signature(gen.generate_artifact).parameters
+            supports_cancel = "cancel_event" in artifact_parameters
+            supports_snapshot = "artifact_snapshot" in artifact_parameters
+
+            def invoke_artifact():
+                kwargs = {}
+                if supports_cancel:
+                    kwargs["cancel_event"] = cancel_event
+                if supports_snapshot:
+                    kwargs["artifact_snapshot"] = model_input.snapshot
+                return gen.generate_artifact(
+                    model_input.kind, model_input.path, params, progress_cb, **kwargs
+                )
+            output_path = await loop.run_in_executor(
+                None,
+                invoke_artifact,
+            )
+        else:
+            import inspect
+            supports_cancel = "cancel_event" in inspect.signature(gen.generate).parameters
+            output_path = await loop.run_in_executor(
+                None,
+                lambda: gen.generate(model_input, params, progress_cb, cancel_event)
+                        if supports_cancel else gen.generate(model_input, params, progress_cb),
+            )
 
         if job_id in _cancelled:
             return
+
+        output_path = Path(output_path).resolve(strict=True)
+        if output_kind == "scene":
+            from services.scene_input import validate_scene_input
+            try:
+                output_relative = output_path.relative_to(registry.WORKSPACE_DIR.resolve())
+                output_path = validate_scene_input(registry.WORKSPACE_DIR, output_relative.as_posix())
+            except (OSError, ValueError) as exc:
+                raise ValueError("Generated scene output is not a valid workspace scene") from exc
 
         job.status   = "done"
         job.progress = 100
