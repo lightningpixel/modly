@@ -156,6 +156,10 @@ async def cancel_job(job_id: str):
     if job.status in ("pending", "running"):
         job.status = "cancelled"
         _completed_at[job_id] = time.monotonic()
+    else:
+        # The job already ended, so the active subprocess isn't running it: it
+        # holds the warm model or another job's generation. Leave it alone.
+        return {"cancelled": True}
     # Kill the active generator subprocess immediately so inference stops now.
     # _run_generation will catch the resulting exception, see job_id in _cancelled,
     # and return cleanly without setting an error status.
