@@ -7,9 +7,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from starlette.requests import Request
 
 import routers.model as model_router
+import services.generator_registry as registry
 
 
 SOURCES = [
@@ -69,12 +71,22 @@ class MultiSourceRouterTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory(prefix="modly-model-router-")
         self.models_dir = Path(self.tempdir.name) / "models"
         self.models_dir.mkdir()
-        self.old_models_dir = model_router.MODELS_DIR
-        model_router.MODELS_DIR = self.models_dir
+        self.old_models_dir = registry.MODELS_DIR
+        registry.MODELS_DIR = self.models_dir
+        # Keep the test hermetic against an import-time copy of the path: if the
+        # router still holds its own MODELS_DIR name, point that copy at the same
+        # temp tree so a stale read fails the assertions below instead of
+        # writing into the real models folder.
+        self.had_stale_models_dir = hasattr(model_router, "MODELS_DIR")
+        if self.had_stale_models_dir:
+            self.old_stale_models_dir = model_router.MODELS_DIR
+            model_router.MODELS_DIR = self.models_dir
         self.old_hf_module = sys.modules.get("huggingface_hub")
 
     def tearDown(self) -> None:
-        model_router.MODELS_DIR = self.old_models_dir
+        registry.MODELS_DIR = self.old_models_dir
+        if self.had_stale_models_dir:
+            model_router.MODELS_DIR = self.old_stale_models_dir
         model_router._download_controls.clear()
         if self.old_hf_module is None:
             sys.modules.pop("huggingface_hub", None)
@@ -190,6 +202,69 @@ class MultiSourceRouterTests(unittest.TestCase):
         events = asyncio.run(run())
         self.assertIn("excluded from its download plan", events[-1]["error"])
         self.assertFalse((self.models_dir / "pixal3d/generate/other.bin").exists())
+
+    def move_models_folder(self) -> Path:
+        # What POST /settings/paths does through GeneratorRegistry.update_paths():
+        # rebind the registry's MODELS_DIR while the API keeps running.
+        moved = Path(self.tempdir.name) / "moved-models"
+        moved.mkdir()
+        registry.MODELS_DIR = moved
+        return moved
+
+    def test_multi_source_download_follows_a_moved_models_folder(self) -> None:
+        calls: list[str] = []
+        self.install_hf_stub({"org/main": ["main.bin"]}, calls)
+        moved = self.move_models_folder()
+
+        def fake_download(**kwargs):
+            target = Path(kwargs["dest_dir"]) / kwargs["filename"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"data")
+            return 4
+
+        async def run():
+            with patch.object(model_router, "_download_file_streamed", fake_download):
+                response = await model_router.hf_download_sources(
+                    request_for([SOURCES[0]]), "pixal3d/generate"
+                )
+                return await collect_events(response)
+
+        events = asyncio.run(run())
+        # Reported as a success whichever folder it lands in -- which is why the
+        # stale path went unnoticed.
+        self.assertEqual(events[-1], {"percent": 100, "status": "done"})
+        self.assertTrue((moved / "pixal3d/generate/main.bin").is_file())
+        self.assertFalse((self.models_dir / "pixal3d/generate/main.bin").exists())
+
+    def test_single_repo_download_follows_a_moved_models_folder(self) -> None:
+        calls: list[str] = []
+        self.install_hf_stub({"org/main": ["main.bin"]}, calls)
+        moved = self.move_models_folder()
+        destinations: list[str] = []
+
+        def fake_download(**kwargs):
+            destinations.append(kwargs["dest_dir"])
+            return 4
+
+        async def run():
+            with patch.object(model_router, "_download_file_streamed", fake_download):
+                response = await model_router.hf_download(
+                    repo_id="org/main",
+                    model_id="sf3d",
+                    skip_prefixes="[]",
+                    include_prefixes="[]",
+                )
+                return await collect_events(response)
+
+        events = asyncio.run(run())
+        self.assertEqual(events[-1], {"percent": 100, "status": "done"})
+        self.assertEqual(destinations, [str(moved / "sf3d")])
+
+    def test_moved_models_folder_still_refuses_a_non_node_model_id(self) -> None:
+        self.move_models_folder()
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(model_router.hf_download_sources(request_for([SOURCES[0]]), "pixal3d"))
+        self.assertEqual(raised.exception.status_code, 400)
 
     def test_composite_model_unload_route_uses_path_converter(self) -> None:
         paths = {route.path for route in model_router.router.routes}
