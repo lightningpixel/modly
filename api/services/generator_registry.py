@@ -50,10 +50,6 @@ _REGISTRATION_PENDING_NAME = re.compile(
 )
 _REGISTRATION_CAPABILITY_LOCK = threading.Lock()
 
-print(f"[Registry] MODELS_DIR     = {MODELS_DIR}")
-print(f"[Registry] WORKSPACE_DIR  = {WORKSPACE_DIR}")
-print(f"[Registry] EXTENSIONS_DIR = {EXTENSIONS_DIR or '(not set)'}")
-
 
 # ------------------------------------------------------------------ #
 # Extension loader
@@ -465,10 +461,10 @@ def _discover_extensions(
                     and not (
                         registration_authorization is not None
                         and registration_authorization[0] == ext_id
-                        and registration_authorization[1].exists()
-                        and registration_authorization[2]
-                        == Path(os.path.abspath(ext_dir))
-                    )
+                    and registration_authorization[1].exists()
+                    and registration_authorization[2]
+                    == ext_dir.resolve()
+                )
                 )
             )
             if install_interrupted:
@@ -650,9 +646,6 @@ class GeneratorRegistry:
             )
             self._active_id = fallback
 
-        print(f"[Registry] Active model  : {self._active_id}")
-        print(f"[Registry] All models    : {list(self._generators.keys())}")
-
     def reload(self, validation_capability: object = None) -> None:
         """
         Re-scans extensions and updates the registry without restarting FastAPI.
@@ -661,7 +654,6 @@ class GeneratorRegistry:
         registration_authorization = _consume_registration_validation_capability(
             validation_capability,
         )
-        print("[Registry] Reloading extensions...")
         for gen in self._generators.values():
             if isinstance(gen, ExtensionProcess):
                 gen.stop()
@@ -679,7 +671,6 @@ class GeneratorRegistry:
         self._errors.clear()
         self._remove_legacy_paths()
         self.initialize(registration_authorization)
-        print("[Registry] Reload complete.")
 
     def load_errors(self) -> Dict[str, str]:
         """Returns extension loading errors."""
