@@ -216,6 +216,15 @@ declare global {
         get: () => Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string; hfToken?: string }>
         set: (patch: { modelsDir?: string; workspaceDir?: string; workflowsDir?: string; extensionsDir?: string; hfToken?: string }) => Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string; hfToken?: string }>
       }
+      /** decrypt returns null when the stored blob can't be decrypted here. */
+      secureStore: {
+        encrypt: (plainText: string) => Promise<string>
+        decrypt: (stored: string) => Promise<string | null>
+      }
+      agent: {
+        /** Opens a file picker and copies the chosen .gguf into the agent's models folder. */
+        addModel: () => Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }>
+      }
       cache: {
         clear: () => Promise<{ success: boolean; error?: string }>
       }

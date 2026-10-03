@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-from fastapi import APIRouter, HTTPException, Request as FastAPIRequest
+from fastapi import APIRouter, Header, HTTPException, Request as FastAPIRequest
 from fastapi.responses import StreamingResponse
 from services.generator_registry import generator_registry
 import services.generator_registry as registry_module
@@ -94,6 +94,9 @@ async def unload_all_models():
     """Unloads all models from memory to free VRAM/RAM."""
     # Off the event loop: unloading waits for any in-progress model load.
     await asyncio.to_thread(generator_registry.unload_all)
+    # The local LLMs hold VRAM too; "Free memory" left them resident.
+    from services.llm_server import llama_pool
+    await asyncio.to_thread(llama_pool.unload_all)
     # Force Python to release memory back to the OS
     import gc
     gc.collect()
@@ -301,7 +304,7 @@ async def hf_download(
     model_id: str,
     skip_prefixes: Optional[str] = None,
     include_prefixes: Optional[str] = None,
-    token: Optional[str] = None,
+    x_hf_token: Optional[str] = Header(default=None),
 ):
     """
     Streams a HuggingFace Hub model download via SSE.
@@ -310,11 +313,16 @@ async def hf_download(
 
     skip_prefixes:    JSON-encoded list of path prefixes to exclude.
     include_prefixes: JSON-encoded list of path prefixes to include (whitelist).
-    token:            HuggingFace access token for gated repos (from Electron settings).
-    All three fall back to the extension's manifest / environment when not supplied.
+    X-HF-Token:       HuggingFace access token for gated repos (from Electron settings).
+                      A HEADER, not a query param: uvicorn logs the full request
+                      line to stdout, python-bridge.ts pipes that into runtime.log,
+                      and `log:readAll` hands that file to the user for bug
+                      reports — the token used to travel all the way there.
+    All fall back to the extension's manifest / environment when not supplied.
 
     SSE format: data: {"percent": 0-100, "file": "...", "status": "..."}
     """
+    token = x_hf_token
     import json as _json
     import os
     dest_dir  = str(registry_module.MODELS_DIR / model_id)

@@ -3,7 +3,8 @@ import { join } from 'path'
 import { app, BrowserWindow } from 'electron'
 import { existsSync, mkdirSync } from 'fs'
 import axios from 'axios'
-import { getSettings } from './settings-store'
+import { ensureAgentDir, getSettings } from './settings-store'
+import { getHfToken } from './hf-token'
 import { logger } from './logger'
 import { cleanPythonEnv, getVenvPythonExe } from './python-setup'
 
@@ -55,10 +56,17 @@ export class PythonBridge {
         // mesh_ops uses Electron in Node mode for the existing meshoptimizer
         // backend, so packaged builds do not depend on a system Node install.
         MODLY_NODE_EXECUTABLE:  process.execPath,
+        // We decode both pipes as UTF-8 below (Buffer.toString() default), and
+        // the API forwards extension output — tqdm bars included — through its
+        // own stderr. Without this the API would encode them with the Windows
+        // locale codec and the HUD log pane would show █ escapes.
+        PYTHONIOENCODING:       'utf-8',
         // No PYTHONPATH needed - the venv's Python has its own isolated site-packages
         MODELS_DIR:             this.resolveModelsDir(),
         WORKSPACE_DIR:          this.resolveWorkspaceDir(),
         EXTENSIONS_DIR:         this.resolveExtensionsDir(),
+        // llm_server.py keeps everything of the local LLM here: engine, GGUF models, logs, config.
+        MODLY_LLM_DIR:          this.resolveAgentDir(),
         SELECTED_MODEL_ID:      process.env['SELECTED_MODEL_ID'] ?? '',
         HUGGING_FACE_HUB_TOKEN: this.resolveHfToken(),
         HF_TOKEN:               this.resolveHfToken(),
@@ -240,7 +248,11 @@ export class PythonBridge {
     return s.extensionsDir
   }
 
+  private resolveAgentDir(): string {
+    return ensureAgentDir(app.getPath('userData'))
+  }
+
   private resolveHfToken(): string {
-    return getSettings(app.getPath('userData')).hfToken ?? ''
+    return getHfToken()   // decrypted cache — settings.json holds the ciphertext
   }
 }

@@ -1,8 +1,8 @@
 import { ipcMain, BrowserWindow, Notification, dialog, app, shell } from 'electron'
 import { buildSync } from 'esbuild'
 import { autoUpdater } from 'electron-updater'
-import { join } from 'path'
-import { rm as rmAsync, readFile, writeFile, mkdir, readdir, rename, cp, symlink, lstat } from 'fs/promises'
+import { basename, join } from 'path'
+import { rm as rmAsync, readFile, writeFile, mkdir, readdir, rename, cp, symlink, lstat, copyFile } from 'fs/promises'
 import { existsSync, mkdirSync, readdirSync, statSync } from 'fs'
 import axios from 'axios'
 import * as tar from 'tar'
@@ -88,6 +88,8 @@ import { registerWorkspaceAssetLibraryIpcHandlers } from './artifact-registry-se
 import { updatesSupported } from './updater'
 import { ModelWeightOperations } from './model-weight-operations'
 import { readLocalFileBase64 } from './bounded-file-reader'
+import { encryptSecret, decryptSecret } from './secure-store'
+import { getHfToken, initHfToken, setHfToken } from './hf-token'
 
 type WindowGetter = () => BrowserWindow | null
 const pExecFile = promisify(execFile)
@@ -254,6 +256,11 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     }
   })
 
+  // Secure storage — OS-level encryption (Keychain/DPAPI/libsecret) for secrets
+  // the renderer would otherwise have to keep in plain-text localStorage (API keys).
+  ipcMain.handle('secure:encrypt', (_, plainText: string) => encryptSecret(plainText))
+  ipcMain.handle('secure:decrypt', (_, stored: string) => decryptSecret(stored))
+
   // Window controls (frameless window)
   ipcMain.on('window:minimize', () => getWindow()?.minimize())
   ipcMain.on('window:maximize', () => {
@@ -307,6 +314,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       workflowsDir:     join(baseDir, 'workflows'),
       extensionsDir:    join(baseDir, 'extensions'),
       dependenciesDir:  join(baseDir, 'dependencies'),
+      agentDir:         join(baseDir, 'agent'),
     })
   })
 
@@ -892,36 +900,40 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     arch:      process.arch,
   }))
 
-  // Settings — seed HF token into main-process env at startup
+  // Settings — decrypt the HF token (migrating a legacy plaintext one) and seed
+  // it into the main-process env at startup.
   {
-    const initialToken = getSettings(app.getPath('userData')).hfToken ?? ''
-    if (initialToken) {
-      process.env['HUGGING_FACE_HUB_TOKEN'] = initialToken
-      process.env['HF_TOKEN']               = initialToken
+    const token = initHfToken(app.getPath('userData'))
+    if (token) {
+      process.env['HUGGING_FACE_HUB_TOKEN'] = token
+      process.env['HF_TOKEN']               = token
     }
   }
 
   ipcMain.handle('settings:get', () => {
-    return getSettings(app.getPath('userData'))
+    // hfToken is stored encrypted — hand the renderer the usable value.
+    return { ...getSettings(app.getPath('userData')), hfToken: getHfToken() }
   })
 
   ipcMain.handle('settings:set', async (_event, patch: { modelsDir?: string; workspaceDir?: string; extensionsDir?: string; hfToken?: string }) => {
     if (patch.modelsDir !== undefined && weightOperations.busy) {
       throw new Error('Cannot change model storage while model weights are busy')
     }
-    const updated = setSettings(app.getPath('userData'), patch)
+    const { hfToken, ...dirs } = patch
+    setSettings(app.getPath('userData'), dirs)
     // Keep main-process env in sync so child processes spawned after token change inherit it
-    if (patch.hfToken !== undefined) {
-      process.env['HUGGING_FACE_HUB_TOKEN'] = patch.hfToken
-      process.env['HF_TOKEN']               = patch.hfToken
+    if (hfToken !== undefined) {
+      setHfToken(app.getPath('userData'), hfToken)
+      process.env['HUGGING_FACE_HUB_TOKEN'] = hfToken
+      process.env['HF_TOKEN']               = hfToken
       // Also push the token into the live FastAPI process env so extension
       // subprocesses spawned by ExtensionProcess._build_env() pick it up
       // without requiring a full app restart.
       try {
-        await axios.post(`${API_BASE_URL}/settings/hf-token`, { token: patch.hfToken }, { timeout: 3000 })
+        await axios.post(`${API_BASE_URL}/settings/hf-token`, { token: hfToken }, { timeout: 3000 })
       } catch { /* FastAPI may not be running yet — ignore */ }
     }
-    return updated
+    return { ...getSettings(app.getPath('userData')), hfToken: getHfToken() }
   })
 
   // Directory picker
@@ -1041,6 +1053,40 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       properties: ['openFile'],
     })
     return result.canceled ? null : result.filePaths[0]
+  })
+
+  // Add a local GGUF to the agent's models folder. Picking and copying both
+  // happen here, so the renderer never hands main an arbitrary path to copy.
+  ipcMain.handle('agent:addModel', async (): Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }> => {
+    const win = getWindow()
+    if (!win) return { success: false, error: 'No window available' }
+    const result = await dialog.showOpenDialog(win, {
+      title: 'Add a model',
+      filters: [{ name: 'GGUF model', extensions: ['gguf'] }],
+      properties: ['openFile'],
+    })
+    if (result.canceled || !result.filePaths[0]) return { success: false, cancelled: true }
+
+    const src      = result.filePaths[0]
+    const fileName = basename(src)
+    if (!fileName.toLowerCase().endsWith('.gguf')) return { success: false, error: 'Only .gguf files can be added.' }
+
+    const modelsDir = join(getSettings(app.getPath('userData')).agentDir, 'models')
+    const dest      = join(modelsDir, fileName)
+    if (existsSync(dest)) return { success: false, error: `"${fileName}" is already in your models.` }
+
+    // Copied under a temporary name first: the API lists every *.gguf in the
+    // folder, so a multi-GB copy in progress would otherwise show up as a model.
+    const partial = `${dest}.part`
+    try {
+      await mkdir(modelsDir, { recursive: true })
+      await copyFile(src, partial)
+      await rename(partial, dest)
+      return { success: true, fileName }
+    } catch (err) {
+      await rmAsync(partial, { force: true }).catch(() => {})
+      return { success: false, error: String(err) }
+    }
   })
 
   ipcMain.handle('fs:moveDirectory', async (_, { src, dest }: { src: string; dest: string }) => {

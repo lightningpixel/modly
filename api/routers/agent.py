@@ -1,11 +1,19 @@
 """
-Agent chat endpoint — runs an Ollama-powered tool-use loop against Modly's API.
+Agent chat endpoint — runs a tool-use loop against Modly's API, on the managed
+local llama.cpp server or any OpenAI-compatible provider.
 """
+import asyncio
+import json
 import re
 import uuid
+from typing import Optional
+
 import httpx
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from services import llm_server
+from services.llm_server import llama_pool
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -374,13 +382,19 @@ async def execute_tool(name: str, arguments: dict, context: dict) -> tuple[str, 
 class ChatMessage(BaseModel):
     role: str
     content: str
-    images: list[str] = []
+    images: list[str] = []  # data URLs
+
+
+class ProviderConfig(BaseModel):
+    type: str = "local"            # "local" | "external"
+    base_url: Optional[str] = None  # external only, e.g. https://api.openai.com/v1
+    api_key: Optional[str] = None
 
 
 class AgentChatRequest(BaseModel):
     messages: list[ChatMessage]
-    ollama_url: str = "http://localhost:11434"
-    model: str = "qwen2.5:3b"
+    model: str = Field(default_factory=llm_server.default_model_id)  # local: catalog/custom id — external: provider model name
+    provider: ProviderConfig = ProviderConfig()
     context: dict = {}
     thinking: str = "auto"  # "auto" | "on" | "off"
 
@@ -398,9 +412,10 @@ class AgentChatResponse(BaseModel):
 
 
 def _extract_thinking(msg: dict) -> tuple[str, str | None]:
-    """Return (clean_content, thinking_text). Handles both Ollama native field and <think> tags."""
-    content = msg.get("content", "")
-    thinking = msg.get("thinking") or None
+    """Return (clean_content, thinking_text). Handles llama-server's
+    reasoning_content field and inline <think> tags."""
+    content = msg.get("content") or ""
+    thinking = msg.get("reasoning_content") or None
     if not thinking:
         match = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
         if match:
@@ -409,35 +424,98 @@ def _extract_thinking(msg: dict) -> tuple[str, str | None]:
     return content, thinking
 
 
-@router.get("/models")
-async def list_ollama_models(ollama_url: str = "http://localhost:11434"):
-    async with httpx.AsyncClient(timeout=5.0) as client:
+def _auth_headers(base_url: str, api_key: Optional[str]) -> dict:
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+        if "anthropic" in base_url:
+            # Anthropic's OpenAI-compat layer also accepts the native headers.
+            headers["x-api-key"] = api_key
+            headers["anthropic-version"] = "2023-06-01"
+    return headers
+
+
+class ExternalModelsRequest(BaseModel):
+    base_url: str
+    api_key: str = ""
+
+
+@router.post("/external/models")
+async def list_external_models(req: ExternalModelsRequest):
+    """Proxy the provider's /models listing (avoids CORS issues from the renderer).
+
+    POST with the key in the body, never a GET query string: uvicorn's access log
+    records the full request line, and that log ends up in runtime.log.
+    """
+    headers = _auth_headers(req.base_url, req.api_key)
+    async with httpx.AsyncClient(timeout=10.0) as client:
         try:
-            r = await client.get(f"{ollama_url}/api/tags")
+            r = await client.get(f"{req.base_url.rstrip('/')}/models", headers=headers)
             r.raise_for_status()
-            models = [m["name"] for m in r.json().get("models", [])]
-            return {"models": models}
+            data = r.json().get("data", [])
+            return {"models": sorted(m["id"] for m in data if isinstance(m, dict) and m.get("id"))}
         except Exception:
             return {"models": []}
 
 
-async def _unload_llm_after_workflow(
-    client: httpx.AsyncClient,
-    request: AgentChatRequest,
-    actions_done: list[ActionDone],
-) -> None:
-    """Free the Ollama model's VRAM once a workflow has been dispatched, so the
+async def _unload_llm_after_workflow(request: AgentChatRequest, actions_done: list[ActionDone]) -> None:
+    """Free the local LLM's VRAM once a workflow has been dispatched, so the
     workflow gets the full GPU. Best-effort — never fail the chat over it."""
+    if request.provider.type != "local":
+        return
     if not any(a.tool == "run_workflow" for a in actions_done):
         return
     try:
-        await client.post(
-            f"{request.ollama_url}/api/generate",
-            json={"model": request.model, "keep_alive": 0},
-            timeout=5.0,
-        )
+        await asyncio.to_thread(llama_pool.unload_all)
     except Exception:
         pass
+
+
+def _error_detail(r: httpx.Response) -> str:
+    """The provider's own message (OpenAI-style `{"error": {"message": …}}`), else the raw body."""
+    try:
+        err = r.json().get("error")
+        if isinstance(err, dict) and err.get("message"):
+            return str(err["message"])[:300]
+        if isinstance(err, str):
+            return err[:300]
+    except (ValueError, AttributeError):
+        pass
+    return r.text[:300]
+
+
+def _tool_arguments(raw) -> dict:
+    """OpenAI-compatible servers send tool arguments as a JSON string."""
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _user_entry(m: ChatMessage, send_images: bool) -> dict:
+    if not (m.images and send_images):
+        return {"role": m.role, "content": m.content}
+    parts: list[dict] = [{"type": "text", "text": m.content}]
+    for data_url in m.images:
+        parts.append({"type": "image_url", "image_url": {"url": data_url}})
+    return {"role": m.role, "content": parts}
+
+
+def _drop_images(messages: list[dict]) -> bool:
+    """Replace image parts with a text note, in place. True if any were dropped."""
+    dropped = False
+    for m in messages:
+        if not isinstance(m.get("content"), list):
+            continue
+        texts = [p["text"] for p in m["content"] if p.get("type") == "text"]
+        if any(p.get("type") == "image_url" for p in m["content"]):
+            dropped = True
+            texts.append("[An image was attached, but this model reads text only.]")
+        m["content"] = "\n".join(texts)
+    return dropped
 
 
 @router.post("/chat", response_model=AgentChatResponse)
@@ -471,59 +549,93 @@ async def agent_chat(request: AgentChatRequest):
                 ),
             })
 
+    # ONE system message, first. Qwen3.5's chat template raises "System message
+    # must be at the beginning", which llama-server returns as a flat HTTP 400;
+    # other templates silently drop the extra ones.
+    messages = [{"role": "system", "content": "\n\n".join(m["content"] for m in messages)}]
+
+    slot = None
+    send_images = True
+    extra: dict = {}
+    if request.provider.type == "local":
+        try:
+            spec = llm_server.resolve_model(request.model)
+            # hold=True: the slot stays claimed for the whole loop, so neither the
+            # idle reaper nor a model loading elsewhere can evict it mid-answer.
+            slot = await asyncio.to_thread(llama_pool.ensure, request.model, spec, True)
+        except Exception as e:
+            return AgentChatResponse(message=f"Could not start the local LLM: {e}")
+        base_url = slot.base_url
+        headers: dict = {}
+        send_images = spec["vision"]
+        extra.update(llm_server.sampling_for(request.model))
+        if request.thinking == "off":
+            extra["chat_template_kwargs"] = {"enable_thinking": False}
+    else:
+        if not request.provider.base_url:
+            return AgentChatResponse(message="No provider URL configured. Set one in Settings → Agent.")
+        base_url = request.provider.base_url.rstrip("/")
+        headers = _auth_headers(base_url, request.provider.api_key)
+
     for m in request.messages:
-        entry: dict = {"role": m.role, "content": m.content}
-        if m.images:
-            entry["images"] = m.images
-        messages.append(entry)
+        messages.append(_user_entry(m, send_images))
 
     actions_done: list[ActionDone] = []
     all_thinking:  list[str]       = []
+    final: AgentChatResponse | None = None
 
-    # Build Ollama think param
-    ollama_extra: dict = {}
-    if request.thinking == "on":
-        ollama_extra["think"] = True
-    elif request.thinking == "off":
-        ollama_extra["think"] = False
-
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        for _ in range(10):  # max tool-call rounds
-            r = await client.post(
-                f"{request.ollama_url}/api/chat",
-                json={"model": request.model, "messages": messages, "tools": TOOLS, "stream": False, **ollama_extra},
-            )
-
-            if r.status_code != 200:
-                return AgentChatResponse(
-                    message=f"Ollama error ({r.status_code}). Is Ollama running at {request.ollama_url}?",
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            for _ in range(10):  # max tool-call rounds
+                r = await client.post(
+                    f"{base_url}/chat/completions",
+                    headers=headers,
+                    json={"model": request.model, "messages": messages, "tools": TOOLS, "stream": False, **extra},
                 )
+                # An external model's vision support is unknown up front, and a
+                # text-only one rejects image parts with a 400 that failed the
+                # whole turn. Retry once with the images described as omitted.
+                if r.status_code == 400 and request.provider.type != "local" and _drop_images(messages):
+                    r = await client.post(
+                        f"{base_url}/chat/completions",
+                        headers=headers,
+                        json={"model": request.model, "messages": messages, "tools": TOOLS, "stream": False, **extra},
+                    )
 
-            msg = r.json()["message"]
-            messages.append(msg)
+                if r.status_code != 200:
+                    return AgentChatResponse(message=f"LLM error ({r.status_code}): {_error_detail(r)}")
 
-            clean_content, thinking_text = _extract_thinking(msg)
-            if thinking_text:
-                all_thinking.append(thinking_text)
+                msg = r.json()["choices"][0]["message"]
+                tool_calls = msg.get("tool_calls") or []
+                assistant: dict = {"role": "assistant", "content": msg.get("content") or ""}
+                if tool_calls:
+                    assistant["tool_calls"] = tool_calls
+                messages.append(assistant)
 
-            tool_calls = msg.get("tool_calls") or []
-            if not tool_calls:
-                await _unload_llm_after_workflow(client, request, actions_done)
-                combined_thinking = "\n\n---\n\n".join(all_thinking) if all_thinking else None
-                return AgentChatResponse(
-                    message=clean_content,
-                    actions=actions_done,
-                    thinking=combined_thinking,
-                )
+                clean_content, thinking_text = _extract_thinking(msg)
+                if thinking_text:
+                    all_thinking.append(thinking_text)
 
-            for tc in tool_calls:
-                fn = tc["function"]
-                result_text, payload = await execute_tool(fn["name"], fn.get("arguments") or {}, request.context)
-                actions_done.append(ActionDone(tool=fn["name"], result=result_text, payload=payload))
-                messages.append({"role": "tool", "content": result_text})
+                if not tool_calls:
+                    final = AgentChatResponse(message=clean_content, actions=actions_done)
+                    break
 
-        # Loop exhausted without a final answer: still free VRAM if a workflow ran.
-        await _unload_llm_after_workflow(client, request, actions_done)
+                for tc in tool_calls:
+                    fn = tc["function"]
+                    result_text, payload = await execute_tool(fn["name"], _tool_arguments(fn.get("arguments")), request.context)
+                    actions_done.append(ActionDone(tool=fn["name"], result=result_text, payload=payload))
+                    messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result_text})
+    except httpx.HTTPError as e:
+        return AgentChatResponse(message=f"Could not reach the LLM at {base_url}: {e}", actions=actions_done)
+    finally:
+        if slot is not None:
+            slot.release()
 
-    combined_thinking = "\n\n---\n\n".join(all_thinking) if all_thinking else None
-    return AgentChatResponse(message="Reached maximum tool iterations.", actions=actions_done, thinking=combined_thinking)
+    # After the release: unload_all() spares a held slot, so unloading while
+    # still holding ours would keep the agent's own model on the GPU.
+    await _unload_llm_after_workflow(request, actions_done)
+
+    if final is None:
+        final = AgentChatResponse(message="Reached maximum tool iterations.", actions=actions_done)
+    final.thinking = "\n\n---\n\n".join(all_thinking) if all_thinking else None
+    return final

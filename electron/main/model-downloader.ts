@@ -4,8 +4,7 @@
  */
 import { existsSync, readdirSync, statSync, readFileSync } from 'fs'
 import { join } from 'path'
-import { getSettings } from './settings-store'
-import { app } from 'electron'
+import { getHfToken } from './hf-token'
 import type { ModelSource } from './model-sources'
 
 export interface DownloadProgress {
@@ -129,12 +128,11 @@ export async function downloadModelFromHF(
   if (includePrefixes && includePrefixes.length > 0) {
     url += `&include_prefixes=${encodeURIComponent(JSON.stringify(includePrefixes))}`
   }
-  const hfToken = getSettings(app.getPath('userData')).hfToken
-  if (hfToken) {
-    url += `&token=${encodeURIComponent(hfToken)}`
-  }
-
-  const res = await net.fetch(url)
+  // Header, never a query param: uvicorn logs the full request line to stdout,
+  // python-bridge pipes that into runtime.log, and `log:readAll` hands that file
+  // to the user for bug reports. The token used to ride all the way there.
+  const hfToken = getHfToken()   // decrypted cache — settings.json holds the ciphertext
+  const res = await net.fetch(url, hfToken ? { headers: { 'X-HF-Token': hfToken } } : undefined)
   if (!res.ok) throw new Error(`HuggingFace download failed: HTTP ${res.status}`)
   await consumeDownloadStream(res, onProgress)
 }
@@ -147,7 +145,7 @@ export async function downloadModelSourcesFromHF(
 ): Promise<void> {
   const { net } = require('electron')
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  const hfToken = getSettings(app.getPath('userData')).hfToken
+  const hfToken = getHfToken()
   if (hfToken) headers.Authorization = `Bearer ${hfToken}`
   const url = `${PYTHON_API_URL}/model/hf-download-sources?model_id=${encodeURIComponent(modelId)}`
   const res = await net.fetch(url, {
@@ -171,12 +169,22 @@ async function consumeDownloadStream(
   const STALL_TIMEOUT_MS = 120_000
 
   async function readWithTimeout() {
-    return await Promise.race([
-      reader.read(),
-      new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error(`Model download stalled for ${Math.round(STALL_TIMEOUT_MS / 1000)}s`)), STALL_TIMEOUT_MS)
-      }),
-    ])
+    // The timer has to be cleared: an SSE stream emitting ~10 events/s otherwise
+    // keeps every timer created in the last 120 s alive in the main process.
+    let timer: NodeJS.Timeout | undefined
+    try {
+      return await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`Model download stalled for ${Math.round(STALL_TIMEOUT_MS / 1000)}s`)),
+            STALL_TIMEOUT_MS,
+          )
+        }),
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
   }
 
   while (true) {

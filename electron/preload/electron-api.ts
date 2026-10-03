@@ -103,6 +103,21 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         ipcRenderer.invoke('fs:readScreenshotDataUrl', filename) as Promise<string>,
     },
 
+    // Secure storage — OS-level encryption for secrets (API keys, …)
+    secureStore: {
+      encrypt: (plainText: string): Promise<string> => ipcRenderer.invoke('secure:encrypt', plainText) as Promise<string>,
+      // null = one of our blobs that couldn't be decrypted here (different OS
+      // user/machine). Never the ciphertext — see secure-store.ts.
+      decrypt: (stored: string): Promise<string | null> => ipcRenderer.invoke('secure:decrypt', stored) as Promise<string | null>,
+    },
+
+    // Agent — local LLM models
+    agent: {
+      // Opens a file picker and copies the chosen .gguf into the agent's models folder.
+      addModel: (): Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }> =>
+        ipcRenderer.invoke('agent:addModel') as Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }>,
+    },
+
     // Settings
     settings: {
       get: (): Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string; hfToken?: string }> =>

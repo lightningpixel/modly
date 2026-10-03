@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useAppStore } from '@shared/stores/appStore'
-import { useAgentStore } from '@shared/stores/agentStore'
+import { useAgentStore, PROVIDERS, providerBaseUrl } from '@shared/stores/agentStore'
+import { useLlmModels } from '@shared/stores/llmModelsStore'
 import { useWorkflowsStore } from '@shared/stores/workflowsStore'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
 import { useWorkflowRunStore } from '@areas/workflows/workflowRunStore'
@@ -242,16 +243,22 @@ function WorkflowProgressCard({ name }: { name: string }): JSX.Element {
 // ─── Main component ──────────────────────────────────────────────────────────
 
 export default function ChatPanel(): JSX.Element {
-  const { ollamaUrl, defaultModel, defaultThinking } = useAgentStore()
+  const { provider, localModel, external, defaultThinking } = useAgentStore()
+  const { models: llmModels } = useLlmModels()
+  const isLocal        = provider === 'local'
+  const externalConfig = external[provider]
 
   const [messages, setMessages]               = useState<Message[]>([])
   const [input, setInput]                     = useState('')
   const [isLoading, setIsLoading]             = useState(false)
   const [error, setError]                     = useState<string | null>(null)
   const [showAll, setShowAll]                 = useState(false)
-  const [model, setModel]                     = useState(defaultModel)
+  // null = follow the default from Settings, which hydrates asynchronously.
+  const [localPick, setLocalPick]             = useState<string | null>(null)
+  const model                                 = isLocal ? (localPick ?? localModel) : (externalConfig?.model ?? '')
+  // code/cad models are node tools, not chat models.
+  const localModels                           = llmModels.filter((m) => m.downloaded && !(m.tags ?? []).some((t) => t === 'code' || t === 'cad'))
   const [showModelPicker, setShowModelPicker] = useState(false)
-  const [ollamaModels, setOllamaModels]       = useState<string[]>([])
   const [pendingWorkflow, setPendingWorkflow]  = useState<{ id: string; name: string } | null>(null)
   const [attachments, setAttachments]         = useState<string[]>([]) // data URLs
   const [isDragging, setIsDragging]           = useState(false)
@@ -349,7 +356,7 @@ export default function ChatPanel(): JSX.Element {
           content: m.content,
         }
         if (m.imageDataUrls?.length) {
-          entry.images = m.imageDataUrls.map((url) => url.split(',')[1])
+          entry.images = m.imageDataUrls
         }
         return entry
       })
@@ -361,7 +368,15 @@ export default function ChatPanel(): JSX.Element {
       const res = await fetch(`${apiUrl}/agent/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: apiMessages, ollama_url: ollamaUrl, model, context, thinking: thinkingMode }),
+        body: JSON.stringify({
+          messages: apiMessages,
+          model,
+          provider: isLocal
+            ? { type: 'local' }
+            : { type: 'external', base_url: providerBaseUrl(provider, externalConfig), api_key: externalConfig?.apiKey ?? '' },
+          context,
+          thinking: thinkingMode,
+        }),
       })
       if (!res.ok) throw new Error(`API error ${res.status}`)
 
@@ -403,16 +418,6 @@ export default function ChatPanel(): JSX.Element {
       setError(msg.includes('fetch') ? 'Cannot reach Modly API. Is the backend running?' : msg)
     } finally {
       setIsLoading(false)
-    }
-  }
-
-  async function fetchOllamaModels() {
-    try {
-      const res = await fetch(`${apiUrl}/agent/models?ollama_url=${encodeURIComponent(ollamaUrl)}`)
-      const data = await res.json()
-      setOllamaModels(data.models ?? [])
-    } catch {
-      setOllamaModels([])
     }
   }
 
@@ -646,10 +651,10 @@ export default function ChatPanel(): JSX.Element {
             {/* Model selector */}
             <div className="relative" ref={modelPickerRef}>
               <button
-                onClick={() => { setShowModelPicker((v) => !v); if (!showModelPicker) fetchOllamaModels() }}
+                onClick={() => setShowModelPicker((v) => !v)}
                 className="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors"
               >
-                {model}
+                {isLocal ? (localModels.find((m) => m.id === model)?.name ?? model) : (model || PROVIDERS[provider].label)}
                 <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                   <polyline points="6 9 12 15 18 9" />
                 </svg>
@@ -657,17 +662,19 @@ export default function ChatPanel(): JSX.Element {
 
               {showModelPicker && (
                 <div className="absolute bottom-full mb-2 left-0 z-50 bg-zinc-900 border border-zinc-700/60 rounded-xl shadow-xl overflow-hidden min-w-[180px]">
-                  {ollamaModels.length === 0 ? (
-                    <p className="px-3 py-2.5 text-[11px] text-zinc-500">No models found — is Ollama running?</p>
+                  {!isLocal ? (
+                    <p className="px-3 py-2.5 text-[11px] text-zinc-500">{PROVIDERS[provider].label} — change the model in Settings → Agent.</p>
+                  ) : localModels.length === 0 ? (
+                    <p className="px-3 py-2.5 text-[11px] text-zinc-500">No local model downloaded — open Settings → Agent.</p>
                   ) : (
-                    ollamaModels.map((m) => (
+                    localModels.map((m) => (
                       <button
-                        key={m}
-                        onClick={() => { setModel(m); setShowModelPicker(false) }}
-                        className={`w-full px-3 py-2 text-left text-[11px] hover:bg-zinc-800 transition-colors flex items-center justify-between gap-3 ${m === model ? 'text-zinc-100' : 'text-zinc-400'}`}
+                        key={m.id}
+                        onClick={() => { setLocalPick(m.id); setShowModelPicker(false) }}
+                        className={`w-full px-3 py-2 text-left text-[11px] hover:bg-zinc-800 transition-colors flex items-center justify-between gap-3 ${m.id === model ? 'text-zinc-100' : 'text-zinc-400'}`}
                       >
-                        <span className="truncate">{m}</span>
-                        {m === model && (
+                        <span className="truncate">{m.name}</span>
+                        {m.id === model && (
                           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="shrink-0 text-accent">
                             <polyline points="20 6 9 17 4 12" />
                           </svg>

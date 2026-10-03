@@ -74,9 +74,12 @@ class ExtensionProcess:
         env["MODELS_DIR"]    = str(MODELS_DIR)
         env["WORKSPACE_DIR"] = str(WORKSPACE_DIR)
         env["MODLY_API_DIR"] = str(Path(__file__).parent.parent)
+        # Lets extensions call back into the Modly API (e.g. /llm/chat for the shared LLM).
+        env.setdefault("MODLY_API_URL", "http://127.0.0.1:8765")
         # Force the worker's Python stdio to UTF-8 so it matches the UTF-8
         # pipe readers below regardless of the OS locale (cp1252/cp932).
         env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         if sys.platform == "darwin":
             env.setdefault("NUMBA_DISABLE_JIT", "1")
             # Must be set before the subprocess's first `import torch` — PyTorch
@@ -126,6 +129,12 @@ class ExtensionProcess:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                # Without these, text=True decodes with the locale codec — cp1252
+                # on Windows. tqdm draws its partial blocks with U+258D/U+258F,
+                # whose UTF-8 bytes (0x8d/0x8f) are undefined there: the decode
+                # raises, _stderr_loop dies, nobody drains the pipe, and the
+                # child blocks forever on write once it fills. errors="replace"
+                # keeps a stray non-UTF-8 byte from resurrecting that failure.
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
@@ -191,6 +200,8 @@ class ExtensionProcess:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
         except subprocess.CalledProcessError as exc:
             details = (exc.stderr or exc.stdout or "").strip()

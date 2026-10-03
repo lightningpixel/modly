@@ -87,6 +87,11 @@ async def setup_extension(ext_id: str):
             [sys.executable, str(setup_py), args],
             capture_output=True,
             text=True,
+            # pip's own output carries box-drawing characters; the locale codec
+            # (cp1252 on Windows) raises on some of them and would turn a
+            # successful setup into a 500 with no usable message.
+            encoding="utf-8",
+            errors="replace",
         )
     )
 

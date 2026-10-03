@@ -892,6 +892,17 @@ class GeneratorRegistry:
                     f"Unknown model ID: '{model_id}'. "
                     f"Available: {list(self._generators.keys())}"
                 )
+            # 3D generation owns the GPU: evict the chat LLMs before anything is
+            # about to allocate on it. The trigger is "the target model is not
+            # resident", not "the target model changed" — the common case is the
+            # default generator, which is already `_active_id` at boot and still
+            # has to load its weights. Gating on the id alone let a full LLM pool
+            # (2 slots, ~11.6 GB of 12) sit through an entire generation.
+            target = self._generators[model_id]
+            if model_id != self._active_id or not target.is_loaded():
+                from services.llm_server import llama_pool
+                llama_pool.unload_all()
+
             if model_id != self._active_id:
                 if self._active_id in self._generators:
                     self._generators[self._active_id].unload()
