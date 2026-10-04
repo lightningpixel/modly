@@ -9,6 +9,7 @@ import * as tar from 'tar'
 import * as os from 'os'
 import { promisify } from 'util'
 import { PythonBridge, API_BASE_URL } from './python-bridge'
+import { importVideoToWorkspace } from './video-import'
 import {
   isModelDownloaded,
   listDownloadedModels,
@@ -358,6 +359,19 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     })
 
     return result.canceled ? null : result.filePaths[0]
+  })
+
+  ipcMain.handle('fs:selectVideo', async () => {
+    const win = getWindow()
+    if (!win) return null
+    const result = await dialog.showOpenDialog(win, {
+      title: 'Import a video',
+      filters: [{ name: 'Videos', extensions: ['mp4', 'm4v', 'mov', 'webm', 'mkv', 'avi'] }],
+      properties: ['openFile'],
+    })
+    if (result.canceled) return null
+    const workspaceDir = getSettings(app.getPath('userData')).workspaceDir
+    return importVideoToWorkspace(result.filePaths[0], workspaceDir)
   })
 
   ipcMain.handle('fs:selectMeshFile', async () => {

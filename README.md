@@ -285,11 +285,21 @@ a workspace directory containing `scene-manifest.json` with schema
 Scene** workflow node to select and validate an existing scene directory.
 Scene-capable generators implement `generate_artifact(input_kind,
 artifact_path, ...)`; legacy image generators and `POST /generate/from-image`
-remain unchanged. The generic `POST /generate/from-artifact` boundary currently
-accepts only `scene`, leaving future artifact kinds to separate reviewed changes.
+remain unchanged. The generic `POST /generate/from-artifact` boundary accepts
+validated `scene` directories and `video` files without converting either to
+fake image bytes.
 For this first contract, `scene` is model-only and must be declared as the single
 `input` value (not inside `inputs`); process and mixed-input scene nodes are rejected.
 Model nodes may still accept multiple images and produce a scene.
+
+The dedicated typed-artifact route is used when a model declares exactly
+`input: "video"`. Existing video outputs, process video nodes, and `inputs`
+arrays containing video remain valid; this feature does not narrow those
+extension contracts. Use **Load Video** to import a durable copy under the
+workspace before connecting it to a scalar video model input.
+The host checks containment, regular-file status, extension, size, and container
+signature, while full media decoding remains the extension's responsibility.
+Accepted containers are MP4/M4V/MOV, WebM/Matroska, and AVI, up to 8 GiB.
 
 
 ## Modly CLI

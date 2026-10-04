@@ -172,7 +172,8 @@ async def generate_from_artifact(
         raise HTTPException(400, str(exc)) from exc
 
     params = {k: v for k, v in request.params.items() if k not in RESERVED_ARTIFACT_PARAMS}
-    params["scene_manifest_path"] = str(artifact.path)
+    if artifact.kind == "scene":
+        params["scene_manifest_path"] = str(artifact.path)
     collection = sanitize_collection(request.collection)
     job_id = str(uuid.uuid4())
     _purge_old_jobs()
@@ -336,11 +337,18 @@ def _run_generation_impl(
             from services.artifact_input import revalidate_artifact_input
             model_input = revalidate_artifact_input(registry.WORKSPACE_DIR, model_input)
             import inspect
-            supports_cancel = "cancel_event" in inspect.signature(gen.generate_artifact).parameters
-            output_path = (
-                gen.generate_artifact(model_input.kind, model_input.path, params, progress_cb, cancel_event)
-                if supports_cancel
-                else gen.generate_artifact(model_input.kind, model_input.path, params, progress_cb)
+            artifact_parameters = inspect.signature(gen.generate_artifact).parameters
+            artifact_kwargs = {}
+            if "cancel_event" in artifact_parameters:
+                artifact_kwargs["cancel_event"] = cancel_event
+            if "artifact_snapshot" in artifact_parameters:
+                artifact_kwargs["artifact_snapshot"] = model_input.snapshot
+            output_path = gen.generate_artifact(
+                model_input.kind,
+                model_input.path,
+                params,
+                progress_cb,
+                **artifact_kwargs,
             )
         else:
             import inspect

@@ -12,8 +12,8 @@ class JobStatus(BaseModel):
 
 
 class GenerateFromArtifactRequest(BaseModel):
-    """Generic typed-artifact request. Only scene is public in this release."""
-    input_kind: Literal["scene"]
+    """Generic typed-artifact request for model-only scene and video inputs."""
+    input_kind: Literal["scene", "video"]
     input_path: str
     model_id: str
     collection: str = "Workflows"

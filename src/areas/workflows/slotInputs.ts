@@ -4,7 +4,7 @@
 // the file path resolved for each slot, indexed the same way (undefined where the
 // slot carries text or nothing). Pure so it can be tested without the store.
 
-export type SlotInputType = 'image' | 'text' | 'mesh' | 'audio'
+export type SlotInputType = 'image' | 'text' | 'mesh' | 'audio' | 'video'
 
 export interface SlotFilePaths {
   /** Primary file: what the extension receives as `filePath` when no mesh is present. */
@@ -28,7 +28,7 @@ export function assignSlotFilePaths(
     } else if (inputTypes[i] === 'image') {
       if (!out.nodeInputPath) out.nodeInputPath = fp
       else out.extraImagePaths.push(fp)
-    } else if (inputTypes[i] === 'audio') {
+    } else if (inputTypes[i] === 'audio' || inputTypes[i] === 'video') {
       if (!out.nodeInputPath) out.nodeInputPath = fp
     }
   }
