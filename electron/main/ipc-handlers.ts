@@ -42,6 +42,7 @@ import {
   weightStorageHasLocalData,
 } from './model-sources'
 import { getSettings, setSettings } from './settings-store'
+import { deleteStorageDirectory, moveStorageDirectory } from './storage-directory-guard'
 import { checkSetupNeeded, markSetupDone, runFullSetup, getVenvPythonExe, ensureSslPatch } from './python-setup'
 import { logger } from './logger'
 import { getProcessRunner, getPythonProcessRunner, getExtPythonExe, terminateProcessRunner, terminateAllProcessRunners } from './process-runner'
@@ -1091,9 +1092,8 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   ipcMain.handle('fs:moveDirectory', async (_, { src, dest }: { src: string; dest: string }) => {
     try {
-      await mkdir(dest, { recursive: true })
-      await cp(src, dest, { recursive: true })
-      await rmAsync(src, { recursive: true, force: true })
+      const userData = app.getPath('userData')
+      await moveStorageDirectory(src, dest, getSettings(userData), userData, { appDir: app.getAppPath() })
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -1101,21 +1101,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   ipcMain.handle('fs:deleteDirectory', async (_, dirPath: string) => {
-    const userData = app.getPath('userData')
-    const settings = getSettings(userData)
-    const allowedRoots = [
-      settings.modelsDir,
-      settings.workspaceDir,
-      settings.extensionsDir,
-      join(userData, 'gen-cache'),
-    ]
-    const resolved = join(dirPath)
-    const isAllowed = allowedRoots.some((root) => resolved.startsWith(root))
-    if (!isAllowed) {
-      return { success: false, error: 'Path is outside allowed directories' }
-    }
     try {
-      await rmAsync(resolved, { recursive: true, force: true })
+      const userData = app.getPath('userData')
+      await deleteStorageDirectory(dirPath, getSettings(userData), userData, { appDir: app.getAppPath() })
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
