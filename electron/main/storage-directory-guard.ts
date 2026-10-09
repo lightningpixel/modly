@@ -1,5 +1,5 @@
 /** Fail-closed validation for settings-driven directory moves and deletions. */
-import { cp, lstat, mkdir, readdir, rm } from 'node:fs/promises'
+import { cp, lstat, mkdir, readdir, rm, rmdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
 
@@ -189,8 +189,16 @@ export async function moveStorageDirectory(
   await assertNoSymlinkAncestors(paths.src)
   await assertNoSymlinkAncestors(paths.dest)
   await assertEmptyDestination(paths.dest)
-  await mkdir(paths.dest, { recursive: true })
-  // Refuse races that add files to the destination after the emptiness check.
+  // fs.cp with errorOnExist refuses even an EMPTY existing directory. Remove
+  // only the verified-empty destination, never the source, before copying.
+  // rmdir itself fails closed if a concurrent writer adds a file.
+  try {
+    await rmdir(paths.dest)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+  }
+  await mkdir(path.dirname(paths.dest), { recursive: true })
+  // With a missing destination, errorOnExist protects against unexpected files.
   await cp(paths.src, paths.dest, { recursive: true, force: false, errorOnExist: true })
   // Re-validate before deleting the source. Never delete it after a copy error.
   validateStorageMove(paths.src, paths.dest, dirs, userData, options)
