@@ -6,11 +6,13 @@ import { useWorkflowsStore } from '@shared/stores/workflowsStore'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
 import { useWorkflowRunStore } from '@areas/workflows/workflowRunStore'
 import { buildAllWorkflowExtensions } from '@areas/workflows/mockExtensions'
+import { readAgentEvents } from '@shared/utils/agentStream'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 import type { ThinkingMode } from '@shared/stores/agentStore'
 import type { Workflow } from '@shared/types/electron.d'
+import type { AgentAction, AgentActionPayload } from '@shared/utils/agentStream'
 
 interface Message {
   id: string
@@ -19,19 +21,12 @@ interface Message {
   thinking?: string
   imageDataUrls?: string[]
   actions?: ActionDone[]
+  streaming?: boolean
 }
 
-interface ActionDone {
-  tool: string
-  result: string
-  payload?: {
-    type: string
-    url?: string
-    face_count?: number
-    workflow_id?: string
-    workflow_name?: string
-    workflow?: Omit<Workflow, 'id' | 'createdAt' | 'updatedAt'>
-  } | null
+interface ActionDone extends AgentAction {
+  id?: string
+  running?: boolean
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -86,15 +81,23 @@ const TOOL_LABELS: Record<string, string> = {
 function ActionsCard({ actions, onUndo }: { actions: ActionDone[]; onUndo?: () => void }): JSX.Element {
   const [expanded, setExpanded] = useState(false)
   const meshActions = actions.filter((a) => a.payload?.type === 'mesh_update')
-  const canUndo = meshActions.length > 0 && !!onUndo
+  const running = actions.find((a) => a.running)
+  const canUndo = meshActions.length > 0 && !!onUndo && !running
 
   return (
     <div className="rounded-xl border border-zinc-700/50 bg-zinc-800/40 overflow-hidden text-[11px]">
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-700/40">
-        <span className="text-zinc-300 font-medium">
-          {actions.length} action{actions.length > 1 ? 's' : ''} performed
-        </span>
+        {running ? (
+          <span className="flex items-center gap-2 text-zinc-300 font-medium">
+            <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse shrink-0" />
+            Running {running.tool.replace(/_/g, ' ')}…
+          </span>
+        ) : (
+          <span className="text-zinc-300 font-medium">
+            {actions.length} action{actions.length > 1 ? 's' : ''} performed
+          </span>
+        )}
         <div className="flex items-center gap-2">
           {canUndo && (
             <button
@@ -123,8 +126,9 @@ function ActionsCard({ actions, onUndo }: { actions: ActionDone[]; onUndo?: () =
       {expanded && (
         <div className="flex flex-col divide-y divide-zinc-700/30">
           {actions.map((a, i) => (
-            <div key={i} className="flex items-center justify-between px-3 py-1.5">
+            <div key={a.id ?? i} className="flex items-center justify-between px-3 py-1.5">
               <span className="text-zinc-400">{TOOL_LABELS[a.tool] ?? a.tool.replace(/_/g, ' ')}</span>
+              {a.running && <span className="text-zinc-500">in progress…</span>}
               {a.payload?.type === 'mesh_update' && a.payload.face_count && (
                 <span className="text-emerald-400 font-mono">{a.payload.face_count.toLocaleString()} faces</span>
               )}
@@ -329,7 +333,8 @@ export default function ChatPanel(): JSX.Element {
   }, [runState.status, pendingWorkflow])
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth' })
+    // Instant while streaming: a smooth scroll per token never catches up.
+    endRef.current?.scrollIntoView({ behavior: isLoading ? 'auto' : 'smooth' })
   }, [messages, isLoading, pendingWorkflow])
 
   function buildContext(): Record<string, unknown> {
@@ -346,6 +351,8 @@ export default function ChatPanel(): JSX.Element {
   async function callAgent(msgs: Message[], extraContext: Record<string, unknown> = {}) {
     setIsLoading(true)
     setError(null)
+    const id = `a-${Date.now()}`
+    let finished = false
     try {
       const context = { ...buildContext(), ...extraContext }
 
@@ -365,7 +372,7 @@ export default function ChatPanel(): JSX.Element {
         delete context.workflowCompletion
       }
 
-      const res = await fetch(`${apiUrl}/agent/chat`, {
+      const res = await fetch(`${apiUrl}/agent/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -378,47 +385,92 @@ export default function ChatPanel(): JSX.Element {
           thinking: thinkingMode,
         }),
       })
-      if (!res.ok) throw new Error(`API error ${res.status}`)
+      if (!res.ok || !res.body) throw new Error(`API error ${res.status}`)
 
-      const data: { message: string; actions: ActionDone[]; thinking?: string } = await res.json()
+      // The assistant message appears with the first event and fills in as
+      // the rest stream in.
+      const patch = (update: (m: Message) => Message) => setMessages((prev) =>
+        prev.some((m) => m.id === id)
+          ? prev.map((m) => (m.id === id ? update(m) : m))
+          : [...prev, update({ id, role: 'assistant', content: '', streaming: true })],
+      )
 
-      setMessages((prev) => [...prev, {
-        id: `a-${Date.now()}`,
-        role: 'assistant',
-        content: data.message,
-        thinking: data.thinking ?? undefined,
-        actions: data.actions?.length ? data.actions : undefined,
-      }])
-
-      // Extract base64 from the most recent user message that had an image attached
-      const latestImageDataUrl = [...msgs].reverse()
-        .find((m) => m.role === 'user' && m.imageDataUrls?.length)
-        ?.imageDataUrls?.[0]
-      const overrideImageData = latestImageDataUrl ? latestImageDataUrl.split(',')[1] : undefined
-
-      for (const action of data.actions ?? []) {
-        if (action.payload?.type === 'mesh_update' && action.payload.url) {
-          updateCurrentJob({ outputUrl: action.payload.url })
-          pushMeshUrl(action.payload.url)
-        }
-        if (action.payload?.type === 'run_workflow' && action.payload.workflow_id) {
-          const wf = workflows.find((w) => w.id === action.payload!.workflow_id)
-          if (wf) { runWorkflow(wf, allExtensions, overrideImageData); setPendingWorkflow({ id: wf.id, name: wf.name }) }
-        }
-        if (action.payload?.type === 'create_workflow' && action.payload.workflow) {
-          const draft = action.payload.workflow as Omit<Workflow, 'id' | 'createdAt' | 'updatedAt'>
-          const now = new Date().toISOString()
-          const wf: Workflow = { ...draft, id: crypto.randomUUID(), createdAt: now, updatedAt: now }
-          const res = await saveWorkflow(wf)
-          if (res.success) setActiveWorkflow(wf.id)
+      for await (const event of readAgentEvents(res.body)) {
+        switch (event.type) {
+          case 'token':
+            patch((m) => ({ ...m, content: m.content + event.text }))
+            break
+          case 'thinking':
+            patch((m) => ({ ...m, thinking: (m.thinking ?? '') + event.text }))
+            break
+          case 'tool_start':
+            patch((m) => ({ ...m, actions: [...(m.actions ?? []), { id: event.id, tool: event.tool, result: '', running: true }] }))
+            break
+          case 'tool_done':
+            patch((m) => ({
+              ...m,
+              actions: (m.actions ?? []).map((a) => (a.id === event.id
+                ? { ...a, result: event.result, payload: event.payload, running: false }
+                : a)),
+            }))
+            await applyToolPayload(event.payload)
+            break
+          case 'done':
+            finished = true
+            patch((m) => ({
+              ...m,
+              // An error comes after whatever text had already streamed.
+              content: !m.content ? event.message : event.error ? `${m.content}\n\n${event.message}` : m.content,
+              thinking: event.thinking ?? m.thinking,
+              streaming: false,
+            }))
+            // Started only now: the local LLM frees its VRAM at the end of the
+            // turn, and the workflow needs the whole GPU.
+            for (const action of event.actions) startWorkflow(action.payload, msgs)
+            break
         }
       }
+      if (!finished) setError('The response was interrupted.')
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       setError(msg.includes('fetch') ? 'Cannot reach Modly API. Is the backend running?' : msg)
     } finally {
+      // Cut off before `done` (dropped connection, read error): settle the
+      // partial message so no tool stays "running" forever.
+      if (!finished) {
+        setMessages((prev) => prev.map((m) => (m.id === id
+          ? { ...m, streaming: false, actions: m.actions?.map((a) => ({ ...a, running: false })) }
+          : m)))
+      }
       setIsLoading(false)
     }
+  }
+
+  async function applyToolPayload(payload: AgentActionPayload | null) {
+    if (payload?.type === 'mesh_update' && payload.url) {
+      updateCurrentJob({ outputUrl: payload.url })
+      pushMeshUrl(payload.url)
+    }
+    if (payload?.type === 'create_workflow' && payload.workflow) {
+      const draft = payload.workflow as Omit<Workflow, 'id' | 'createdAt' | 'updatedAt'>
+      const now = new Date().toISOString()
+      const wf: Workflow = { ...draft, id: crypto.randomUUID(), createdAt: now, updatedAt: now }
+      const res = await saveWorkflow(wf)
+      if (res.success) setActiveWorkflow(wf.id)
+    }
+  }
+
+  function startWorkflow(payload: AgentActionPayload | null | undefined, msgs: Message[]) {
+    if (payload?.type !== 'run_workflow' || !payload.workflow_id) return
+    const wf = workflows.find((w) => w.id === payload.workflow_id)
+    if (!wf) return
+    // Extract base64 from the most recent user message that had an image attached
+    const latestImageDataUrl = [...msgs].reverse()
+      .find((m) => m.role === 'user' && m.imageDataUrls?.length)
+      ?.imageDataUrls?.[0]
+    const overrideImageData = latestImageDataUrl ? latestImageDataUrl.split(',')[1] : undefined
+    runWorkflow(wf, allExtensions, overrideImageData)
+    setPendingWorkflow({ id: wf.id, name: wf.name })
   }
 
   function handleFiles(files: File[]) {
@@ -549,11 +601,11 @@ export default function ChatPanel(): JSX.Element {
                 /* Assistant message */
                 <div className="flex flex-col gap-3">
                   {msg.thinking && <ThinkingBlock content={msg.thinking} />}
-                  <ProseMessage content={msg.content} />
+                  {msg.content && <ProseMessage content={msg.content} />}
                   {msg.actions && msg.actions.length > 0 && (
                     <ActionsCard actions={msg.actions} onUndo={undoMesh} />
                   )}
-                  <FeedbackRow content={msg.content} />
+                  {!msg.streaming && <FeedbackRow content={msg.content} />}
                 </div>
               )}
             </div>
@@ -562,8 +614,8 @@ export default function ChatPanel(): JSX.Element {
           {/* Workflow progress card — visible while agent waits for workflow */}
           {pendingWorkflow && <WorkflowProgressCard name={pendingWorkflow.name} />}
 
-          {/* Loading indicator */}
-          {isLoading && (
+          {/* Loading indicator — until the answer starts streaming */}
+          {isLoading && !messages.some((m) => m.streaming) && (
             <div className="flex gap-1 items-center py-1">
               {[0, 1, 2].map((i) => (
                 <span key={i}
