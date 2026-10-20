@@ -4,12 +4,12 @@ local llama.cpp server or any OpenAI-compatible provider.
 """
 import asyncio
 import json
-import re
 import uuid
 from typing import Optional
 
 import httpx
 from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from services import llm_server
@@ -634,19 +634,6 @@ class AgentChatResponse(BaseModel):
     thinking: str | None = None
 
 
-def _extract_thinking(msg: dict) -> tuple[str, str | None]:
-    """Return (clean_content, thinking_text). Handles llama-server's
-    reasoning_content field and inline <think> tags."""
-    content = msg.get("content") or ""
-    thinking = msg.get("reasoning_content") or None
-    if not thinking:
-        match = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
-        if match:
-            thinking = match.group(1).strip()
-            content = (content[: match.start()] + content[match.end() :]).strip()
-    return content, thinking
-
-
 def _auth_headers(base_url: str, api_key: Optional[str]) -> dict:
     headers: dict[str, str] = {}
     if api_key:
@@ -741,8 +728,198 @@ def _drop_images(messages: list[dict]) -> bool:
     return dropped
 
 
-@router.post("/chat", response_model=AgentChatResponse)
-async def agent_chat(request: AgentChatRequest):
+class _ThinkSplitter:
+    """Route inline <think>…</think> text to the reasoning, the rest to the
+    answer, holding back a tag a chunk boundary has cut in two."""
+
+    _OPEN, _CLOSE = "<think>", "</think>"
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._inside = False
+
+    def _held(self, *tags: str) -> int:
+        """Length of the buffer's tail that may be the start of a tag."""
+        return max(
+            next((n for n in range(len(tag) - 1, 0, -1) if self._buffer.endswith(tag[:n])), 0)
+            for tag in tags
+        )
+
+    def _cut(self, index: int, tag: str, kind: str, parts: list) -> None:
+        if index:
+            parts.append((kind, self._buffer[:index]))
+        self._buffer = self._buffer[index + len(tag):]
+
+    def feed(self, text: str) -> list[tuple[str, str]]:
+        self._buffer += text
+        parts: list[tuple[str, str]] = []
+        while self._buffer:
+            close_at = self._buffer.find(self._CLOSE)
+            if self._inside:
+                if close_at >= 0:
+                    self._cut(close_at, self._CLOSE, "thinking", parts)
+                    self._inside = False
+                    continue
+                keep = self._held(self._CLOSE)
+                kind = "thinking"
+            else:
+                open_at = self._buffer.find(self._OPEN)
+                if close_at >= 0 and (open_at < 0 or close_at < open_at):
+                    # A chat template that opens <think> in the prompt leaves the
+                    # model only the closing tag: what came before it was reasoning.
+                    self._cut(close_at, self._CLOSE, "thinking", parts)
+                    continue
+                if open_at >= 0:
+                    self._cut(open_at, self._OPEN, "token", parts)
+                    self._inside = True
+                    continue
+                keep = self._held(self._OPEN, self._CLOSE)
+                kind = "token"
+            if len(self._buffer) > keep:
+                parts.append((kind, self._buffer[: len(self._buffer) - keep]))
+                self._buffer = self._buffer[len(self._buffer) - keep:]
+            break
+        return parts
+
+    def flush(self) -> list[tuple[str, str]]:
+        rest, self._buffer = self._buffer, ""
+        return [("thinking" if self._inside else "token", rest)] if rest else []
+
+
+class _Round:
+    """One LLM call of the tool loop, assembled from its streamed deltas."""
+
+    def __init__(self, answered_before: bool, thought_before: bool) -> None:
+        self.raw = ""  # content as the model sent it, <think> tags included
+        self.answer = ""
+        self.thinking = ""
+        self.tool_calls: dict[int, dict] = {}
+        self._splitter = _ThinkSplitter()
+        self._answered_before = answered_before
+        self._thought_before = thought_before
+
+    def _text(self, kind: str, text: str) -> dict | None:
+        # Each round's text is stripped at its start, as the non-streamed
+        # answer was, and set apart from what earlier rounds already showed.
+        if kind == "token":
+            if not self.answer:
+                text = text.lstrip()
+                if not text:
+                    return None
+                self.answer = text
+                return {"type": "token", "text": ("\n\n" if self._answered_before else "") + text}
+            self.answer += text
+            return {"type": "token", "text": text}
+        if not self.thinking:
+            text = text.lstrip()
+            if not text:
+                return None
+            self.thinking = text
+            return {"type": "thinking", "text": ("\n\n---\n\n" if self._thought_before else "") + text}
+        self.thinking += text
+        return {"type": "thinking", "text": text}
+
+    def apply(self, delta: dict) -> list[dict]:
+        events = []
+        # llama-server sends reasoning_content; Ollama and OpenRouter, reasoning.
+        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+        if isinstance(reasoning, str) and reasoning:
+            events.append(self._text("thinking", reasoning))
+        content = delta.get("content")
+        if isinstance(content, str) and content:
+            self.raw += content
+            events.extend(self._text(kind, text) for kind, text in self._splitter.feed(content))
+        for position, fragment in enumerate(delta.get("tool_calls") or []):
+            # Streamed tool calls arrive in fragments keyed by index: the id and
+            # name come first, the JSON arguments in pieces after them.
+            call = self.tool_calls.setdefault(
+                fragment.get("index", position),
+                {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+            )
+            call["id"] = fragment.get("id") or call["id"]
+            function = fragment.get("function") or {}
+            call["function"]["name"] += function.get("name") or ""
+            arguments = function.get("arguments")
+            if isinstance(arguments, dict):
+                arguments = json.dumps(arguments)
+            call["function"]["arguments"] += arguments or ""
+        return [e for e in events if e]
+
+    def finish(self) -> list[dict]:
+        return [e for e in (self._text(k, t) for k, t in self._splitter.flush()) if e]
+
+    def calls(self) -> list[dict]:
+        calls = [self.tool_calls[i] for i in sorted(self.tool_calls)]
+        for call in calls:
+            # The tool result must answer the call's id; a few servers omit it.
+            call["id"] = call["id"] or f"call_{uuid.uuid4().hex[:8]}"
+        return calls
+
+
+async def _read_round(response: httpx.Response, round_: _Round):
+    """Yield the answer and reasoning of one LLM call as they stream in."""
+    if "text/event-stream" not in response.headers.get("content-type", ""):
+        # A server that ignored "stream": true answers in one JSON body.
+        message = json.loads(await response.aread())["choices"][0]["message"]
+        for event in round_.apply(message):
+            yield event
+    else:
+        async for line in response.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            data = line[len("data:"):].strip()
+            if data == "[DONE]":
+                break
+            try:
+                choices = json.loads(data).get("choices") or []
+            except ValueError:
+                continue
+            if choices:
+                for event in round_.apply(choices[0].get("delta") or {}):
+                    yield event
+    for event in round_.finish():
+        yield event
+
+
+def _done(message: str, actions: list[ActionDone], thinking: list[str], error: bool = False) -> dict:
+    return {
+        "type": "done",
+        "message": message,
+        "actions": [a.model_dump() for a in actions],
+        "thinking": "\n\n---\n\n".join(thinking) if thinking else None,
+        # The message reports a failure rather than answering: the chat shows
+        # it after whatever text already streamed.
+        "error": error,
+    }
+
+
+def _release_claimed(claim: asyncio.Future) -> None:
+    if not claim.cancelled() and claim.exception() is None:
+        claim.result().release()
+
+
+async def _claim_slot(model: str, spec: dict):
+    """Hold a local LLM slot, without leaking it if the caller is cancelled.
+
+    A streamed chat is cancelled when its client leaves, possibly while the
+    model is still loading. The loading thread can't be stopped and claims the
+    slot anyway; nobody would release it, and a held slot is never reaped.
+    """
+    claim = asyncio.ensure_future(asyncio.to_thread(llama_pool.ensure, model, spec, True))
+    try:
+        return await asyncio.shield(claim)
+    except asyncio.CancelledError:
+        claim.add_done_callback(_release_claimed)
+        raise
+
+
+async def _chat_events(request: AgentChatRequest):
+    """Run the tool loop, yielding its events as they happen.
+
+    token / thinking — answer and reasoning text, in pieces
+    tool_start / tool_done — around each tool call
+    done — always last: the final answer, every action and the full reasoning
+    """
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     # Inject scene context so the LLM knows current state
@@ -785,9 +962,10 @@ async def agent_chat(request: AgentChatRequest):
             spec = llm_server.resolve_model(request.model)
             # hold=True: the slot stays claimed for the whole loop, so neither the
             # idle reaper nor a model loading elsewhere can evict it mid-answer.
-            slot = await asyncio.to_thread(llama_pool.ensure, request.model, spec, True)
+            slot = await _claim_slot(request.model, spec)
         except Exception as e:
-            return AgentChatResponse(message=f"Could not start the local LLM: {e}")
+            yield _done(f"Could not start the local LLM: {e}", [], [], error=True)
+            return
         base_url = slot.base_url
         headers: dict = {}
         send_images = spec["vision"]
@@ -796,7 +974,8 @@ async def agent_chat(request: AgentChatRequest):
             extra["chat_template_kwargs"] = {"enable_thinking": False}
     else:
         if not request.provider.base_url:
-            return AgentChatResponse(message="No provider URL configured. Set one in Settings → Agent.")
+            yield _done("No provider URL configured. Set one in Settings → Agent.", [], [], error=True)
+            return
         base_url = request.provider.base_url.rstrip("/")
         headers = _auth_headers(base_url, request.provider.api_key)
 
@@ -805,52 +984,70 @@ async def agent_chat(request: AgentChatRequest):
 
     actions_done: list[ActionDone] = []
     all_thinking:  list[str]       = []
-    final: AgentChatResponse | None = None
+    final: str | None = None
+    error: str | None = None
+    answered = False
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            for _ in range(10):  # max tool-call rounds
-                r = await client.post(
-                    f"{base_url}/chat/completions",
-                    headers=headers,
-                    json={"model": request.model, "messages": messages, "tools": TOOLS, "stream": False, **extra},
-                )
-                # An external model's vision support is unknown up front, and a
-                # text-only one rejects image parts with a 400 that failed the
-                # whole turn. Retry once with the images described as omitted.
-                if r.status_code == 400 and request.provider.type != "local" and _drop_images(messages):
-                    r = await client.post(
+
+            async def post() -> httpx.Response:
+                return await client.send(
+                    client.build_request(
+                        "POST",
                         f"{base_url}/chat/completions",
                         headers=headers,
-                        json={"model": request.model, "messages": messages, "tools": TOOLS, "stream": False, **extra},
-                    )
+                        json={"model": request.model, "messages": messages, "tools": TOOLS, "stream": True, **extra},
+                    ),
+                    stream=True,
+                )
 
-                if r.status_code != 200:
-                    return AgentChatResponse(message=f"LLM error ({r.status_code}): {_error_detail(r)}")
+            for _ in range(10):  # max tool-call rounds
+                round_ = _Round(answered, bool(all_thinking))
+                r = await post()
+                try:
+                    # An external model's vision support is unknown up front, and a
+                    # text-only one rejects image parts with a 400 that failed the
+                    # whole turn. Retry once with the images described as omitted.
+                    if r.status_code == 400 and request.provider.type != "local" and _drop_images(messages):
+                        await r.aclose()
+                        r = await post()
 
-                msg = r.json()["choices"][0]["message"]
-                tool_calls = msg.get("tool_calls") or []
-                assistant: dict = {"role": "assistant", "content": msg.get("content") or ""}
+                    if r.status_code != 200:
+                        await r.aread()
+                        error = f"LLM error ({r.status_code}): {_error_detail(r)}"
+                        break
+
+                    async for event in _read_round(r, round_):
+                        yield event
+                finally:
+                    await r.aclose()
+
+                answered = answered or bool(round_.answer)
+                if round_.thinking:
+                    all_thinking.append(round_.thinking)
+                tool_calls = round_.calls()
+                assistant: dict = {"role": "assistant", "content": round_.raw}
                 if tool_calls:
                     assistant["tool_calls"] = tool_calls
                 messages.append(assistant)
 
-                clean_content, thinking_text = _extract_thinking(msg)
-                if thinking_text:
-                    all_thinking.append(thinking_text)
-
                 if not tool_calls:
-                    final = AgentChatResponse(message=clean_content, actions=actions_done)
+                    final = round_.answer.strip()
                     break
 
                 for tc in tool_calls:
                     fn = tc["function"]
-                    result_text, payload = await execute_tool(fn["name"], _tool_arguments(fn.get("arguments")), request.context)
+                    arguments = _tool_arguments(fn.get("arguments"))
+                    yield {"type": "tool_start", "id": tc["id"], "tool": fn["name"], "arguments": arguments}
+                    result_text, payload = await execute_tool(fn["name"], arguments, request.context)
                     actions_done.append(ActionDone(tool=fn["name"], result=result_text, payload=payload))
-                    messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result_text})
+                    yield {"type": "tool_done", "id": tc["id"], "tool": fn["name"], "result": result_text, "payload": payload}
+                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result_text})
     except httpx.HTTPError as e:
-        return AgentChatResponse(message=f"Could not reach the LLM at {base_url}: {e}", actions=actions_done)
+        error = f"Could not reach the LLM at {base_url}: {e}"
     finally:
+        # Also runs when the client disconnects mid-answer.
         if slot is not None:
             slot.release()
 
@@ -858,7 +1055,34 @@ async def agent_chat(request: AgentChatRequest):
     # still holding ours would keep the agent's own model on the GPU.
     await _unload_llm_after_workflow(request, actions_done)
 
-    if final is None:
-        final = AgentChatResponse(message="Reached maximum tool iterations.", actions=actions_done)
-    final.thinking = "\n\n---\n\n".join(all_thinking) if all_thinking else None
-    return final
+    if error is not None:
+        yield _done(error, actions_done, all_thinking, error=True)
+    elif final is None:
+        yield _done("Reached maximum tool iterations.", actions_done, all_thinking, error=True)
+    else:
+        yield _done(final, actions_done, all_thinking)
+
+
+@router.post("/chat", response_model=AgentChatResponse)
+async def agent_chat(request: AgentChatRequest):
+    """The whole turn at once, for callers that don't read a stream."""
+    done: dict = {}
+    async for event in _chat_events(request):
+        if event["type"] == "done":
+            done = event
+    return AgentChatResponse(message=done["message"], actions=done["actions"], thinking=done["thinking"])
+
+
+@router.post("/chat/stream")
+async def agent_chat_stream(request: AgentChatRequest):
+    """The same turn as Server-Sent Events, one JSON event per `data:` line."""
+
+    async def body():
+        async for event in _chat_events(request):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        body(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
