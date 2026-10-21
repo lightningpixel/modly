@@ -9,6 +9,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from services.extension_process import ExtensionProcess, _venv_python
+from services.artifact_input import validate_artifact_input
 
 
 def _make_proc() -> ExtensionProcess:
@@ -40,6 +41,27 @@ class ExtensionProcessTests(unittest.TestCase):
                 result = proc.generate_artifact("scene", manifest, {"quality": "high"})
             self.assertEqual(result, manifest)
             self.assertEqual(calls, [({"input": {"kind": "scene", "path": str(manifest.resolve())}}, {"quality": "high"})])
+
+    def test_generate_artifact_sends_canonical_video_without_image_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            video = workspace / "Workflows" / "clip.mp4"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2")
+            proc = _make_proc()
+            calls = []
+            proc._generate_request = lambda payload, params, progress, cancel: calls.append(payload) or video
+            queued = validate_artifact_input(workspace, "video", "Workflows/clip.mp4")
+            with patch("services.generator_registry.WORKSPACE_DIR", workspace):
+                proc.generate_artifact("video", video, {}, artifact_snapshot=queued.snapshot)
+            self.assertEqual(calls[0]["input"]["kind"], "video")
+            self.assertEqual(calls[0]["input"]["path"], str(video.resolve()))
+            self.assertEqual(calls[0]["input"]["snapshot"]["size"], len(video.read_bytes()))
+
+    def test_generate_artifact_requires_original_video_snapshot(self) -> None:
+        proc = _make_proc()
+        with self.assertRaisesRegex(ValueError, "snapshot"):
+            proc.generate_artifact("video", Path("clip.mp4"), {})
 
     def test_read_loop_writes_sentinel_to_own_queue_only(self) -> None:
         proc = _make_proc()

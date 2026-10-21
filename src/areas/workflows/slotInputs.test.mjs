@@ -46,6 +46,13 @@ test('an audio slot becomes the primary path', () => {
   assert.deepEqual(r.extraImagePaths, [])
 })
 
+test('a video slot in an inputs array becomes the primary path', () => {
+  const r = assignSlotFilePaths(['video', 'text'], ['clip.mp4', undefined])
+  assert.equal(r.nodeInputPath, 'clip.mp4')
+  assert.equal(r.nodeInputMeshPath, undefined)
+  assert.deepEqual(r.extraImagePaths, [])
+})
+
 test('text slots never claim a file path, and empty slots are skipped', () => {
   const r = assignSlotFilePaths(['text', 'image'], ['leaked.png', undefined])
   assert.equal(r.nodeInputPath, undefined)

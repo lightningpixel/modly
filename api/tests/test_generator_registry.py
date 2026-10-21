@@ -157,7 +157,7 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
         self.assertNotIn(str(extension.resolve()), sys.path)
 
     def test_scene_and_existing_custom_io_types_are_registered(self) -> None:
-        for extension_id, input_kind in (("scene-io", "scene"), ("capture-io", "capture"), ("video-io", "video")):
+        for extension_id, input_kind in (("scene-io", "scene"), ("capture-io", "capture")):
             extension = self._make_extension(extension_id)
             manifest = {
                 "id": extension_id, "name": extension_id, "type": "model",
@@ -176,7 +176,6 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
         self.registry.initialize()
         self.assertEqual(self.registry.get_manifest("scene-io/generate")["input"], "scene")
         self.assertEqual(self.registry.get_manifest("capture-io/generate")["input"], "capture")
-        self.assertEqual(self.registry.get_manifest("video-io/generate")["input"], "video")
 
     def test_scene_input_rejects_multi_input_shapes_but_image_multi_can_output_scene(self) -> None:
         cases = {
@@ -202,6 +201,34 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
         self.assertIn("scene-mixed/generate", self.registry.load_errors())
         self.assertIn("scene-array/generate", self.registry.load_errors())
         self.assertIn("images-scene/generate", self.registry._generators)
+
+    def test_existing_video_declarations_remain_discoverable(self) -> None:
+        cases = {
+            "video-io": {"input": "video", "output": "mesh"},
+            "video-array": {"input": "video", "inputs": ["video"], "output": "mesh"},
+            "video-mixed": {"input": "video", "inputs": ["video", "text"], "output": "mesh"},
+            "video-output": {"input": "image", "output": "video"},
+        }
+        for extension_id, node in cases.items():
+            extension = self._make_extension(extension_id)
+            (extension / "manifest.json").write_text(json.dumps({
+                "id": extension_id, "name": extension_id, "type": "model",
+                "generator_class": "TestGenerator",
+                "nodes": [{"id": "generate", **node}],
+            }), encoding="utf-8")
+            (extension / "generator.py").write_text(
+                "from services.generators.base import BaseGenerator\n"
+                "class TestGenerator(BaseGenerator):\n"
+                " def load(self): self._model = object()\n"
+                " def generate(self, value, params, progress_cb=None, cancel_event=None): return self.outputs_dir / 'result.glb'\n",
+                encoding="utf-8",
+            )
+
+        self.registry.initialize()
+        self.assertEqual(self.registry.get_manifest("video-io/generate")["input"], "video")
+        self.assertIn("video-array/generate", self.registry._generators)
+        self.assertIn("video-mixed/generate", self.registry._generators)
+        self.assertIn("video-output/generate", self.registry._generators)
 
     def test_declared_sources_block_generation_even_when_generator_overrides_readiness(self) -> None:
         extension = self._make_extension("multi-source")

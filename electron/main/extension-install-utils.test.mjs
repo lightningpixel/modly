@@ -136,6 +136,25 @@ test('scene is model-only, single-input, while image-multi to scene stays valid'
   }
 })
 
+test('video declarations remain backward compatible across model and process nodes', () => {
+  const mod = loadModule()
+  const modelFiles = { hasEntryFile: () => false, hasGeneratorFile: () => true }
+  const processFiles = { hasEntryFile: () => true, hasGeneratorFile: () => false }
+  for (const node of [
+    { id: 'scalar', input: 'video', output: 'mesh' },
+    { id: 'array', input: 'video', inputs: ['video'], output: 'mesh' },
+    { id: 'mixed', input: 'video', inputs: ['video', 'text'], output: 'mesh' },
+    { id: 'hidden', input: 'image', inputs: ['video'], output: 'mesh' },
+    { id: 'output', input: 'image', output: 'video' },
+  ]) {
+    assert.doesNotThrow(() => mod.validateInstallManifest({ id: 'model', generator_class: 'Generator', nodes: [node] }, modelFiles, 'repository'))
+  }
+  assert.doesNotThrow(() => mod.validateInstallManifest({
+    id: 'process', type: 'process', entry: 'processor.js',
+    nodes: [{ id: 'run', input: 'video', inputs: ['video', 'text'], output: 'video' }],
+  }, processFiles, 'repository'))
+})
+
 test('validateInstallManifest rejects malformed or process model_sources', () => {
   const mod = loadModule()
   const source = {
@@ -506,4 +525,3 @@ test('validateInstallManifest validates weight variants and keeps them off proce
     nodes: [{ id: 'run', hf_repo: 'org/model', weight_variants: weightVariants }],
   }, files, 'repository'), /weight_variants is supported only for model nodes/)
 })
-
