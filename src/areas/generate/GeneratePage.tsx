@@ -5,7 +5,7 @@ import type { GenerationJob, LightSettings, PointLight } from '@shared/stores/ap
 import { useApi } from '@shared/hooks/useApi'
 import { ColorPicker } from '@shared/components/ui'
 import GenerationHUD from './components/GenerationHUD'
-import Viewer3D from './components/Viewer3D'
+import Viewer3D, { type MeshExportFormat, type MeshExportHandler } from './components/Viewer3D'
 import WorkflowPanel from './components/WorkflowPanel'
 import { getDefaultAssetLibraryService } from './assetLibraryService'
 import { buildOrcaSlicerDeepLink, canOpenInOrcaSlicer } from './orcaSlicerLink'
@@ -680,6 +680,8 @@ export default function GeneratePage(): JSX.Element {
   const [selectedPointLightId, setSelectedPointLightId] = useState<string | null>(null)
   // Populated by Viewer3D — undoes the latest live gizmo transform, if any.
   const gizmoUndoRef = useRef<(() => boolean) | null>(null)
+  const gizmoResetRef = useRef<(() => boolean) | null>(null)
+  const meshExportRef = useRef<MeshExportHandler | null>(null)
 
   const lightSettings = useAppStore((s) => s.lightSettings)
   const setLightSettings = useAppStore((s) => s.setLightSettings)
@@ -762,18 +764,38 @@ export default function GeneratePage(): JSX.Element {
     setTimeout(() => setUnloadStatus('idle'), 2000)
   }
 
-  function handleExport(format: 'glb' | 'obj' | 'stl' | 'ply') {
+  async function handleExport(format: MeshExportFormat) {
     if (!currentJob?.outputUrl) return
     const stem = `modly-${Date.now()}`
     const link = document.createElement('a')
-    if (format === 'glb') {
-      link.href = `${apiUrl}${currentJob.outputUrl}`
-    } else {
-      const path = encodeURIComponent(currentJob.outputUrl.replace('/workspace/', ''))
-      link.href = `${apiUrl}/optimize/export?path=${path}&format=${format}`
+
+    try {
+      const transformedMesh = await meshExportRef.current?.(format)
+      if (transformedMesh) {
+        const objectUrl = URL.createObjectURL(transformedMesh)
+        link.href = objectUrl
+        link.download = `${stem}.${format}`
+        link.click()
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
+        return
+      }
+
+      // Gaussian splats are not mesh objects and continue through the existing
+      // source-file export path.
+      if (!/\.(ply|splat)(?:$|[?#])/i.test(currentJob.outputUrl)) {
+        throw new Error('The mesh viewer is still loading. Try exporting again once it appears.')
+      }
+      if (format === 'glb') {
+        link.href = `${apiUrl}${currentJob.outputUrl}`
+      } else {
+        const path = encodeURIComponent(currentJob.outputUrl.replace('/workspace/', ''))
+        link.href = `${apiUrl}/optimize/export?path=${path}&format=${format}`
+      }
+      link.download = `${stem}.${format}`
+      link.click()
+    } catch (err) {
+      showError(err instanceof Error ? err.message : String(err))
     }
-    link.download = `${stem}.${format}`
-    link.click()
   }
 
   async function handleOpenInOrcaSlicer() {
@@ -1100,7 +1122,7 @@ export default function GeneratePage(): JSX.Element {
                 </button>
                 {openPanel === 'export' && (
                   <ExportDropdown
-                    onExport={handleExport as (f: 'glb' | 'obj' | 'stl' | 'ply') => void}
+                    onExport={handleExport}
                     onClose={() => setOpenPanel(null)}
                     onOpenInSlicer={() => { void handleOpenInOrcaSlicer() }}
                     canOpenInSlicer={showOpenInSlicer}
@@ -1255,6 +1277,23 @@ export default function GeneratePage(): JSX.Element {
                   <path d="M3 21l7-7" />
                 </svg>
               </ToolButton>
+              {meshSelected && (
+                <>
+                  <span aria-hidden="true" className="mx-1 h-5 w-px bg-zinc-700" />
+                  <button
+                    type="button"
+                    onClick={() => { gizmoResetRef.current?.() }}
+                    title="Reset transform"
+                    aria-label="Reset transform"
+                    className="flex items-center justify-center w-7 h-7 rounded-lg border bg-zinc-800 border-zinc-700/50 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition-colors"
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+                      <path d="M3 12a9 9 0 1 0 2.64-6.36L3 8" />
+                      <polyline points="3 3 3 8 8 8" />
+                    </svg>
+                  </button>
+                </>
+              )}
             </>
           )}
         </div>
@@ -1265,6 +1304,8 @@ export default function GeneratePage(): JSX.Element {
             lightSettings={lightSettings}
             gizmoMode={gizmoMode}
             gizmoUndoRef={gizmoUndoRef}
+            gizmoResetRef={gizmoResetRef}
+            meshExportRef={meshExportRef}
             pointLights={pointLights}
             selectedPointLightId={selectedPointLightId}
             onSelectPointLight={handleSelectPointLight}
