@@ -86,16 +86,25 @@ def _request_json(
 
 
 def _download(url: str, dest: Path, *, timeout: float) -> int:
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp, dest.open("wb") as fh:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # Keep the previous export intact until the download has finished.
+        # A sibling temporary file allows replacement on the same filesystem.
+        with urllib.request.urlopen(url, timeout=timeout) as resp, tempfile.NamedTemporaryFile(
+            dir=dest.parent, prefix=".modly-download-", suffix=".tmp", delete=False
+        ) as fh:
+            temporary_path = Path(fh.name)
             total = 0
             while True:
                 chunk = resp.read(1024 * 1024)
                 if not chunk:
-                    return total
+                    break
                 fh.write(chunk)
                 total += len(chunk)
+        # Close the temporary file before replacing it, including on Windows.
+        os.replace(temporary_path, dest)
+        return total
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise ModlyCliError(f"HTTP {exc.code} while downloading {url}: {detail}", code=f"HTTP_{exc.code}", http_status=exc.code) from exc
@@ -103,6 +112,9 @@ def _download(url: str, dest: Path, *, timeout: float) -> int:
         raise ModlyCliError(f"Cannot download {url}: {exc.reason}", code="DOWNLOAD_FAILED") from exc
     except OSError as exc:
         raise ModlyCliError(f"Cannot write to {dest}: {exc}", code="WRITE_FAILED") from exc
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _multipart_form(fields: dict[str, str], file_field: str, file_path: Path) -> tuple[bytes, str]:
