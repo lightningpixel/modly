@@ -164,11 +164,11 @@ export function AgentSection(): JSX.Element {
     }
   }, [apiUrl])
 
-  async function installEngine() {
+  async function installEngine(repair = false) {
     setEngineInstall({ percent: 0, status: 'Starting…' })
     setEngineError(null)
     try {
-      await consumeSse(`${apiUrl}/llm/binary/install`, (e) => {
+      await consumeSse(`${apiUrl}/llm/binary/install${repair ? '?repair=true' : ''}`, (e) => {
         if (e.error) setEngineError(e.error)
         else setEngineInstall(e)
       })
@@ -277,6 +277,18 @@ export function AgentSection(): JSX.Element {
                       Install engine
                     </button>
                   )}
+                  {engineError && <p className="text-[11px] text-red-400">{engineError}</p>}
+                </Block>
+              )}
+              {engineInstalled === true && (
+                <Block
+                  label="Engine"
+                  description="Reinstall the llama.cpp build that matches this machine's GPU. Loaded models are stopped."
+                  action={!engineInstall && (
+                    <button onClick={() => void installEngine(true)} className={secondaryBtnCls}>Repair</button>
+                  )}
+                >
+                  {engineInstall && <SseProgressBar event={engineInstall} />}
                   {engineError && <p className="text-[11px] text-red-400">{engineError}</p>}
                 </Block>
               )}

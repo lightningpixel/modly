@@ -1,3 +1,4 @@
+import importlib.util
 import re
 import subprocess
 import sys
@@ -6,6 +7,7 @@ from pathlib import Path
 
 
 API_DIR = Path(__file__).resolve().parents[1]
+HAS_PYMESHLAB = importlib.util.find_spec("pymeshlab") is not None
 
 # Runs every mesh-op family on a holed box with networkx unimportable: it is
 # not in requirements.txt, so the shipped venv never has it, while a dev venv
@@ -44,6 +46,7 @@ print("ok")
 
 
 class MeshOpDependencyTests(unittest.TestCase):
+    @unittest.skipUnless(HAS_PYMESHLAB, "pymeshlab is not installed")
     def test_mesh_ops_run_without_undeclared_networkx(self) -> None:
         result = subprocess.run(
             [sys.executable, "-c", _SCRIPT],

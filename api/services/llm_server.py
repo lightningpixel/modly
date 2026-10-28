@@ -14,6 +14,7 @@ Nothing is hardcoded to a machine: the binary variant is picked per-platform
 models are chosen by the user from the catalog.
 """
 import contextlib
+import functools
 import hashlib
 import os
 import re
@@ -264,8 +265,18 @@ def binary_installed() -> bool:
     return binary_path().exists()
 
 
+@functools.lru_cache(maxsize=1)
 def has_nvidia_gpu() -> bool:
-    return shutil.which("nvidia-smi") is not None
+    # nvidia-smi.exe can sit on PATH with no NVIDIA driver/GPU behind it (left
+    # over from an old card or a tools install): it then exits non-zero, and
+    # picking the CUDA build would leave llama-server on CPU.
+    if shutil.which("nvidia-smi") is None:
+        return False
+    try:
+        r = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=10)
+    except Exception:
+        return False
+    return r.returncode == 0 and re.search(r"^GPU \d+:", r.stdout, re.MULTILINE) is not None
 
 
 # ─── Binary bootstrap ─────────────────────────────────────────────────────────
@@ -391,9 +402,11 @@ def _verify_digest(asset: dict, actual_sha256: str) -> None:
 _LIB_SUFFIXES = (".so", ".dylib", ".metal")
 
 
-def _extract_archive(tmp: Path, asset_name: str) -> int:
-    """Extract runtime files flat into BIN_DIR (exe/dll on Windows, bin/* + libs elsewhere)."""
-    BIN_DIR.mkdir(parents=True, exist_ok=True)
+def _extract_archive(tmp: Path, asset_name: str, dest_dir: Optional[Path] = None) -> int:
+    """Extract runtime files flat into dest_dir, BIN_DIR by default (exe/dll on
+    Windows, bin/* + libs elsewhere)."""
+    dest_dir = dest_dir or BIN_DIR
+    dest_dir.mkdir(parents=True, exist_ok=True)
     count = 0
 
     def wanted(member_path: str, fname_low: str) -> bool:
@@ -413,7 +426,7 @@ def _extract_archive(tmp: Path, asset_name: str) -> int:
                 src = tf.extractfile(m)
                 if src is None:
                     continue
-                dest = BIN_DIR / fname
+                dest = dest_dir / fname
                 with open(dest, "wb") as dst:
                     shutil.copyfileobj(src, dst)
                 if not fname.lower().endswith(_LIB_SUFFIXES):
@@ -428,7 +441,7 @@ def _extract_archive(tmp: Path, asset_name: str) -> int:
             fname = Path(item.filename).name
             if not fname or not wanted(item.filename, fname.lower()):
                 continue
-            dest = BIN_DIR / fname
+            dest = dest_dir / fname
             with zf.open(item) as src, open(dest, "wb") as dst:
                 shutil.copyfileobj(src, dst)
             if sys.platform != "win32" and not fname.lower().endswith(_LIB_SUFFIXES):
@@ -437,8 +450,42 @@ def _extract_archive(tmp: Path, asset_name: str) -> int:
     return count
 
 
-def install_binary(progress_cb: Callable[[dict], None], control_check: Callable[[], None]) -> None:
-    """Download and install the best llama-server build for this machine."""
+def _swap_bin_dir(staging: Path) -> None:
+    """Put the staged engine in place of BIN_DIR. Renames, not deletes, so a
+    locked file (a llama-server still exiting) fails before anything is lost."""
+    llama_pool.unload_all(force=True)
+    old = BIN_DIR.with_name(BIN_DIR.name + ".old")
+    shutil.rmtree(old, ignore_errors=True)
+    if BIN_DIR.exists():
+        for attempt in range(5):
+            try:
+                BIN_DIR.rename(old)
+                break
+            except OSError:
+                if attempt == 4:
+                    shutil.rmtree(staging, ignore_errors=True)
+                    raise RuntimeError(
+                        "The current engine is still in use. Stop the agent and try Repair again."
+                    )
+                time.sleep(1)
+    staging.rename(BIN_DIR)
+    shutil.rmtree(old, ignore_errors=True)
+
+
+def install_binary(
+    progress_cb: Callable[[dict], None],
+    control_check: Callable[[], None],
+    clean: bool = False,
+) -> None:
+    """Download and install the best llama-server build for this machine.
+
+    `clean` (repair) replaces an existing engine: the GPU is re-detected and the
+    new build is staged in a sibling dir, then swapped in, so a wrong build (e.g.
+    CUDA on an AMD machine) leaves none of its backend DLLs behind. The old engine
+    is only touched once the new one is fully extracted: a failed download, or a
+    file still locked by a llama-server, keeps the working install."""
+    if clean:
+        has_nvidia_gpu.cache_clear()
     progress_cb({"status": "Fetching latest llama.cpp release…", "percent": 0})
     release = _fetch_release()
     progress_cb({"status": f"Release {release['tag_name']} — selecting build for this machine…", "percent": 1})
@@ -447,13 +494,24 @@ def install_binary(progress_cb: Callable[[dict], None], control_check: Callable[
     if not assets:
         raise RuntimeError("No compatible llama.cpp build found for this platform.")
 
-    for i, asset in enumerate(assets):
-        label = "engine" if i == 0 else "CUDA runtime"
-        tmp = _download_asset(asset, progress_cb, control_check, label)
-        try:
-            count = _extract_archive(tmp, asset["name"])
-            progress_cb({"status": f"Extracted {count} files from {asset['name']}"})
-        finally:
+    downloaded: list[tuple[Path, str]] = []
+    try:
+        for i, asset in enumerate(assets):
+            label = "engine" if i == 0 else "CUDA runtime"
+            downloaded.append((_download_asset(asset, progress_cb, control_check, label), asset["name"]))
+
+        staging = BIN_DIR.with_name(BIN_DIR.name + ".new") if clean else BIN_DIR
+        if clean:
+            shutil.rmtree(staging, ignore_errors=True)
+        for tmp, name in downloaded:
+            count = _extract_archive(tmp, name, staging)
+            progress_cb({"status": f"Extracted {count} files from {name}"})
+
+        if clean:
+            progress_cb({"status": "Replacing the previous engine…"})
+            _swap_bin_dir(staging)
+    finally:
+        for tmp, _ in downloaded:
             tmp.unlink(missing_ok=True)
 
     if not binary_installed():
