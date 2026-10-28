@@ -200,5 +200,164 @@ class WorkflowRunJobLifecycleTests(unittest.TestCase):
         self.assertEqual(fake_registry.active_id, "demo/generate")
 
 
+class _FakeProc:
+    """Stands in for a loaded extension worker's subprocess."""
+
+    def __init__(self) -> None:
+        self.killed = False
+
+    def poll(self):
+        return -9 if self.killed else None
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+class _FakeWorker:
+    """A loaded generator with a live subprocess, as _run_generation binds it."""
+
+    def __init__(self) -> None:
+        self._proc = _FakeProc()
+        self._loaded = True
+        self.outputs_dir = None
+
+    def generate(self, image_bytes, params, progress_cb, cancel_event=None):
+        output = Path(self.outputs_dir) / "result.glb"
+        output.write_bytes(b"glb")
+        return output
+
+
+class _FailingWorker(_FakeWorker):
+    def generate(self, image_bytes, params, progress_cb, cancel_event=None):
+        raise RuntimeError("inference failed")
+
+
+class _RegistryWithLoadedWorker:
+    """Keeps one worker loaded and active, the state the worker is left in
+    after a job ends normally."""
+
+    def __init__(self, worker: _FakeWorker) -> None:
+        self.worker = worker
+        self._generators = {"ext/model": worker}
+        self._active_id = "ext/model"
+
+    def assert_weight_variant_installed(self, params, model_id) -> None:
+        pass
+
+    def get_generator(self, model_id: str):
+        return self.worker
+
+    def model_status(self, model_id: str) -> dict:
+        return {"name": model_id, "downloaded": True, "loaded": True}
+
+    def activate_ready_generator(self, model_id: str):
+        return self.worker
+
+
+class CancelEndedJobTests(unittest.TestCase):
+    """cancel_job kills the subprocess bound to the job in _job_generators so
+    inference stops at once. Once the job has ended, that binding is gone and
+    the worker holds the warm model (or another job's generation), so a late
+    cancel of the ended job/run must leave the worker alone."""
+
+    def setUp(self) -> None:
+        self._prev_generation_registry = generation.generator_registry
+        self._prev_runs_registry = workflow_runs.generator_registry
+        self._prev_workspace = registry_module.WORKSPACE_DIR
+        self._tmp = tempfile.TemporaryDirectory()
+        registry_module.WORKSPACE_DIR = Path(self._tmp.name)
+        _clear_job_stores()
+
+    def tearDown(self) -> None:
+        generation.generator_registry = self._prev_generation_registry
+        workflow_runs.generator_registry = self._prev_runs_registry
+        registry_module.WORKSPACE_DIR = self._prev_workspace
+        self._tmp.cleanup()
+        _clear_job_stores()
+
+    def _use_worker(self, worker: _FakeWorker) -> _FakeWorker:
+        registry = _RegistryWithLoadedWorker(worker)
+        generation.generator_registry = registry
+        workflow_runs.generator_registry = registry
+        return worker
+
+    def _file_job(self, job_id: str, status: str = "pending") -> None:
+        generation._jobs[job_id] = JobStatus(job_id=job_id, status=status, progress=0)
+        generation._cancel_events[job_id] = threading.Event()
+
+    def _run_to_end(self, job_id: str) -> None:
+        self._file_job(job_id)
+        asyncio.run(generation._run_generation(job_id, b"img", {}, "Default", "mesh", "ext/model"))
+        # The job's generator binding is released as soon as it ends.
+        self.assertNotIn(job_id, generation._job_generators)
+
+    def _assert_worker_untouched(self, worker: _FakeWorker, proc: _FakeProc) -> None:
+        self.assertFalse(proc.killed)
+        self.assertIs(worker._proc, proc)
+        self.assertTrue(worker._loaded)
+
+    def _assert_worker_stopped(self, worker: _FakeWorker, proc: _FakeProc) -> None:
+        self.assertTrue(proc.killed)
+        self.assertIsNone(worker._proc)
+        self.assertFalse(worker._loaded)
+
+    def test_cancelling_a_finished_job_leaves_the_active_worker_alone(self) -> None:
+        worker = self._use_worker(_FakeWorker())
+        proc = worker._proc
+        self._run_to_end("finished-job")
+        self.assertEqual(generation._jobs["finished-job"].status, "done")
+
+        asyncio.run(generation.cancel_job("finished-job"))
+
+        self.assertEqual(generation._jobs["finished-job"].status, "done")
+        self._assert_worker_untouched(worker, proc)
+
+    def test_cancelling_a_failed_run_leaves_the_active_worker_alone(self) -> None:
+        worker = self._use_worker(_FailingWorker())
+        proc = worker._proc
+        self._run_to_end("failed-run")
+        self.assertEqual(generation._jobs["failed-run"].status, "error")
+
+        asyncio.run(workflow_runs.cancel_run("failed-run"))
+
+        self.assertEqual(generation._jobs["failed-run"].status, "error")
+        self._assert_worker_untouched(worker, proc)
+
+    def test_cancelling_an_ended_job_leaves_another_jobs_worker_alone(self) -> None:
+        worker = self._use_worker(_FakeWorker())
+        proc = worker._proc
+        self._run_to_end("finished-job")
+        # A later job now owns the same worker.
+        self._file_job("running-job", "running")
+        generation._job_generators["running-job"] = worker
+
+        asyncio.run(generation.cancel_job("finished-job"))
+
+        self.assertEqual(generation._jobs["running-job"].status, "running")
+        self._assert_worker_untouched(worker, proc)
+
+    def test_cancelling_a_running_job_still_stops_the_worker(self) -> None:
+        worker = self._use_worker(_FakeWorker())
+        proc = worker._proc
+        self._file_job("running-job", "running")
+        generation._job_generators["running-job"] = worker
+
+        asyncio.run(generation.cancel_job("running-job"))
+
+        self.assertEqual(generation._jobs["running-job"].status, "cancelled")
+        self._assert_worker_stopped(worker, proc)
+
+    def test_cancelling_a_running_run_still_stops_the_worker(self) -> None:
+        worker = self._use_worker(_FakeWorker())
+        proc = worker._proc
+        self._file_job("running-run", "running")
+        generation._job_generators["running-run"] = worker
+
+        asyncio.run(workflow_runs.cancel_run("running-run"))
+
+        self.assertEqual(generation._jobs["running-run"].status, "cancelled")
+        self._assert_worker_stopped(worker, proc)
+
+
 if __name__ == "__main__":
     unittest.main()
