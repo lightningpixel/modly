@@ -38,6 +38,10 @@ from services.model_sources import (
     weight_group_sources_are_downloaded,
 )
 
+# Model pairs that stay loaded together when the active model switches between them (a mesh -> texture
+# pipeline would otherwise unload and reload both models on every asset).
+_KEEP_RESIDENT_PAIRS = [{"triposg/generate", "trellis2/refine"}]
+
 # ------------------------------------------------------------------ #
 # Global paths
 # ------------------------------------------------------------------ #
@@ -904,7 +908,10 @@ class GeneratorRegistry:
                 llama_pool.unload_all()
 
             if model_id != self._active_id:
-                if self._active_id in self._generators:
+                # Keep the geometry model and the texture model resident together instead of unloading
+                # the previous one on every switch (see _KEEP_RESIDENT_PAIRS).
+                if (self._active_id in self._generators
+                        and {self._active_id, model_id} not in _KEEP_RESIDENT_PAIRS):
                     self._generators[self._active_id].unload()
                 self._active_id = model_id
 
