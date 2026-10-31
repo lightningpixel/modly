@@ -494,6 +494,39 @@ class ServeConfigTests(unittest.TestCase):
                 found = agent._default_python(api_dir, {"dependenciesDir": str(Path(td) / "deps")})
             self.assertEqual(found, deps_python)
 
+    def test_default_python_prefers_app_venv_over_api_dev_venv(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            api_dir = Path(td) / "api"
+            dev_python = api_dir / ".venv" / "Scripts" / "python.exe"
+            dev_python.parent.mkdir(parents=True)
+            dev_python.write_text("# python")
+            deps_python = Path(td) / "deps" / "venv" / "Scripts" / "python.exe"
+            deps_python.parent.mkdir(parents=True)
+            deps_python.write_text("# python")
+            with patch.object(agent, "_windows_env_paths", return_value=[]):
+                found = agent._default_python(api_dir, {"dependenciesDir": str(Path(td) / "deps")})
+                fallback = agent._default_python(api_dir, {})
+            self.assertEqual(found, deps_python)
+            self.assertEqual(fallback, dev_python)
+
+    def test_resolve_serve_config_drops_callers_python_env(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            api_dir = Path(td) / "api"
+            api_dir.mkdir()
+            (api_dir / "main.py").write_text("# api")
+            python = Path(td) / "python.exe"
+            python.write_text("# python")
+            args = SimpleNamespace(api_dir=str(api_dir), python=str(python), host="127.0.0.1", port=8765,
+                                   models_dir=None, workspace_dir=None, extensions_dir=None, model=None, hf_token=None)
+            foreign = {"PYTHONHOME": "C:/conda", "PYTHONPATH": "C:/elsewhere", "VIRTUAL_ENV": "C:/venv",
+                       "CONDA_PREFIX": "C:/conda", "PIP_USER": "1"}
+            with patch.dict(os.environ, foreign), \
+                    patch.object(agent, "_load_modly_settings", return_value={}):
+                _api_dir, _python, env, _cmd, _url = agent._resolve_serve_config(args)
+            for key in foreign:
+                self.assertNotIn(key, env)
+            self.assertIn("PATH", env)
+
     def test_resolve_serve_config_matches_desktop_env(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             api_dir = Path(td) / "resources" / "api"

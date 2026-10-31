@@ -284,10 +284,8 @@ def _default_api_dir() -> Path | None:
 
 
 def _default_python(api_dir: Path, settings: dict[str, Any] | None = None) -> Path | None:
-    candidates = [
-        api_dir / ".venv" / "Scripts" / "python.exe",
-        api_dir / ".venv" / "bin" / "python",
-    ]
+    # Same order as the Electron PythonBridge: the app's venv first, the api's dev .venv as fallback.
+    candidates: list[Path] = []
     # The desktop app can keep its dependencies on another drive (Settings > dependenciesDir).
     deps_dir = (settings or {}).get("dependenciesDir")
     if deps_dir:
@@ -295,6 +293,8 @@ def _default_python(api_dir: Path, settings: dict[str, Any] | None = None) -> Pa
         candidates.append(Path(deps_dir) / "venv" / "bin" / "python")
     for appdata in _windows_env_paths("APPDATA"):
         candidates.append(appdata / "Modly" / "dependencies" / "venv" / "Scripts" / "python.exe")
+    candidates.append(api_dir / ".venv" / "Scripts" / "python.exe")
+    candidates.append(api_dir / ".venv" / "bin" / "python")
     candidates.append(Path(sys.executable))
     for candidate in candidates:
         if candidate.exists():
@@ -317,6 +317,13 @@ def _load_modly_settings() -> dict[str, Any]:
     return {}
 
 
+_FOREIGN_PYTHON_ENV = (
+    "PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONUSERBASE",
+    "PIP_USER", "PIP_TARGET", "PIP_PREFIX", "PIP_REQUIRE_VIRTUALENV",
+    "VIRTUAL_ENV", "CONDA_PREFIX",
+)
+
+
 def _resolve_serve_config(args: argparse.Namespace) -> tuple[Path, Path, dict[str, str], list[str], str]:
     api_dir = Path(args.api_dir).expanduser().resolve() if getattr(args, "api_dir", None) else _default_api_dir()
     if not api_dir or not (api_dir / "main.py").exists():
@@ -327,8 +334,10 @@ def _resolve_serve_config(args: argparse.Namespace) -> tuple[Path, Path, dict[st
     if not python or not python.exists():
         raise ModlyCliError("Could not find Modly Python environment; pass --python")
 
-    env = os.environ.copy()
-    hf_token = getattr(args, "hf_token", None) or settings.get("hfToken") or os.environ.get("HF_TOKEN", "")
+    # Like Electron's cleanPythonEnv(): variables from the caller's own Python setup (a conda env,
+    # an activated venv) would point Modly's venv interpreter at foreign site-packages.
+    env = {k: v for k, v in os.environ.items() if k not in _FOREIGN_PYTHON_ENV}
+    hf_token =getattr(args, "hf_token", None) or settings.get("hfToken") or os.environ.get("HF_TOKEN", "")
     env.update({
         "PYTHONUNBUFFERED": "1",
         "MODELS_DIR": getattr(args, "models_dir", None) or settings.get("modelsDir") or str(Path.home() / ".modly" / "models"),
