@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import services.generator_registry as registry_module
 from services.extension_process import ExtensionProcess
@@ -890,6 +891,75 @@ class GeneratorRegistryLockTests(unittest.TestCase):
         self.assertEqual([m["id"] for m in results["all"]], ["demo/generate"])
         self.assertEqual(results["params"], [{"id": "steps"}])
         self.assertFalse(results["model"]["loaded"])
+
+
+class _FakeGenerator:
+    def __init__(self) -> None:
+        self.loaded = True
+
+    def is_loaded(self) -> bool:
+        return self.loaded
+
+    def unload(self) -> None:
+        self.loaded = False
+
+
+class KeepResidentPairTests(unittest.TestCase):
+    GEOMETRY = "triposg/generate"
+    TEXTURE = "trellis2/refine"
+    OTHER = "other/generate"
+
+    def setUp(self) -> None:
+        self.registry = GeneratorRegistry()
+        self.gens = {model_id: _FakeGenerator() for model_id in (self.GEOMETRY, self.TEXTURE, self.OTHER)}
+        self.registry._generators = dict(self.gens)
+        self.registry._active_id = self.GEOMETRY
+        self.gens[self.TEXTURE].loaded = False
+        self.gens[self.OTHER].loaded = False
+        patches = [
+            mock.patch("services.llm_server.llama_pool.unload_all"),
+            mock.patch("services.llm_server.detect_vram_gb", return_value=23.9),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _switch_and_load(self, model_id: str) -> None:
+        self.registry.switch_model(model_id)
+        self.gens[model_id].loaded = True
+
+    def _loaded(self) -> set:
+        return {model_id for model_id, gen in self.gens.items() if gen.loaded}
+
+    def test_pair_stays_loaded_when_switching_inside_it(self) -> None:
+        self._switch_and_load(self.TEXTURE)
+        self._switch_and_load(self.GEOMETRY)
+
+        self.assertEqual(self._loaded(), {self.GEOMETRY, self.TEXTURE})
+
+    def test_leaving_the_pair_unloads_both_models(self) -> None:
+        self._switch_and_load(self.TEXTURE)
+        self._switch_and_load(self.OTHER)
+
+        self.assertEqual(self._loaded(), {self.OTHER})
+
+    def test_pair_is_not_kept_when_vram_is_too_small(self) -> None:
+        with mock.patch("services.llm_server.detect_vram_gb", return_value=11.9):
+            self._switch_and_load(self.TEXTURE)
+
+        self.assertEqual(self._loaded(), {self.TEXTURE})
+
+    def test_pair_is_not_kept_when_vram_is_unknown(self) -> None:
+        with mock.patch("services.llm_server.detect_vram_gb", return_value=0.0):
+            self._switch_and_load(self.TEXTURE)
+
+        self.assertEqual(self._loaded(), {self.TEXTURE})
+
+    def test_pair_is_not_kept_on_a_16_gb_card(self) -> None:
+        with mock.patch("services.llm_server.detect_vram_gb", return_value=15.9):
+            self._switch_and_load(self.TEXTURE)
+
+        self.assertEqual(self._loaded(), {self.TEXTURE})
 
 
 if __name__ == "__main__":
