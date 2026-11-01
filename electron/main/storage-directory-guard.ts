@@ -1,7 +1,14 @@
 /** Fail-closed validation for settings-driven directory moves and deletions. */
-import { cp, lstat, mkdir, readdir, rm, rmdir } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { cp, lstat, mkdir, readdir, rename, rm, rmdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
+
+/** Top-level Windows folders owned by the OS, refused on any drive. */
+const WINDOWS_SYSTEM_DIRS = new Set([
+  'windows', 'program files', 'program files (x86)', 'programdata', 'users',
+  'perflogs', 'recovery', '$recycle.bin', 'system volume information',
+])
 
 type StorageDirs = {
   modelsDir: string
@@ -38,10 +45,15 @@ function absoluteDirectory(value: string, api: PathApi): string {
   if (resolved === api.parse(resolved).root) {
     throw new Error('Refusing a filesystem or volume root')
   }
-  // Never recursively delete a bare top-level user folder, even if configured.
   const pieces = resolved.slice(api.parse(resolved).root.length).split(api.sep).filter(Boolean)
-  if (pieces.length < 2) {
-    throw new Error('Storage directory must be at least two levels below its volume root')
+  // POSIX top-level folders (/home, /usr, /mnt, /Volumes…) all belong to the system.
+  if (api === path.posix && pieces.length < 2) {
+    throw new Error('Storage directory must be at least two levels below the filesystem root')
+  }
+  // On Windows a top-level folder on a data drive (D:\Models) is a normal choice;
+  // only the well-known system folders are refused.
+  if (api === path.win32 && pieces.length === 1 && WINDOWS_SYSTEM_DIRS.has(pieces[0].toLowerCase())) {
+    throw new Error('Refusing a Windows system folder')
   }
   return resolved
 }
@@ -146,8 +158,8 @@ export function validateStorageMove(
 }
 
 /** Reject symlinks or Windows junctions in existing path ancestors. */
-export async function assertNoSymlinkAncestors(directory: string): Promise<void> {
-  const api = process.platform === 'win32' ? path.win32 : path.posix
+export async function assertNoSymlinkAncestors(directory: string, options: Options = {}): Promise<void> {
+  const api = pathApi(options)
   const root = api.parse(directory).root
   let current = root
   for (const part of directory.slice(root.length).split(api.sep).filter(Boolean)) {
@@ -178,30 +190,40 @@ export async function deleteStorageDirectory(
   directory: string, dirs: StorageDirs, userData: string, options: Options = {},
 ): Promise<void> {
   const safe = validateStorageDeletion(directory, dirs, userData, options)
-  await assertNoSymlinkAncestors(safe)
+  await assertNoSymlinkAncestors(safe, options)
   await rm(safe, { recursive: true, force: true })
 }
 
 export async function moveStorageDirectory(
   source: string, destination: string, dirs: StorageDirs, userData: string, options: Options = {},
 ): Promise<void> {
-  const paths = validateStorageMove(source, destination, dirs, userData, options)
-  await assertNoSymlinkAncestors(paths.src)
-  await assertNoSymlinkAncestors(paths.dest)
-  await assertEmptyDestination(paths.dest)
-  // fs.cp with errorOnExist refuses even an EMPTY existing directory. Remove
-  // only the verified-empty destination, never the source, before copying.
-  // rmdir itself fails closed if a concurrent writer adds a file.
+  const api = pathApi(options)
+  const { src, dest } = validateStorageMove(source, destination, dirs, userData, options)
+  await assertNoSymlinkAncestors(src, options)
+  await assertNoSymlinkAncestors(dest, options)
+  await assertEmptyDestination(dest)
+
+  const parent = api.dirname(dest)
+  await mkdir(parent, { recursive: true })
+  // Copy into a fresh sibling folder that only this call writes to: a failed
+  // copy can then be discarded without touching the source or the destination,
+  // and a retry does not trip over a half-filled destination.
+  const staging = api.join(parent, '.' + api.basename(dest) + '.modly-move-' + randomUUID())
   try {
-    await rmdir(paths.dest)
+    await cp(src, staging, { recursive: true, force: false, errorOnExist: true })
+    // Remove the verified-empty destination; rmdir fails closed if a file appeared.
+    try {
+      await rmdir(dest)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+    }
+    await rename(staging, dest)
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+    await rm(staging, { recursive: true, force: true })
+    throw err
   }
-  await mkdir(path.dirname(paths.dest), { recursive: true })
-  // With a missing destination, errorOnExist protects against unexpected files.
-  await cp(paths.src, paths.dest, { recursive: true, force: false, errorOnExist: true })
-  // Re-validate before deleting the source. Never delete it after a copy error.
-  validateStorageMove(paths.src, paths.dest, dirs, userData, options)
-  await assertNoSymlinkAncestors(paths.src)
-  await rm(paths.src, { recursive: true, force: true })
+
+  // The source is deleted only once its complete copy sits at the destination.
+  await assertNoSymlinkAncestors(src, options)
+  await rm(src, { recursive: true, force: true })
 }

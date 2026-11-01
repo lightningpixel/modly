@@ -3,7 +3,7 @@ import { Section, Card, Row, PathRow } from '@shared/ui'
 
 // ─── MoveFolderModal ──────────────────────────────────────────────────────────
 
-function MoveFolderModal({ title, currentDir, items, itemLabel, moveLabel, moveDesc, deleteLabel, deleteDesc, status, onCancel, onMove, onDelete }: {
+function MoveFolderModal({ title, currentDir, items, itemLabel, moveLabel, moveDesc, deleteLabel, deleteDesc, status, error, onCancel, onMove, onDelete }: {
   title: string
   currentDir: string
   items: string[]
@@ -13,6 +13,7 @@ function MoveFolderModal({ title, currentDir, items, itemLabel, moveLabel, moveD
   deleteLabel: string
   deleteDesc: string
   status: 'idle' | 'busy' | 'error'
+  error?: string | null
   onCancel: () => void
   onMove: () => void
   onDelete: () => void
@@ -34,7 +35,7 @@ function MoveFolderModal({ title, currentDir, items, itemLabel, moveLabel, moveD
 
         <div className="px-6 pb-5 flex flex-col gap-2">
           {status === 'error' && (
-            <p className="text-[11px] text-red-400 mb-0.5">Something went wrong. Please try again.</p>
+            <p className="text-[11px] text-red-400 mb-0.5 break-words">{error || 'Something went wrong. Please try again.'}</p>
           )}
 
           <button
@@ -79,14 +80,17 @@ export function StorageSection(): JSX.Element {
 
   const [pendingModelsDir,     setPendingModelsDir]     = useState<string | null>(null)
   const [existingModels,       setExistingModels]       = useState<string[]>([])
+  const [modelsActionError,  setModelsActionError]  = useState<string | null>(null)
   const [modelsActionStatus,   setModelsActionStatus]   = useState<'idle' | 'busy' | 'error'>('idle')
 
   const [pendingWorkspaceDir,   setPendingWorkspaceDir]   = useState<string | null>(null)
   const [existingWorkspaces,    setExistingWorkspaces]    = useState<string[]>([])
+  const [workspaceActionError,  setWorkspaceActionError]  = useState<string | null>(null)
   const [workspaceActionStatus, setWorkspaceActionStatus] = useState<'idle' | 'busy' | 'error'>('idle')
 
   const [pendingWorkflowsDir,   setPendingWorkflowsDir]   = useState<string | null>(null)
   const [existingWorkflows,     setExistingWorkflows]     = useState<string[]>([])
+  const [workflowsActionError,  setWorkflowsActionError]  = useState<string | null>(null)
   const [workflowsActionStatus, setWorkflowsActionStatus] = useState<'idle' | 'busy' | 'error'>('idle')
 
   useEffect(() => {
@@ -164,6 +168,7 @@ export function StorageSection(): JSX.Element {
       await applyModelsDir(pendingModelsDir)
       closeModelsModal()
     } else {
+      setModelsActionError(result.error ?? null)
       setModelsActionStatus('error')
     }
   }
@@ -176,6 +181,7 @@ export function StorageSection(): JSX.Element {
       await applyModelsDir(pendingModelsDir)
       closeModelsModal()
     } else {
+      setModelsActionError(result.error ?? null)
       setModelsActionStatus('error')
     }
   }
@@ -183,6 +189,7 @@ export function StorageSection(): JSX.Element {
   function closeModelsModal() {
     setPendingModelsDir(null)
     setExistingModels([])
+    setModelsActionError(null)
     setModelsActionStatus('idle')
   }
 
@@ -194,6 +201,7 @@ export function StorageSection(): JSX.Element {
       await applyWorkspaceDir(pendingWorkspaceDir)
       closeWorkspaceModal()
     } else {
+      setWorkspaceActionError(result.error ?? null)
       setWorkspaceActionStatus('error')
     }
   }
@@ -206,6 +214,7 @@ export function StorageSection(): JSX.Element {
       await applyWorkspaceDir(pendingWorkspaceDir)
       closeWorkspaceModal()
     } else {
+      setWorkspaceActionError(result.error ?? null)
       setWorkspaceActionStatus('error')
     }
   }
@@ -213,6 +222,7 @@ export function StorageSection(): JSX.Element {
   function closeWorkspaceModal() {
     setPendingWorkspaceDir(null)
     setExistingWorkspaces([])
+    setWorkspaceActionError(null)
     setWorkspaceActionStatus('idle')
   }
 
@@ -224,6 +234,7 @@ export function StorageSection(): JSX.Element {
       await applyWorkflowsDir(pendingWorkflowsDir)
       closeWorkflowsModal()
     } else {
+      setWorkflowsActionError(result.error ?? null)
       setWorkflowsActionStatus('error')
     }
   }
@@ -236,6 +247,7 @@ export function StorageSection(): JSX.Element {
       await applyWorkflowsDir(pendingWorkflowsDir)
       closeWorkflowsModal()
     } else {
+      setWorkflowsActionError(result.error ?? null)
       setWorkflowsActionStatus('error')
     }
   }
@@ -243,6 +255,7 @@ export function StorageSection(): JSX.Element {
   function closeWorkflowsModal() {
     setPendingWorkflowsDir(null)
     setExistingWorkflows([])
+    setWorkflowsActionError(null)
     setWorkflowsActionStatus('idle')
   }
 
@@ -311,6 +324,7 @@ export function StorageSection(): JSX.Element {
           deleteLabel="Delete models"
           deleteDesc="Remove from current folder. You'll need to re-download."
           status={modelsActionStatus}
+          error={modelsActionError}
           onCancel={closeModelsModal}
           onMove={handleMoveModels}
           onDelete={handleDeleteModels}
@@ -328,6 +342,7 @@ export function StorageSection(): JSX.Element {
           deleteLabel="Delete workspace files"
           deleteDesc="Remove all files from the current folder."
           status={workspaceActionStatus}
+          error={workspaceActionError}
           onCancel={closeWorkspaceModal}
           onMove={handleMoveWorkspace}
           onDelete={handleDeleteWorkspace}
@@ -345,6 +360,7 @@ export function StorageSection(): JSX.Element {
           deleteLabel="Delete workflows"
           deleteDesc="Remove all workflow files from the current folder."
           status={workflowsActionStatus}
+          error={workflowsActionError}
           onCancel={closeWorkflowsModal}
           onMove={handleMoveWorkflows}
           onDelete={handleDeleteWorkflows}

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtemp, mkdir, rm, symlink, writeFile, readFile, access } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, symlink, writeFile, readFile, access, readdir, realpath, chmod } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -24,6 +24,12 @@ const home = 'C:\\Users\\Tester'
 const userData = 'C:\\Users\\Tester\\AppData\\Roaming\\modly'
 const opts = { platform: 'win32' as const, homeDir: home, appDir: 'C:\\Program Files\\Modly\\resources\\app.asar' }
 
+// realpath: on macOS tmpdir() lives under /var, itself a symlink to /private/var,
+// which the symlink-ancestor guard would (rightly) refuse.
+async function tempBase(prefix: string): Promise<string> {
+  return mkdtemp(join(await realpath(tmpdir()), prefix))
+}
+
 test('deletion permits an exact configured managed directory', () => {
   assert.equal(validateStorageDeletion('e:\\MODLY\\models\\\\', dirs, userData, opts), dirs.modelsDir)
   assert.equal(validateStorageDeletion(dirs.workflowsDir, dirs, userData, opts), dirs.workflowsDir)
@@ -31,7 +37,7 @@ test('deletion permits an exact configured managed directory', () => {
 })
 
 test('deletion rejects filesystem roots, shallow folders and relative paths', () => {
-  for (const bad of ['E:\\\\', 'C:\\\\', 'E:\\Photos', 'models', '.', '']) {
+  for (const bad of ['E:\\\\', 'C:\\\\', 'C:\\Windows', 'D:\\program files', 'models', '.', '']) {
     assert.throws(() => validateStorageDeletion(bad, { ...dirs, modelsDir: bad }, userData, opts))
   }
   assert.throws(() => validateStorageDeletion('\\\\server\\share\\models', dirs, userData, opts))
@@ -65,6 +71,12 @@ test('move allows separate configured source and empty destination path', () => 
   })
 })
 
+test('a top-level folder on a Windows data drive is a valid destination', () => {
+  assert.deepEqual(validateStorageMove(dirs.modelsDir, 'D:\\Models', dirs, userData, opts), {
+    src: dirs.modelsDir, dest: 'D:\\Models',
+  })
+})
+
 test('move rejects rogue sources, root, parent, child and overlapping destinations', () => {
   const badSources = ['E:\\\\', home, 'E:\\modly\\models-other', 'E:\\modly\\models\\child']
   for (const bad of badSources) {
@@ -72,7 +84,7 @@ test('move rejects rogue sources, root, parent, child and overlapping destinatio
   }
   for (const bad of [
     dirs.modelsDir, 'E:\\modly', 'E:\\modly\\models\\new', 'E:\\modly\\workflows',
-    'E:\\\\', 'D:\\Backups', 'E:\\modly\\workspace\\inside',
+    'E:\\\\', 'D:\\Users', 'E:\\modly\\workspace\\inside',
   ]) {
     assert.throws(() => validateStorageMove(dirs.modelsDir, bad, dirs, userData, opts))
   }
@@ -90,11 +102,12 @@ test('POSIX root and relative path are rejected', () => {
   const linuxOpts = { platform: 'linux' as const, homeDir: '/home/tester' }
   assert.equal(validateStorageDeletion(linuxDirs.modelsDir, linuxDirs, '/home/tester/.config/modly', linuxOpts), linuxDirs.modelsDir)
   assert.throws(() => validateStorageDeletion('/', { ...linuxDirs, modelsDir: '/' }, '/home/tester/.config/modly', linuxOpts))
+  assert.throws(() => validateStorageMove(linuxDirs.modelsDir, '/mnt', linuxDirs, '/home/tester/.config/modly', linuxOpts))
   assert.throws(() => validateStorageMove('relative', '/tmp/safe/new', linuxDirs, '/home/tester/.config/modly', linuxOpts))
 })
 
 test('destination must be empty, missing is fine', async () => {
-  const base = await mkdtemp(join(tmpdir(), 'modly-storage-'))
+  const base = await tempBase('modly-storage-')
   try {
     await assertEmptyDestination(join(base, 'new'))
     await mkdir(join(base, 'empty'))
@@ -106,11 +119,11 @@ test('destination must be empty, missing is fine', async () => {
   }
 })
 
-test('symlinked ancestors and target are refused', { skip: process.platform === 'win32' }, async () => {
-  const base = await mkdtemp(join(tmpdir(), 'modly-storage-link-'))
+test('symlinked ancestors, Windows junctions and target are refused', async () => {
+  const base = await tempBase('modly-storage-link-')
   try {
     await mkdir(join(base, 'real', 'models'), { recursive: true })
-    await symlink(join(base, 'real'), join(base, 'alias'), 'dir')
+    await symlink(join(base, 'real'), join(base, 'alias'), process.platform === 'win32' ? 'junction' : 'dir')
     await assertNoSymlinkAncestors(join(base, 'real', 'models'))
     await assert.rejects(() => assertNoSymlinkAncestors(join(base, 'alias', 'models')), /symbolic link/i)
     await assert.rejects(() => assertNoSymlinkAncestors(join(base, 'alias')), /symbolic link/i)
@@ -120,7 +133,7 @@ test('symlinked ancestors and target are refused', { skip: process.platform === 
 })
 
 test('unsafe real deletion refuses a storage root and preserves personal files', async () => {
-  const base = await mkdtemp(join(tmpdir(), 'modly-real-delete-'))
+  const base = await tempBase('modly-real-delete-')
   const managed = join(base, 'models')
   const personal = join(base, 'personal.txt')
   const unixDirs = {
@@ -144,7 +157,7 @@ test('unsafe real deletion refuses a storage root and preserves personal files',
 })
 
 test('real move does not overwrite destination files or erase unrelated data', async () => {
-  const base = await mkdtemp(join(tmpdir(), 'modly-real-move-'))
+  const base = await tempBase('modly-real-move-')
   const source = join(base, 'models')
   const destination = join(base, 'migrated', 'models')
   const unixDirs = {
@@ -162,11 +175,42 @@ test('real move does not overwrite destination files or erase unrelated data', a
       join(base, 'userData'), options), /empty/i)
     assert.equal(await readFile(join(destination, 'personal.txt'), 'utf8'), 'preserve')
     assert.equal(await readFile(join(source, 'asset.glb'), 'utf8'), 'model')
-    await rm(destination, { recursive: true })
+    // The folder picker usually hands back an existing, empty folder.
+    await rm(join(destination, 'personal.txt'))
     await moveStorageDirectory(source, destination, unixDirs, join(base, 'userData'), options)
     assert.equal(await readFile(join(destination, 'asset.glb'), 'utf8'), 'model')
     await assert.rejects(() => access(source))
+    assert.deepEqual(await readdir(join(base, 'migrated')), ['models'])
   } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+test('a failed copy keeps the source and leaves nothing behind at the destination', {
+  // chmod cannot make a file unreadable on Windows, nor for root.
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, async () => {
+  const base = await tempBase('modly-failed-move-')
+  const source = join(base, 'models')
+  const destination = join(base, 'migrated', 'models')
+  const unixDirs = {
+    modelsDir: source, workspaceDir: join(base, 'workspace'),
+    workflowsDir: join(base, 'workflows'), extensionsDir: join(base, 'extensions'),
+    dependenciesDir: join(base, 'dependencies'), agentDir: join(base, 'agent'),
+  }
+  const options = { platform: process.platform, homeDir: join(base, 'other-home') }
+  try {
+    await mkdir(source)
+    await writeFile(join(source, 'asset.glb'), 'model')
+    await writeFile(join(source, 'locked.bin'), 'unreadable')
+    await chmod(join(source, 'locked.bin'), 0o000)
+    await assert.rejects(() => moveStorageDirectory(source, destination, unixDirs,
+      join(base, 'userData'), options))
+    assert.equal(await readFile(join(source, 'asset.glb'), 'utf8'), 'model')
+    // No half-copied destination and no staging leftover: a retry starts clean.
+    assert.deepEqual(await readdir(join(base, 'migrated')), [])
+  } finally {
+    await chmod(join(source, 'locked.bin'), 0o644).catch(() => {})
     await rm(base, { recursive: true, force: true })
   }
 })

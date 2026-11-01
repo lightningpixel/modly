@@ -1096,7 +1096,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       await moveStorageDirectory(src, dest, getSettings(userData), userData, { appDir: app.getAppPath() })
       return { success: true }
     } catch (err) {
-      return { success: false, error: String(err) }
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
 
@@ -1106,7 +1106,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       await deleteStorageDirectory(dirPath, getSettings(userData), userData, { appDir: app.getAppPath() })
       return { success: true }
     } catch (err) {
-      return { success: false, error: String(err) }
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
 
