@@ -69,6 +69,40 @@ class MeshRoutersAfterWorkspaceMoveTests(unittest.TestCase):
         written = registry.WORKSPACE_DIR / result["url"].removeprefix("/workspace/")
         self.assertTrue(written.is_file())
 
+    def test_arrange_composes_steps_into_one_file_in_the_moved_workspace(self) -> None:
+        result = optimize_router.arrange_mesh(
+            optimize_router.ArrangeRequest(
+                path="MyColl/mesh.glb",
+                steps=["drop_to_ground", "normalize_scale"],
+                params={"normalize_scale": {"size": 50, "unit": "cm"}},
+            )
+        )
+        self.assertEqual(result["applied"], ["normalize_scale", "drop_to_ground"])
+        self.assertTrue(result["path"].startswith("MyColl/mesh_xf_"))
+        self.assertEqual(result["url"], f"/workspace/{result['path']}")
+        written = trimesh.load(str(registry.WORKSPACE_DIR / result["path"]))
+        self.assertAlmostEqual(written.bounds[0][1], 0.0, places=5)
+        self.assertAlmostEqual(max(written.extents), 0.5, places=5)
+
+    def test_arrange_rejects_unknown_steps_and_bad_params(self) -> None:
+        for steps, params in (
+            (["levitate"], {}),
+            (["repair"], {}),
+            ([], {}),
+            (["normalize_scale"], {"normalize_scale": {"unit": "inch"}}),
+        ):
+            with self.subTest(steps=steps), self.assertRaises(HTTPException) as raised:
+                optimize_router.arrange_mesh(
+                    optimize_router.ArrangeRequest(
+                        path="MyColl/mesh.glb", steps=steps, params=params,
+                    )
+                )
+            self.assertEqual(raised.exception.status_code, 400)
+        self.assertEqual(
+            sorted(p.name for p in (registry.WORKSPACE_DIR / "MyColl").iterdir()),
+            ["mesh.glb"],
+        )
+
     def test_decimate_and_smooth_read_their_input_from_the_moved_workspace(self) -> None:
         # /optimize/mesh and /optimize/smooth resolve their input through this helper.
         resolved = optimize_router._resolve_input_path("MyColl/mesh.glb")

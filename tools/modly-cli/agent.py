@@ -283,13 +283,18 @@ def _default_api_dir() -> Path | None:
     return None
 
 
-def _default_python(api_dir: Path) -> Path | None:
-    candidates = [
-        api_dir / ".venv" / "Scripts" / "python.exe",
-        api_dir / ".venv" / "bin" / "python",
-    ]
+def _default_python(api_dir: Path, settings: dict[str, Any] | None = None) -> Path | None:
+    # Same order as the Electron PythonBridge: the app's venv first, the api's dev .venv as fallback.
+    candidates: list[Path] = []
+    # The desktop app can keep its dependencies on another drive (Settings > dependenciesDir).
+    deps_dir = (settings or {}).get("dependenciesDir")
+    if deps_dir:
+        candidates.append(Path(deps_dir) / "venv" / "Scripts" / "python.exe")
+        candidates.append(Path(deps_dir) / "venv" / "bin" / "python")
     for appdata in _windows_env_paths("APPDATA"):
         candidates.append(appdata / "Modly" / "dependencies" / "venv" / "Scripts" / "python.exe")
+    candidates.append(api_dir / ".venv" / "Scripts" / "python.exe")
+    candidates.append(api_dir / ".venv" / "bin" / "python")
     candidates.append(Path(sys.executable))
     for candidate in candidates:
         if candidate.exists():
@@ -312,18 +317,27 @@ def _load_modly_settings() -> dict[str, Any]:
     return {}
 
 
+_FOREIGN_PYTHON_ENV = (
+    "PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONUSERBASE",
+    "PIP_USER", "PIP_TARGET", "PIP_PREFIX", "PIP_REQUIRE_VIRTUALENV",
+    "VIRTUAL_ENV", "CONDA_PREFIX",
+)
+
+
 def _resolve_serve_config(args: argparse.Namespace) -> tuple[Path, Path, dict[str, str], list[str], str]:
     api_dir = Path(args.api_dir).expanduser().resolve() if getattr(args, "api_dir", None) else _default_api_dir()
     if not api_dir or not (api_dir / "main.py").exists():
         raise ModlyCliError("Could not find Modly api directory; pass --api-dir")
 
-    python = Path(args.python).expanduser().resolve() if getattr(args, "python", None) else _default_python(api_dir)
+    settings = _load_modly_settings()
+    python = Path(args.python).expanduser().resolve() if getattr(args, "python", None) else _default_python(api_dir, settings)
     if not python or not python.exists():
         raise ModlyCliError("Could not find Modly Python environment; pass --python")
 
-    settings = _load_modly_settings()
-    env = os.environ.copy()
-    hf_token = getattr(args, "hf_token", None) or settings.get("hfToken") or os.environ.get("HF_TOKEN", "")
+    # Like Electron's cleanPythonEnv(): variables from the caller's own Python setup (a conda env,
+    # an activated venv) would point Modly's venv interpreter at foreign site-packages.
+    env = {k: v for k, v in os.environ.items() if k not in _FOREIGN_PYTHON_ENV}
+    hf_token =getattr(args, "hf_token", None) or settings.get("hfToken") or os.environ.get("HF_TOKEN", "")
     env.update({
         "PYTHONUNBUFFERED": "1",
         "MODELS_DIR": getattr(args, "models_dir", None) or settings.get("modelsDir") or str(Path.home() / ".modly" / "models"),
@@ -332,7 +346,15 @@ def _resolve_serve_config(args: argparse.Namespace) -> tuple[Path, Path, dict[st
         "SELECTED_MODEL_ID": getattr(args, "model", None) or os.environ.get("SELECTED_MODEL_ID", ""),
         "HUGGING_FACE_HUB_TOKEN": hf_token,
         "HF_TOKEN": hf_token,
+        # Same as the Electron PythonBridge: UTF-8 logs, the local LLM folder, and Modly.exe as the Node
+        # runtime of the mesh optimizer (installed app only; otherwise mesh_ops falls back to `node`).
+        "PYTHONIOENCODING": "utf-8",
     })
+    if settings.get("agentDir") and "MODLY_LLM_DIR" not in os.environ:
+        env["MODLY_LLM_DIR"] = settings["agentDir"]
+    modly_exe = api_dir.parent.parent / ("Modly.exe" if os.name == "nt" else "modly")
+    if modly_exe.exists() and "MODLY_NODE_EXECUTABLE" not in os.environ:
+        env["MODLY_NODE_EXECUTABLE"] = str(modly_exe)
     cmd = [str(python), "-m", "uvicorn", "main:app", "--host", args.host, "--port", str(args.port)]
     base_url = f"http://{args.host}:{args.port}"
     return api_dir, python, env, cmd, base_url

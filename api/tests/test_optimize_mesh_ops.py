@@ -52,14 +52,11 @@ class OptimizeMeshOpsRouteTests(unittest.TestCase):
                 )
 
         self.assertEqual(descriptions[0]["id"], "repair")
-        self.assertEqual(
-            response,
-            {
-                "path": "Workflows/output.glb",
-                "url": "/workspace/Workflows/output.glb",
-                "face_count": 42,
-            },
-        )
+        # Written next to the input under a unique name, never over it.
+        self.assertRegex(response["path"], r"^input_repair_[0-9a-f]{8}\.glb$")
+        self.assertEqual(response["url"], f"/workspace/{response['path']}")
+        self.assertEqual(response["face_count"], 42)
+        self.assertEqual(registry.calls[0][3].output_path.parent, workspace)
         self.assertEqual(registry.calls[0][0:3], (
             "repair",
             input_path,
@@ -104,6 +101,25 @@ class OptimizeMeshOpsRouteTests(unittest.TestCase):
         self.assertTrue(smooth_call[3].preserve_visuals)
         self.assertEqual(optimize_response["face_count"], 42)
         self.assertEqual(smooth_response["url"], "/workspace/model_smooth20.glb")
+
+    def test_analysis_operation_returns_only_its_report(self) -> None:
+        class AnalysisRegistry:
+            def run(self, operation_id, input_path, params, context):
+                return MeshOpResult(details={"printable": False, "hole_count": 1})
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "input.glb").touch()
+            with (
+                patch.object(optimize.registry, "WORKSPACE_DIR", workspace),
+                patch.object(optimize, "mesh_ops_registry", AnalysisRegistry()),
+            ):
+                response = optimize.run_mesh_operation(
+                    "inspect_mesh",
+                    optimize.MeshOpRequest(path="input.glb"),
+                )
+
+        self.assertEqual(response, {"printable": False, "hole_count": 1})
 
     def test_unknown_generic_operation_is_a_404(self) -> None:
         class MissingRegistry:

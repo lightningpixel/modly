@@ -56,6 +56,10 @@ def run_processor(operation_id: str, processor_id: str) -> None:
             data.get("params") or {},
             context,
         )
+        if result.file_path is None:
+            raise ValueError(
+                f"{processor_id}: {operation_id} produces no mesh file"
+            )
         _emit(
             {
                 "type": "done",

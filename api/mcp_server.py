@@ -19,6 +19,7 @@ Requires Modly's FastAPI backend to be running on http://localhost:8765.
 """
 
 import asyncio
+import json
 import mimetypes
 import httpx
 from mcp.server import Server
@@ -81,6 +82,86 @@ async def list_tools() -> list[Tool]:
                     "job_id": {"type": "string", "description": "Job ID returned by modly_generate_from_image."},
                 },
                 "required": ["job_id"],
+            },
+        ),
+        Tool(
+            name="modly_inspect_mesh",
+            description=(
+                "Diagnose a mesh without modifying it: watertight, manifold, holes, "
+                "self-intersections, parts, dimensions, volume, UVs/normals, printability."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to the mesh (e.g. 'Default/mesh.glb').",
+                    },
+                },
+                "required": ["path"],
+            },
+        ),
+        Tool(
+            name="modly_suggest_fixes",
+            description="Inspect a mesh and list the operations (with params) that would fix its problems.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to the mesh (e.g. 'Default/mesh.glb').",
+                    },
+                },
+                "required": ["path"],
+            },
+        ),
+        Tool(
+            name="modly_repair_mesh",
+            description=(
+                "Repair a mesh automatically (holes, non-manifold edges, degenerate faces, "
+                "flipped normals) until it is closed and manifold. Writes a new, untextured mesh."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to the mesh (e.g. 'Default/mesh.glb').",
+                    },
+                    "fill_holes": {
+                        "type": "boolean",
+                        "description": "Close holes (default true).",
+                    },
+                },
+                "required": ["path"],
+            },
+        ),
+        Tool(
+            name="modly_arrange_mesh",
+            description=(
+                "Reposition a mesh in one call: auto_orient (lay flat), normalize_scale "
+                "(resize), recenter (centre on origin), drop_to_ground (rest on ground). "
+                "Steps always run in that order. Writes a new mesh file."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to the mesh (e.g. 'Default/mesh.glb').",
+                    },
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["auto_orient", "normalize_scale", "recenter", "drop_to_ground"],
+                        },
+                    },
+                    "size": {"type": "number", "description": "normalize_scale: target size in `unit`."},
+                    "unit": {"type": "string", "enum": ["m", "cm", "mm"]},
+                    "dimension": {"type": "string", "enum": ["longest", "x", "y", "z"]},
+                },
+                "required": ["path", "steps"],
             },
         ),
         Tool(
@@ -216,6 +297,34 @@ async def _dispatch(client: httpx.AsyncClient, name: str, args: dict) -> str:
         if s.get("error"):
             parts.append(f"Error: {s['error']}")
         return " | ".join(parts)
+
+    elif name in ("modly_inspect_mesh", "modly_suggest_fixes"):
+        op = name.removeprefix("modly_")
+        r = await client.post(f"{API_BASE}/optimize/op/{op}", json={"path": args["path"]})
+        r.raise_for_status()
+        return json.dumps(r.json(), indent=2)
+
+    elif name == "modly_repair_mesh":
+        params = {} if args.get("fill_holes") is None else {"fill_holes": bool(args["fill_holes"])}
+        r = await client.post(
+            f"{API_BASE}/optimize/op/repair_mesh",
+            json={"path": args["path"], "params": params},
+        )
+        r.raise_for_status()
+        return json.dumps(r.json(), indent=2)
+
+    elif name == "modly_arrange_mesh":
+        scale = {k: args[k] for k in ("size", "unit", "dimension") if args.get(k) is not None}
+        r = await client.post(
+            f"{API_BASE}/optimize/arrange",
+            json={
+                "path": args["path"],
+                "steps": args.get("steps") or [],
+                "params": {"normalize_scale": scale} if scale else {},
+            },
+        )
+        r.raise_for_status()
+        return json.dumps(r.json(), indent=2)
 
     elif name == "modly_decimate_mesh":
         r = await client.post(

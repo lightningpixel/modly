@@ -38,6 +38,13 @@ from services.model_sources import (
     weight_group_sources_are_downloaded,
 )
 
+# Model pairs that stay loaded together when the active model switches between them (a mesh -> texture
+# pipeline would otherwise unload and reload both models on every asset), with the minimum total VRAM
+# (GiB, as detect_vram_gb() reports it) for keeping both resident. Manifests can't size this: TripoSG
+# declares no `vram_gb`. TripoSG + Trellis2 refine peak around 10-11 GB, so only 24 GB cards
+# (23.9 GiB reported) qualify; smaller cards keep the unload-on-switch behavior.
+_KEEP_RESIDENT_PAIRS = [({"triposg/generate", "trellis2/refine"}, 19.5)]
+
 # ------------------------------------------------------------------ #
 # Global paths
 # ------------------------------------------------------------------ #
@@ -884,7 +891,7 @@ class GeneratorRegistry:
         return self._manifests[model_id]
 
     def switch_model(self, model_id: str) -> None:
-        """Switches the active model. Unloads the previous one if different."""
+        """Switches the active model. Unloads every other model unless it is a resident partner."""
         with self._lifecycle_lock:
             self._assert_not_quarantined(model_id)
             if model_id not in self._generators:
@@ -904,9 +911,26 @@ class GeneratorRegistry:
                 llama_pool.unload_all()
 
             if model_id != self._active_id:
-                if self._active_id in self._generators:
-                    self._generators[self._active_id].unload()
+                # Unload everything except the target and its resident partners, not just the
+                # previous active model: after A -> B (pair) -> C, A is no longer active but is
+                # still loaded, and would otherwise sit in VRAM beside C.
+                keep = {model_id} | self._resident_partners(model_id)
+                for other_id, gen in self._generators.items():
+                    if other_id not in keep and gen.is_loaded():
+                        gen.unload()
                 self._active_id = model_id
+
+    def _resident_partners(self, model_id: str) -> Set[str]:
+        """Models allowed to stay loaded beside ``model_id`` (see _KEEP_RESIDENT_PAIRS)."""
+        from services.llm_server import detect_vram_gb
+        partners: Set[str] = set()
+        for pair, min_vram_gb in _KEEP_RESIDENT_PAIRS:
+            if model_id not in pair:
+                continue
+            # detect_vram_gb() is 0.0 when no NVIDIA GPU answers, which never passes.
+            if detect_vram_gb() >= min_vram_gb:
+                partners |= pair - {model_id}
+        return partners
 
     # ------------------------------------------------------------------ #
     # Status

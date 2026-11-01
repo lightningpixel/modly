@@ -95,6 +95,15 @@ class MeshOpsRegistry:
         if not path.is_file():
             raise FileNotFoundError(f"Input mesh not found: {path}")
 
+        return operation.fn(path, self.resolve_params(operation_id, params), context)
+
+    def resolve_params(
+        self,
+        operation_id: str,
+        params: Optional[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Apply an operation's schema defaults, then validate and clamp params."""
+        operation = self.get(operation_id)
         resolved_params = {
             schema["id"]: deepcopy(schema["default"])
             for schema in operation.params_schema
@@ -113,4 +122,4 @@ class MeshOpsRegistry:
                 schema,
             )
 
-        return operation.fn(path, resolved_params, context)
+        return resolved_params

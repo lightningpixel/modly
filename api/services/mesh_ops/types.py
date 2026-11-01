@@ -44,9 +44,12 @@ class MeshOpContext:
 
 @dataclass(frozen=True)
 class MeshOpResult:
-    """The file produced by an operation and optional JSON-safe measurements."""
+    """The file produced by an operation and optional JSON-safe measurements.
 
-    file_path: Path
+    Read-only (analysis) operations produce no file and leave file_path None.
+    """
+
+    file_path: Optional[Path] = None
     details: Mapping[str, Any] = field(default_factory=dict)
 
 
