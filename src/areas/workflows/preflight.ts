@@ -2,8 +2,9 @@ import type { Workflow, WFNode } from '@shared/types/electron.d'
 import { getWorkflowExtension, type WorkflowExtension } from './mockExtensions'
 import { hasUnsupportedSceneShape } from './sceneShape'
 import { isPassthrough, isBranchConsumer, resolveDataSource, nearestUpstreamWaits } from './nodeBehaviors'
+import { normalizeVideoSource } from './workflowVideoSource'
 
-type DataType = 'image' | 'text' | 'mesh' | 'audio' | 'scene'
+type DataType = 'image' | 'text' | 'mesh' | 'audio' | 'scene' | 'video'
 
 export interface WorkflowPreflightIssue {
   key: string
@@ -16,6 +17,7 @@ function nodeLabel(node: WFNode, allExtensions: WorkflowExtension[]): string {
   if (node.type === 'textNode') return 'Text'
   if (node.type === 'meshNode') return 'Load 3D Mesh'
   if (node.type === 'sceneNode') return 'Load Scene'
+  if (node.type === 'videoNode') return 'Load Video'
   if (node.type === 'outputNode') return 'Add to Scene'
   if (node.type === 'previewNode') return 'Preview Views'
   if (node.type === 'imagePreviewNode') return 'Preview Image'
@@ -31,6 +33,7 @@ function nodeLabel(node: WFNode, allExtensions: WorkflowExtension[]): string {
 
 function formatType(type: DataType): string {
   if (type === 'scene') return 'scene'
+  if (type === 'video') return 'video'
   if (type === 'mesh') return 'mesh'
   if (type === 'image') return 'image'
   if (type === 'audio') return 'audio'
@@ -48,6 +51,7 @@ function getNodeOutputType(node: WFNode, allExtensions: WorkflowExtension[]): Da
   if (node.type === 'textNode') return 'text'
   if (node.type === 'meshNode' || node.type === 'outputNode') return 'mesh'
   if (node.type === 'sceneNode') return 'scene'
+  if (node.type === 'videoNode') return 'video'
   if (node.type === 'previewNode') return 'image'
   if (node.type === 'imagePreviewNode') return 'image'
   if (node.type === 'forEachNode') {
@@ -106,6 +110,14 @@ export function validateWorkflowPreflight(
         message: 'Load Scene needs a validated scene directory.',
       })
     }
+    if (node.type === 'videoNode' && !normalizeVideoSource(
+      node.data.params?.workspacePath as string | undefined, '/workspace',
+    )) {
+      pushIssue(issues, {
+        key: `${node.id}:video-invalid`, nodeId: node.id,
+        message: 'Load Video needs an imported workspace video file.',
+      })
+    }
 
     // A node fed by two different Wait branches can't be scheduled into a single
     // branch — it would run before either branch produces its mesh.
@@ -140,7 +152,6 @@ export function validateWorkflowPreflight(
       })
       continue
     }
-
     const incomingEdges = workflow.edges.filter((edge) => edge.target === node.id)
     const requiredTypes = [...new Set((ext.inputs ?? [ext.input]) as DataType[])]
 

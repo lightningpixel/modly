@@ -18,7 +18,10 @@ import sys
 import threading
 import uuid
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from services.video_input import VideoSnapshot
 
 _RUNNER_PATH = Path(__file__).parent.parent / "runner.py"
 _MISSING_MODULE_RE = re.compile(r"No module named ['\"]([^'\"]+)['\"]")
@@ -404,16 +407,24 @@ class ExtensionProcess:
         params: dict,
         progress_cb: Optional[Callable[[int, str], None]] = None,
         cancel_event: Optional[threading.Event] = None,
+        artifact_snapshot: Optional["VideoSnapshot"] = None,
     ) -> Path:
         """Send a typed artifact envelope to the isolated runner."""
         from services.artifact_input import TypedArtifactInput, revalidate_artifact_input
         from services.generator_registry import WORKSPACE_DIR
+        from services.video_input import video_snapshot_to_dict
 
+        snapshot_payload = (video_snapshot_to_dict(artifact_snapshot)
+                            if input_kind == "video" else None)
         validated = revalidate_artifact_input(
-            WORKSPACE_DIR, TypedArtifactInput(kind=input_kind, path=artifact_path)
+            WORKSPACE_DIR,
+            TypedArtifactInput(kind=input_kind, path=artifact_path, snapshot=artifact_snapshot),
         )
+        input_payload = {"kind": validated.kind, "path": str(validated.path)}
+        if validated.kind == "video":
+            input_payload["snapshot"] = snapshot_payload
         return self._generate_request(
-            {"input": {"kind": validated.kind, "path": str(validated.path)}},
+            {"input": input_payload},
             params, progress_cb, cancel_event,
         )
 

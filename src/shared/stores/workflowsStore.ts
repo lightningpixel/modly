@@ -98,7 +98,7 @@ interface LegacyWorkflow {
 // Source-only nodes have no target handle; sink-only nodes have no source handle.
 // An edge into/out of the wrong side can't resolve a handle and makes React Flow
 // warn ("Couldn't create edge for target handle id: null") on every render.
-export const NODE_TYPES_WITHOUT_TARGET = new Set(['imageNode', 'textNode', 'meshNode', 'sceneNode', 'inputNode', 'forEachNode'])
+export const NODE_TYPES_WITHOUT_TARGET = new Set(['imageNode', 'textNode', 'meshNode', 'sceneNode', 'videoNode', 'inputNode', 'forEachNode'])
 export const NODE_TYPES_WITHOUT_SOURCE = new Set(['outputNode', 'previewNode'])
 
 function sanitizeEdges(nodes: WFNode[], edges: WFEdge[]): WFEdge[] {
