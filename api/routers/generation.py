@@ -198,17 +198,29 @@ async def cancel_job(job_id: str):
     job = _jobs.get(job_id)
     if not job:
         raise HTTPException(404, f"Job {job_id} not found")
+    if job.status not in ("pending", "running"):
+        # The job already ended: its worker now holds the warm model or another
+        # job's generation, and there is nothing left to stop.
+        return {"cancelled": False}
     _cancelled.add(job_id)
     if job_id in _cancel_events:
         _cancel_events[job_id].set()
-    if job.status in ("pending", "running"):
-        job.status = "cancelled"
-        _completed_at[job_id] = time.monotonic()
+    job.status = "cancelled"
+    _completed_at[job_id] = time.monotonic()
     # Kill only the subprocess bound to this job. A queued cancellation must not
-    # terminate whichever earlier job currently owns the active generator.
+    # terminate whichever earlier job currently owns the active generator, and an
+    # unpinned job runs beside the pinned worker, so it can share its generator:
+    # then the cancel event is the only safe way to stop it.
     try:
         gen = _job_generators.get(job_id)
-        if gen is not None and hasattr(gen, "_proc") and gen._proc and gen._proc.poll() is None:
+        shared = any(
+            other_id != job_id and bound is gen
+            for other_id, bound in _job_generators.items()
+        )
+        if (
+            gen is not None and not shared
+            and hasattr(gen, "_proc") and gen._proc and gen._proc.poll() is None
+        ):
             gen._proc.kill()
             gen._loaded = False
             gen._proc = None
