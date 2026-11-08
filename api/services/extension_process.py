@@ -17,11 +17,16 @@ import subprocess
 import sys
 import threading
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import Callable, Optional
 
+from services.subprocess_death import describe_death
+
 _RUNNER_PATH = Path(__file__).parent.parent / "runner.py"
 _MISSING_MODULE_RE = re.compile(r"No module named ['\"]([^'\"]+)['\"]")
+# Raw stderr lines kept per subprocess, to explain a crash (#369).
+_STDERR_TAIL = 400
 _AUTO_REPAIR_PACKAGE_MAP = {
     "PIL": "Pillow",
 }
@@ -51,6 +56,9 @@ class ExtensionProcess:
         self._queue:  queue.Queue                = queue.Queue()
         self._lock:   threading.Lock             = threading.Lock()
         self._loaded: bool                       = False
+        self._stderr_tail: deque                 = deque(maxlen=_STDERR_TAIL)
+        self._stderr_thread: Optional[threading.Thread] = None
+        self._stopped_by_modly: bool             = False
 
         # Mirrors BaseGenerator attributes used by the registry
         self.hf_repo          = manifest.get("hf_repo", "")
@@ -123,6 +131,7 @@ class ExtensionProcess:
             # older reader thread cannot poison startup for the new process.
             run_queue: queue.Queue = queue.Queue()
             self._queue = run_queue
+            self._stopped_by_modly = False
             self._proc = subprocess.Popen(
                 [str(python), str(_RUNNER_PATH)],
                 stdin=subprocess.PIPE,
@@ -146,11 +155,16 @@ class ExtensionProcess:
             reader.start()
 
             # Background thread: forward stderr to our stderr
-            stderr_fwd = threading.Thread(target=self._stderr_loop, args=(self._proc,), daemon=True)
+            # (and keep its last lines to explain a crash).
+            self._stderr_tail = deque(maxlen=_STDERR_TAIL)
+            stderr_fwd = threading.Thread(
+                target=self._stderr_loop, args=(self._proc, self._stderr_tail), daemon=True,
+            )
+            self._stderr_thread = stderr_fwd
             stderr_fwd.start()
 
             # Wait for ready — runner sends params_schema in this message
-            msg = self._recv(timeout=None)
+            msg = self._recv(timeout=None, phase="while starting")
             if msg.get("type") == "ready":
                 # Override params_schema with what the generator class actually declares
                 if msg.get("params_schema"):
@@ -223,7 +237,7 @@ class ExtensionProcess:
         finally:
             msg_queue.put(None)  # sentinel: process is done
 
-    def _stderr_loop(self, proc: subprocess.Popen) -> None:
+    def _stderr_loop(self, proc: subprocess.Popen, tail: Optional[deque] = None) -> None:
         """Forward subprocess stderr to the main process stderr, emitting
         one line every time we see EITHER '\\n' or '\\r'. tqdm writes live
         progress updates with '\\r' only, so a newline-only iterator would
@@ -233,20 +247,29 @@ class ExtensionProcess:
         No per-line extension-id prefix: the HUD log pane is a single
         truncated line, and eating 20 characters with "[modly-hy3d2-mac] "
         hides the tail of the tqdm bar the user actually wants to read.
+
+        Each line also goes into `tail`, so a crash can quote it.
         """
         stream = proc.stderr
         if stream is None:
             return
         buf = []
+
+        def emit() -> None:
+            line = ''.join(buf)
+            print(line, file=sys.stderr, flush=True)
+            if tail is not None:
+                tail.append(line)
+
         while True:
             ch = stream.read(1)
             if not ch:
                 if buf:
-                    print(''.join(buf), file=sys.stderr, flush=True)
+                    emit()
                 return
             if ch in ("\r", "\n"):
                 if buf:
-                    print(''.join(buf), file=sys.stderr, flush=True)
+                    emit()
                     buf = []
             else:
                 buf.append(ch)
@@ -256,14 +279,36 @@ class ExtensionProcess:
             self._proc.stdin.write(json.dumps(msg) + "\n")
             self._proc.stdin.flush()
 
-    def _recv(self, timeout: float | None = 120.0) -> dict:
+    def _recv(self, timeout: float | None = 120.0, phase: str = "unexpectedly") -> dict:
         try:
             msg = self._queue.get(timeout=timeout)
         except queue.Empty:
             raise TimeoutError(f"[{self.MODEL_ID}] No response from subprocess after {timeout}s")
         if msg is None:
-            raise RuntimeError(f"[{self.MODEL_ID}] Subprocess died unexpectedly")
+            raise self._death_error(phase)
         return msg
+
+    def _death_error(self, phase: str) -> RuntimeError:
+        """Why the subprocess died, with its exit code and last stderr lines.
+
+        stdout closing is how we notice the death; the process may need a moment
+        to finish exiting, and the stderr thread to drain what is left.
+        """
+        self._loaded = False
+        if self._stopped_by_modly:
+            # stop() killed it (Free Memory / unload): not a crash, and its
+            # SIGKILL must not be reported as the OOM killer.
+            return RuntimeError(f"[{self.MODEL_ID}] Subprocess was stopped by Modly {phase}")
+        returncode = None
+        proc = self._proc
+        if proc is not None:
+            try:
+                returncode = proc.wait(timeout=5.0)
+            except Exception:
+                returncode = proc.poll()
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=2.0)
+        return RuntimeError(describe_death(self.MODEL_ID, phase, returncode, list(self._stderr_tail)))
 
     def _ensure_started(self) -> None:
         if self._proc is None or self._proc.poll() is not None:
@@ -285,7 +330,8 @@ class ExtensionProcess:
         self._ensure_started()
         self._send({"action": "load"})
 
-        msg = self._recv(timeout=None)  # model load can be arbitrarily slow
+        # Model load can be arbitrarily slow.
+        msg = self._recv(timeout=None, phase="while loading the model")
         if msg.get('type') in ['loaded', 'ready']:
             self._loaded = True
         elif msg.get("type") == "error":
@@ -370,7 +416,7 @@ class ExtensionProcess:
                 continue
 
             if msg is None:
-                raise RuntimeError(f"[{self.MODEL_ID}] Subprocess died during generation")
+                raise self._death_error("during generation")
 
             t = msg.get("type")
 
@@ -447,6 +493,7 @@ class ExtensionProcess:
         proc = self._proc
         self._loaded = False
         if proc and proc.poll() is None:
+            self._stopped_by_modly = True
             try:
                 proc.kill()
                 proc.wait(timeout=5)
