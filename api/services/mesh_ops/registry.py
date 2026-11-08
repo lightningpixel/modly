@@ -4,7 +4,7 @@ import re
 from copy import deepcopy
 from math import isfinite
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Iterable, Iterator, Mapping, Optional
 
 from .types import MeshOp, MeshOpContext, MeshOpNotFoundError, MeshOpResult
 
@@ -79,6 +79,9 @@ class MeshOpsRegistry:
             return self._operations[operation_id]
         except KeyError as exc:
             raise MeshOpNotFoundError(operation_id) from exc
+
+    def __iter__(self) -> Iterator[MeshOp]:
+        return iter(self._operations.values())
 
     def describe(self) -> list[dict[str, Any]]:
         return [operation.describe() for operation in self._operations.values()]

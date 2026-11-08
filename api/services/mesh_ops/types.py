@@ -57,6 +57,21 @@ MeshOpFn = Callable[[Path, Mapping[str, Any], MeshOpContext], MeshOpResult]
 
 
 @dataclass(frozen=True)
+class AgentTool:
+    """Exposes an operation to the chat agent as a tool.
+
+    Only the params listed in `params` are shown to the model, each with its
+    description; the others keep their schema default. `format_result` turns
+    the operation's response into the text the model reads.
+    """
+
+    description: str
+    params: Mapping[str, str] = field(default_factory=dict)
+    required: tuple[str, ...] = ()
+    format_result: Optional[Callable[[Mapping[str, Any]], str]] = None
+
+
+@dataclass(frozen=True)
 class MeshOp:
     """One callable operation and the metadata consumed by the UI and agent."""
 
@@ -67,6 +82,7 @@ class MeshOp:
     category: str
     destructive: bool = False
     undoable: bool = True
+    agent: Optional[AgentTool] = None  # None: not offered to the chat agent
 
     def describe(self) -> dict[str, Any]:
         """Return the public, serializable part of this registry entry."""
