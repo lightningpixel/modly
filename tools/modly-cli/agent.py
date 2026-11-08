@@ -37,7 +37,31 @@ def _float_env(primary: str, fallback: str, default: float) -> float:
         return default
 
 
-DEFAULT_BASE_URL = os.environ.get("MODLY_API_URL", "http://127.0.0.1:8765")
+def _modly_user_data() -> Path:
+    """Electron's userData folder for Modly, where the app writes api-port."""
+    if sys.platform == "win32":
+        return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Modly"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Modly"
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "Modly"
+
+
+def resolve_base_url() -> str:
+    """MODLY_API_URL, else the port the running app wrote to api-port, else 8765.
+
+    The app moves its API off 8765 when another program holds that port.
+    """
+    env = os.environ.get("MODLY_API_URL")
+    if env:
+        return env.rstrip("/")
+    try:
+        port = int((_modly_user_data() / "api-port").read_text().strip())
+        return f"http://127.0.0.1:{port}"
+    except (OSError, ValueError):
+        return "http://127.0.0.1:8765"
+
+
+DEFAULT_BASE_URL = resolve_base_url()
 DEFAULT_TIMEOUT_SECONDS = _int_env("MODLY_CLI_TIMEOUT", "MODLY_AGENT_TIMEOUT", 1800)
 DEFAULT_POLL_SECONDS = _float_env("MODLY_CLI_POLL_SECONDS", "MODLY_AGENT_POLL_SECONDS", 2.0)
 EXPORT_FORMATS = ("glb", "stl", "obj", "ply")

@@ -4,6 +4,7 @@ local llama.cpp server or any OpenAI-compatible provider.
 """
 import asyncio
 import json
+import os
 import uuid
 from typing import Optional
 
@@ -18,7 +19,8 @@ from services.mesh_ops import MeshOp, MeshOpNotFoundError, MeshOpsRegistry, mesh
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
-MODLY_API = "http://localhost:8765"
+# Set by Electron: the port moves off 8765 when another program holds it.
+MODLY_API = os.environ.get("MODLY_API_URL", "http://127.0.0.1:8765").rstrip("/")
 
 # Mesh operations reach the chat through the registry: an op declared with an
 # `agent` spec becomes a tool, with no change here.
