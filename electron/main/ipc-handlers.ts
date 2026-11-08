@@ -42,7 +42,10 @@ import {
   weightStorageHasLocalData,
 } from './model-sources'
 import { getSettings, setSettings } from './settings-store'
-import { deleteStorageDirectory, moveStorageDirectory } from './storage-directory-guard'
+import {
+  claimStorageDirectory, deleteStorageDirectory, listStorageEntries, moveStorageDirectory,
+  validateStorageLocation, type StorageKind,
+} from './storage-directory-guard'
 import { checkSetupNeeded, markSetupDone, runFullSetup, getVenvPythonExe, ensureSslPatch } from './python-setup'
 import { logger } from './logger'
 import { getProcessRunner, getPythonProcessRunner, getExtPythonExe, terminateProcessRunner, terminateAllProcessRunners } from './process-runner'
@@ -170,6 +173,19 @@ const rmWithRetry = (path: string, label: string) =>
   removeExtensionWithRetry(path, label, logger)
 const renameWithRetry = (from: string, to: string, label: string) =>
   renameExtensionWithRetry(from, to, label, logger)
+
+/** Guard options for storage operations: which model folders belong to Modly. */
+async function storageGuardOptions(): Promise<{ appDir: string; knownModelIds: string[] }> {
+  const ids = new Set<string>()
+  for (const dir of [getSettings(app.getPath('userData')).extensionsDir, getBuiltinExtensionsDir()]) {
+    try {
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        if (!isInternalExtensionDirName(entry.name) && (entry.isDirectory() || entry.isSymbolicLink())) ids.add(entry.name)
+      }
+    } catch { /* missing folder: no ids from it */ }
+  }
+  return { appDir: app.getAppPath(), knownModelIds: [...ids] }
+}
 
 export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGetter): void {
   type ActiveDownload = {
@@ -921,6 +937,11 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       throw new Error('Cannot change model storage while model weights are busy')
     }
     const { hfToken, ...dirs } = patch
+    // Refuse a drive root or system folder, and mark a new/empty folder as
+    // Modly's so it may later move or delete what it puts there.
+    for (const dir of Object.values(dirs)) {
+      if (typeof dir === 'string') await claimStorageDirectory(dir, app.getPath('userData'), { appDir: app.getAppPath() })
+    }
     setSettings(app.getPath('userData'), dirs)
     // Keep main-process env in sync so child processes spawned after token change inherit it
     if (hfToken !== undefined) {
@@ -1090,11 +1111,12 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     }
   })
 
+  // Storage moves and deletions only touch what Modly created (#351).
   ipcMain.handle('fs:moveDirectory', async (_, { src, dest }: { src: string; dest: string }) => {
     try {
       const userData = app.getPath('userData')
-      await moveStorageDirectory(src, dest, getSettings(userData), userData, { appDir: app.getAppPath() })
-      return { success: true }
+      const { kept } = await moveStorageDirectory(src, dest, getSettings(userData), userData, await storageGuardOptions())
+      return { success: true, kept }
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
@@ -1103,10 +1125,33 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   ipcMain.handle('fs:deleteDirectory', async (_, dirPath: string) => {
     try {
       const userData = app.getPath('userData')
-      await deleteStorageDirectory(dirPath, getSettings(userData), userData, { appDir: app.getAppPath() })
-      return { success: true }
+      const { kept } = await deleteStorageDirectory(dirPath, getSettings(userData), userData, await storageGuardOptions())
+      return { success: true, kept }
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  // What a change of storage folder would move or delete: Modly's own entries,
+  // and how many others it leaves alone.
+  ipcMain.handle('fs:storageEntries', async (_, kind: StorageKind) => {
+    const userData = app.getPath('userData')
+    const settings = getSettings(userData)
+    const dir = { models: settings.modelsDir, workspace: settings.workspaceDir, workflows: settings.workflowsDir }[kind]
+    if (!dir) return { modly: [], other: [] }
+    try {
+      return await listStorageEntries(kind, dir, settings, await storageGuardOptions())
+    } catch {
+      return { modly: [], other: [] }
+    }
+  })
+
+  ipcMain.handle('fs:checkStorageLocation', (_, dirPath: string) => {
+    try {
+      validateStorageLocation(dirPath, app.getPath('userData'), { appDir: app.getAppPath() })
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
 

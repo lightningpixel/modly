@@ -3,10 +3,12 @@ import { Section, Card, Row, PathRow } from '@shared/ui'
 
 // ─── MoveFolderModal ──────────────────────────────────────────────────────────
 
-function MoveFolderModal({ title, currentDir, items, itemLabel, moveLabel, moveDesc, deleteLabel, deleteDesc, status, error, onCancel, onMove, onDelete }: {
+function MoveFolderModal({ title, currentDir, items, otherCount, itemLabel, moveLabel, moveDesc, deleteLabel, deleteDesc, status, error, onCancel, onMove, onDelete }: {
   title: string
   currentDir: string
   items: string[]
+  /** Entries Modly did not create: they are never moved or deleted. */
+  otherCount: number
   itemLabel: string
   moveLabel: string
   moveDesc: string
@@ -30,6 +32,11 @@ function MoveFolderModal({ title, currentDir, items, itemLabel, moveLabel, moveD
           <p className="mt-2.5 px-3 py-2 bg-zinc-800/70 rounded-lg text-[11px] font-mono text-zinc-400 truncate border border-zinc-700/50">
             {currentDir}
           </p>
+          {otherCount > 0 && (
+            <p className="text-[11px] text-zinc-500 mt-2.5">
+              {otherCount} other item{otherCount > 1 ? 's' : ''} in this folder {otherCount > 1 ? 'were' : 'was'} not created by Modly and will stay where {otherCount > 1 ? 'they are' : 'it is'}.
+            </p>
+          )}
           <p className="text-xs text-zinc-500 mt-3">What should happen to them?</p>
         </div>
 
@@ -77,6 +84,9 @@ export function StorageSection(): JSX.Element {
   const [workspaceDir,  setWorkspaceDir]  = useState('')
   const [workflowsDir,  setWorkflowsDir]  = useState('')
   const [cacheStatus, setCacheStatus]     = useState<'idle' | 'clearing' | 'done' | 'error'>('idle')
+  const [storageError, setStorageError]   = useState<string | null>(null)
+  // Items of the current folder Modly did not create (one modal at a time).
+  const [otherItems,   setOtherItems]     = useState(0)
 
   const [pendingModelsDir,     setPendingModelsDir]     = useState<string | null>(null)
   const [existingModels,       setExistingModels]       = useState<string[]>([])
@@ -102,73 +112,98 @@ export function StorageSection(): JSX.Element {
   }, [])
 
   async function applyModelsDir(path: string) {
-    setModelsDir(path)
     await window.electron.settings.set({ modelsDir: path })
     await window.electron.api.updatePaths({ modelsDir: path })
+    setModelsDir(path)
   }
 
   async function applyWorkspaceDir(path: string) {
-    setWorkspaceDir(path)
     await window.electron.settings.set({ workspaceDir: path })
     await window.electron.api.updatePaths({ workspaceDir: path })
+    setWorkspaceDir(path)
   }
 
   async function applyWorkflowsDir(path: string) {
-    setWorkflowsDir(path)
     await window.electron.settings.set({ workflowsDir: path })
+    setWorkflowsDir(path)
+  }
+
+  /** Refuses a drive root or system folder before anything is changed. */
+  async function checkLocation(dir: string): Promise<boolean> {
+    const result = await window.electron.fs.checkStorageLocation(dir)
+    setStorageError(result.ok ? null : `${dir}: ${result.error ?? 'not a valid storage folder'}`)
+    return result.ok
+  }
+
+  async function applyOrReport(apply: () => Promise<void>) {
+    try {
+      await apply()
+    } catch (err) {
+      setStorageError(err instanceof Error ? err.message : String(err))
+    }
   }
 
   async function handleBrowseModels() {
     const newPath = await window.electron.fs.selectDirectory(modelsDir)
     if (!newPath || newPath === modelsDir) return
+    if (!(await checkLocation(newPath))) return
 
-    const models = await window.electron.fs.listDir(modelsDir)
-    if (models.length > 0) {
-      setExistingModels(models)
+    // Only what Modly created there is offered for moving or deleting.
+    const { modly, other } = await window.electron.fs.storageEntries('models')
+    if (modly.length > 0) {
+      setExistingModels(modly)
+      setOtherItems(other.length)
       setPendingModelsDir(newPath)
       return
     }
 
-    await applyModelsDir(newPath)
+    await applyOrReport(() => applyModelsDir(newPath))
   }
 
   async function handleBrowseWorkspace() {
     const newPath = await window.electron.fs.selectDirectory(workspaceDir)
     if (!newPath || newPath === workspaceDir) return
+    if (!(await checkLocation(newPath))) return
 
-    const items = await window.electron.fs.listDir(workspaceDir)
-    if (items.length > 0) {
-      setExistingWorkspaces(items)
+    // Only what Modly created there is offered for moving or deleting.
+    const { modly, other } = await window.electron.fs.storageEntries('workspace')
+    if (modly.length > 0) {
+      setExistingWorkspaces(modly)
+      setOtherItems(other.length)
       setPendingWorkspaceDir(newPath)
       return
     }
 
-    await applyWorkspaceDir(newPath)
+    await applyOrReport(() => applyWorkspaceDir(newPath))
   }
 
   async function handleBrowseWorkflows() {
     const newPath = await window.electron.fs.selectDirectory(workflowsDir)
     if (!newPath || newPath === workflowsDir) return
+    if (!(await checkLocation(newPath))) return
 
-    const items = await window.electron.fs.listDir(workflowsDir)
-    if (items.length > 0) {
-      setExistingWorkflows(items)
+    // Only what Modly created there is offered for moving or deleting.
+    const { modly, other } = await window.electron.fs.storageEntries('workflows')
+    if (modly.length > 0) {
+      setExistingWorkflows(modly)
+      setOtherItems(other.length)
       setPendingWorkflowsDir(newPath)
       return
     }
 
-    await applyWorkflowsDir(newPath)
+    await applyOrReport(() => applyWorkflowsDir(newPath))
   }
 
   async function handleMoveModels() {
     if (!pendingModelsDir) return
     setModelsActionStatus('busy')
     const result = await window.electron.fs.moveDirectory({ src: modelsDir, dest: pendingModelsDir })
-    if (result.success) {
+    try {
+      if (!result.success) throw new Error(result.error ?? 'Something went wrong. Please try again.')
       await applyModelsDir(pendingModelsDir)
       closeModelsModal()
-    } else {
-      setModelsActionError(result.error ?? null)
+    } catch (err) {
+      setModelsActionError(err instanceof Error ? err.message : String(err))
       setModelsActionStatus('error')
     }
   }
@@ -177,11 +212,12 @@ export function StorageSection(): JSX.Element {
     if (!pendingModelsDir) return
     setModelsActionStatus('busy')
     const result = await window.electron.fs.deleteDirectory(modelsDir)
-    if (result.success) {
+    try {
+      if (!result.success) throw new Error(result.error ?? 'Something went wrong. Please try again.')
       await applyModelsDir(pendingModelsDir)
       closeModelsModal()
-    } else {
-      setModelsActionError(result.error ?? null)
+    } catch (err) {
+      setModelsActionError(err instanceof Error ? err.message : String(err))
       setModelsActionStatus('error')
     }
   }
@@ -197,11 +233,12 @@ export function StorageSection(): JSX.Element {
     if (!pendingWorkspaceDir) return
     setWorkspaceActionStatus('busy')
     const result = await window.electron.fs.moveDirectory({ src: workspaceDir, dest: pendingWorkspaceDir })
-    if (result.success) {
+    try {
+      if (!result.success) throw new Error(result.error ?? 'Something went wrong. Please try again.')
       await applyWorkspaceDir(pendingWorkspaceDir)
       closeWorkspaceModal()
-    } else {
-      setWorkspaceActionError(result.error ?? null)
+    } catch (err) {
+      setWorkspaceActionError(err instanceof Error ? err.message : String(err))
       setWorkspaceActionStatus('error')
     }
   }
@@ -210,11 +247,12 @@ export function StorageSection(): JSX.Element {
     if (!pendingWorkspaceDir) return
     setWorkspaceActionStatus('busy')
     const result = await window.electron.fs.deleteDirectory(workspaceDir)
-    if (result.success) {
+    try {
+      if (!result.success) throw new Error(result.error ?? 'Something went wrong. Please try again.')
       await applyWorkspaceDir(pendingWorkspaceDir)
       closeWorkspaceModal()
-    } else {
-      setWorkspaceActionError(result.error ?? null)
+    } catch (err) {
+      setWorkspaceActionError(err instanceof Error ? err.message : String(err))
       setWorkspaceActionStatus('error')
     }
   }
@@ -230,11 +268,12 @@ export function StorageSection(): JSX.Element {
     if (!pendingWorkflowsDir) return
     setWorkflowsActionStatus('busy')
     const result = await window.electron.fs.moveDirectory({ src: workflowsDir, dest: pendingWorkflowsDir })
-    if (result.success) {
+    try {
+      if (!result.success) throw new Error(result.error ?? 'Something went wrong. Please try again.')
       await applyWorkflowsDir(pendingWorkflowsDir)
       closeWorkflowsModal()
-    } else {
-      setWorkflowsActionError(result.error ?? null)
+    } catch (err) {
+      setWorkflowsActionError(err instanceof Error ? err.message : String(err))
       setWorkflowsActionStatus('error')
     }
   }
@@ -243,11 +282,12 @@ export function StorageSection(): JSX.Element {
     if (!pendingWorkflowsDir) return
     setWorkflowsActionStatus('busy')
     const result = await window.electron.fs.deleteDirectory(workflowsDir)
-    if (result.success) {
+    try {
+      if (!result.success) throw new Error(result.error ?? 'Something went wrong. Please try again.')
       await applyWorkflowsDir(pendingWorkflowsDir)
       closeWorkflowsModal()
-    } else {
-      setWorkflowsActionError(result.error ?? null)
+    } catch (err) {
+      setWorkflowsActionError(err instanceof Error ? err.message : String(err))
       setWorkflowsActionStatus('error')
     }
   }
@@ -290,6 +330,7 @@ export function StorageSection(): JSX.Element {
             value={workflowsDir}
             onBrowse={handleBrowseWorkflows}
           />
+          {storageError && <p className="text-[11px] text-red-400 break-words">{storageError}</p>}
         </Card>
 
         <Card title="Cache" description="Temporary files created during generation processing.">
@@ -318,6 +359,7 @@ export function StorageSection(): JSX.Element {
           title="Change models folder"
           currentDir={modelsDir}
           items={existingModels}
+          otherCount={otherItems}
           itemLabel="model"
           moveLabel="Move to new folder"
           moveDesc="Transfer all models to the new location."
@@ -336,11 +378,12 @@ export function StorageSection(): JSX.Element {
           title="Change workspace folder"
           currentDir={workspaceDir}
           items={existingWorkspaces}
+          otherCount={otherItems}
           itemLabel="item"
           moveLabel="Move to new folder"
-          moveDesc="Transfer all workspace files to the new location."
+          moveDesc="Transfer Modly's workspace files to the new location."
           deleteLabel="Delete workspace files"
-          deleteDesc="Remove all files from the current folder."
+          deleteDesc="Remove Modly's files from the current folder."
           status={workspaceActionStatus}
           error={workspaceActionError}
           onCancel={closeWorkspaceModal}
@@ -354,6 +397,7 @@ export function StorageSection(): JSX.Element {
           title="Change workflows folder"
           currentDir={workflowsDir}
           items={existingWorkflows}
+          otherCount={otherItems}
           itemLabel="workflow"
           moveLabel="Move to new folder"
           moveDesc="Transfer all workflow files to the new location."

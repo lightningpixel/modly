@@ -208,8 +208,12 @@ declare global {
         listDir:         (dirPath: string) => Promise<string[]>
         listFiles:       (dirPath: string, extensions?: string[]) => Promise<string[]>
         selectTextFile:  () => Promise<string | null>
-        moveDirectory:   (args: { src: string; dest: string }) => Promise<{ success: boolean; error?: string }>
-        deleteDirectory: (dirPath: string) => Promise<{ success: boolean; error?: string }>
+        moveDirectory:   (args: { src: string; dest: string }) => Promise<{ success: boolean; error?: string; kept?: string[] }>
+        deleteDirectory: (dirPath: string) => Promise<{ success: boolean; error?: string; kept?: string[] }>
+        /** Entries of a storage folder Modly may move/delete, and the ones it leaves alone. */
+        storageEntries:  (kind: 'models' | 'workspace' | 'workflows') => Promise<{ modly: string[]; other: string[] }>
+        /** Refuses a drive root, system folder or an ancestor of home/app data as storage. */
+        checkStorageLocation: (dirPath: string) => Promise<{ ok: boolean; error?: string }>
         readScreenshotDataUrl: (filename: string) => Promise<string>
       }
       settings: {
