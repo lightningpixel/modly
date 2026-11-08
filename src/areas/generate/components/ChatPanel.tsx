@@ -67,8 +67,8 @@ function ProseMessage({ content }: { content: string }): JSX.Element {
 // ─── Actions card ─────────────────────────────────────────────────────────────
 
 const TOOL_LABELS: Record<string, string> = {
-  decimate_mesh:        'Decimated mesh',
-  smooth_mesh:          'Smoothed mesh',
+  decimate:             'Decimated mesh',
+  smooth:               'Smoothed mesh',
   list_models:          'Listed models',
   unload_models:        'Unloaded models',
   get_mesh_info:        'Inspected mesh',

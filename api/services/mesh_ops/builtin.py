@@ -1,10 +1,11 @@
 """Built-in mesh operation definitions."""
 
+from .agent_format import format_fixes, format_inspection, format_repair
 from .inspection import inspect_mesh, suggest_fixes
 from .operations import decimate_mesh, repair_mesh, smooth_mesh
 from .repair import auto_repair_mesh
 from .transforms import auto_orient, drop_to_ground, normalize_scale, recenter
-from .types import MeshOp
+from .types import AgentTool, MeshOp
 
 
 REPAIR_PARAMS = (
@@ -190,6 +191,20 @@ BUILTIN_MESH_OPS = (
         params_schema=REPAIR_MESH_PARAMS,
         fn=auto_repair_mesh,
         category="repair",
+        agent=AgentTool(
+            description=(
+                "Repair a mesh automatically: fill holes, fix non-manifold edges, degenerate "
+                "faces and flipped normals, re-checking until it is closed and manifold. "
+                "Writes a new mesh without textures; does nothing if the mesh is already sound."
+            ),
+            params={
+                "fill_holes": (
+                    "Close holes. Set false only for meshes meant to stay open, "
+                    "like terrain: then only flipped faces are fixed."
+                ),
+            },
+            format_result=format_repair,
+        ),
     ),
     MeshOp(
         id="decimate",
@@ -197,6 +212,11 @@ BUILTIN_MESH_OPS = (
         params_schema=DECIMATE_PARAMS,
         fn=decimate_mesh,
         category="optimization",
+        agent=AgentTool(
+            description="Reduce the polygon count of a mesh using quadric edge collapse.",
+            params={"target_faces": "Target number of triangles after decimation."},
+            required=("target_faces",),
+        ),
     ),
     MeshOp(
         id="smooth",
@@ -204,6 +224,11 @@ BUILTIN_MESH_OPS = (
         params_schema=SMOOTH_PARAMS,
         fn=smooth_mesh,
         category="optimization",
+        agent=AgentTool(
+            description="Smooth the surface of a mesh (volume-preserving Taubin smoothing).",
+            params={"iterations": "Number of smoothing passes. More = smoother but loses detail."},
+            required=("iterations",),
+        ),
     ),
     MeshOp(
         id="inspect_mesh",
@@ -211,6 +236,14 @@ BUILTIN_MESH_OPS = (
         params_schema=INSPECT_PARAMS,
         fn=inspect_mesh,
         category="analysis",
+        agent=AgentTool(
+            description=(
+                "Diagnose a mesh without modifying it: watertight, manifold, holes, "
+                "self-intersections, disconnected parts, dimensions, volume, UVs/normals, "
+                "and whether it is 3D-printable."
+            ),
+            format_result=format_inspection,
+        ),
     ),
     MeshOp(
         id="suggest_fixes",
@@ -218,6 +251,13 @@ BUILTIN_MESH_OPS = (
         params_schema=INSPECT_PARAMS,
         fn=suggest_fixes,
         category="analysis",
+        agent=AgentTool(
+            description=(
+                "Inspect a mesh and list the operations (with parameters) that would fix "
+                "its problems. Does not modify the mesh."
+            ),
+            format_result=format_fixes,
+        ),
     ),
     MeshOp(
         id="recenter",

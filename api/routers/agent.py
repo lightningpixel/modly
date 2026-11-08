@@ -14,12 +14,80 @@ from pydantic import BaseModel, Field
 
 from services import llm_server
 from services.llm_server import llama_pool
+from services.mesh_ops import MeshOp, MeshOpNotFoundError, MeshOpsRegistry, mesh_ops_registry
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
 MODLY_API = "http://localhost:8765"
 
-SYSTEM_PROMPT = """\
+# Mesh operations reach the chat through the registry: an op declared with an
+# `agent` spec becomes a tool, with no change here.
+_JSON_TYPES = {"int": "integer", "float": "number", "boolean": "boolean", "select": "string"}
+
+
+def _show(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _agent_param(schema: dict, description: str) -> dict:
+    prop: dict = {"type": _JSON_TYPES.get(schema.get("type"), "string")}
+    if schema.get("type") == "select":
+        prop["enum"] = [option["value"] for option in schema.get("options", [])]
+    hints = []
+    if "min" in schema and "max" in schema:
+        hints.append(f"range {_show(schema['min'])}–{_show(schema['max'])}")
+    if "default" in schema:
+        hints.append(f"default {_show(schema['default'])}")
+    prop["description"] = f"{description} ({', '.join(hints)})" if hints else description
+    return prop
+
+
+def _agent_required(op: MeshOp) -> list[str]:
+    return ["path", *op.agent.required]
+
+
+def registry_tools(registry: MeshOpsRegistry) -> list[dict]:
+    """The function-calling schema of every op the registry exposes to the agent."""
+    tools = []
+    for op in registry:
+        if op.agent is None:
+            continue
+        schemas = {schema["id"]: schema for schema in op.params_schema}
+        properties = {
+            "path": {
+                "type": "string",
+                "description": "Workspace-relative path to the mesh file. Use get_mesh_info to obtain it.",
+            },
+            **{pid: _agent_param(schemas[pid], text) for pid, text in op.agent.params.items()},
+        }
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": op.id,
+                "description": op.agent.description,
+                "parameters": {"type": "object", "properties": properties, "required": _agent_required(op)},
+            },
+        })
+    return tools
+
+
+def registry_tool_lines(registry: MeshOpsRegistry) -> str:
+    """The system prompt's entries for the ops the registry exposes to the agent."""
+    lines = []
+    for op in registry:
+        if op.agent is None:
+            continue
+        required = _agent_required(op)
+        args = ["path", *(pid if pid in required else f"{pid}?" for pid in op.agent.params)]
+        lines.append(f"- **{op.id}({', '.join(args)})** — {op.agent.description}")
+    return "\n".join(lines)
+
+
+SYSTEM_PROMPT = f"""\
 You are Modly's built-in AI assistant, specialized in 3D modeling and workflow automation.
 You help users generate 3D models from images, optimize meshes, and manage workflows directly inside the Modly application.
 
@@ -28,12 +96,8 @@ You help users generate 3D models from images, optimize meshes, and manage workf
 - **list_models** — List all downloaded 3D generation models ready to use.
 - **unload_models** — Unload all 3D generation models from GPU VRAM to free memory.
 - **get_mesh_info** — Get info about the current mesh in the 3D viewer (path, triangle count).
-- **inspect_mesh(path)** — Diagnose a mesh without modifying it: watertight, manifold, holes, self-intersections, parts, dimensions, volume, UVs/normals, and whether it is 3D-printable.
-- **suggest_fixes(path)** — Inspect a mesh and list the operations (with params) that would fix its problems.
-- **repair_mesh(path, fill_holes?)** — Repair a mesh automatically: fills holes, fixes non-manifold edges, degenerate faces and flipped normals, re-checking until it is closed and manifold. Writes a new, untextured mesh.
+{registry_tool_lines(mesh_ops_registry)}
 - **arrange_mesh(path, steps, size?, unit?, dimension?)** — Reposition a mesh in one call. Steps: `auto_orient` (lay it flat on its widest side), `normalize_scale` (resize to `size` in `unit`), `recenter` (centre on the origin), `drop_to_ground` (rest it on the ground). Steps always run in that order, whatever order you list them in.
-- **decimate_mesh(path, target_faces)** — Reduce the polygon count of a mesh.
-- **smooth_mesh(path, iterations)** — Apply Laplacian smoothing to a mesh.
 - **get_generation_status(job_id)** — Poll the status of an ongoing 3D generation job.
 - **list_workflows** — List all available workflows in Modly.
 - **run_workflow(workflow_id)** — Execute a workflow in Modly by its ID. If the user attached an image in their message, it will automatically be used as the workflow's input image.
@@ -82,68 +146,6 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "inspect_mesh",
-            "description": "Diagnose a mesh without modifying it: watertight, manifold, holes, self-intersections, disconnected parts, dimensions, volume, UVs/normals, and whether it is 3D-printable.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Workspace-relative path to the mesh file. Use get_mesh_info to obtain it.",
-                    },
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "suggest_fixes",
-            "description": "Inspect a mesh and list the operations (with parameters) that would fix its problems. Does not modify the mesh.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Workspace-relative path to the mesh file. Use get_mesh_info to obtain it.",
-                    },
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "repair_mesh",
-            "description": (
-                "Repair a mesh automatically: fill holes, fix non-manifold edges, degenerate "
-                "faces and flipped normals, re-checking until it is closed and manifold. "
-                "Writes a new mesh without textures; does nothing if the mesh is already sound."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Workspace-relative path to the mesh file. Use get_mesh_info to obtain it.",
-                    },
-                    "fill_holes": {
-                        "type": "boolean",
-                        "description": (
-                            "Close holes (default true). Set false only for meshes meant to stay open, "
-                            "like terrain: then only flipped faces are fixed."
-                        ),
-                    },
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "arrange_mesh",
             "description": (
                 "Reposition a mesh in a single call: lay it flat, resize it, centre it and/or "
@@ -185,48 +187,6 @@ TOOLS = [
                     },
                 },
                 "required": ["path", "steps"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "decimate_mesh",
-            "description": "Reduce the polygon count of the current mesh using quadric edge collapse.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Workspace-relative path to the mesh file (e.g. 'Default/mesh.glb'). Use get_mesh_info to obtain it.",
-                    },
-                    "target_faces": {
-                        "type": "integer",
-                        "description": "Target number of faces after decimation.",
-                    },
-                },
-                "required": ["path", "target_faces"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "smooth_mesh",
-            "description": "Apply Laplacian smoothing to the current mesh.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Workspace-relative path to the mesh file. Use get_mesh_info to obtain it.",
-                    },
-                    "iterations": {
-                        "type": "integer",
-                        "description": "Number of smoothing iterations (1–20). More = smoother but loses detail.",
-                    },
-                },
-                "required": ["path", "iterations"],
             },
         },
     },
@@ -314,6 +274,7 @@ TOOLS = [
         },
     },
 ]
+TOOLS += registry_tools(mesh_ops_registry)
 
 
 # Input kinds the agent may pick, mapped to the real Modly source-node types.
@@ -375,62 +336,38 @@ def _build_workflow_graph(name: str, description: str, input_type: str, steps: l
     return {"name": name, "description": description, "nodes": all_nodes, "edges": edges}
 
 
-def _format_inspection(report: dict) -> str:
-    """Render an inspect_mesh report as compact text for the model."""
-    def yes_no(value) -> str:
-        return "unknown" if value is None else ("yes" if value else "no")
-
-    dims = " × ".join(f"{d:.4g}" for d in report.get("dimensions", []))
-    volume = report.get("volume")
-    self_hits = report.get("self_intersecting_face_count")
-    lines = [
-        f"Printable: {yes_no(report.get('printable'))}",
-        f"Faces: {report.get('face_count', '?'):,}, vertices: {report.get('vertex_count', '?'):,}, parts: {report.get('component_count', '?')}",
-        f"Watertight: {yes_no(report.get('is_watertight'))}, manifold: {yes_no(report.get('is_manifold'))}, consistent winding: {yes_no(report.get('is_winding_consistent'))}",
-        f"Holes: {report.get('hole_count', 0)} ({report.get('boundary_edge_count', 0)} open edges), non-manifold edges: {report.get('non_manifold_edge_count', 0)}, degenerate faces: {report.get('degenerate_face_count', 0)}",
-        f"Self-intersecting faces: {'not checked' if self_hits is None else self_hits}",
-        f"Dimensions: {dims}, surface area: {report.get('surface_area', 0):.4g}, volume: {'n/a (not closed)' if volume is None else f'{volume:.4g}'}",
-        f"UVs: {yes_no(report.get('has_uvs'))}, normals: {yes_no(report.get('has_normals'))}",
-    ]
-    issues = report.get("issues") or []
-    if issues:
-        lines.append("Issues: " + "; ".join(issues))
-    return "\n".join(lines)
+def _agent_op(name: str) -> MeshOp | None:
+    """The registry op behind a tool name, if the registry exposes it to the agent."""
+    try:
+        op = mesh_ops_registry.get(name)
+    except MeshOpNotFoundError:
+        return None
+    return op if op.agent is not None else None
 
 
-def _format_fixes(data: dict) -> str:
-    """Render a suggest_fixes result as compact text for the model."""
-    fixes = data.get("fixes") or []
-    notes = data.get("notes") or []
-    if not fixes and not notes:
-        return "No fixes needed — the mesh has no detected problems."
-    lines = ["Suggested operations:"] if fixes else ["No operation can fix the detected problems."]
-    for fix in fixes:
-        lines.append(f"- {fix['op']} {json.dumps(fix.get('params', {}))}: {fix.get('reason', '')}")
-    lines.extend(f"Note: {note}" for note in notes)
-    return "\n".join(lines)
+async def _run_agent_op(client: httpx.AsyncClient, op: MeshOp, arguments: dict) -> tuple[str, dict | None]:
+    # Only the params shown to the model are forwarded; the rest keep their defaults.
+    params = {pid: arguments[pid] for pid in op.agent.params if arguments.get(pid) is not None}
+    r = await client.post(
+        f"{MODLY_API}/optimize/op/{op.id}",
+        json={"path": arguments["path"], "params": params},
+    )
+    r.raise_for_status()
+    data = r.json()
 
+    # An op that wrote a mesh answers with its url; analysis ops leave the scene as is.
+    payload = None
+    if data.get("url"):
+        payload = {"type": "mesh_update", "url": data["url"], "face_count": data.get("face_count")}
 
-def _format_repair(data: dict) -> tuple[str, dict | None]:
-    """Render a repair_mesh result for the model, plus the viewer update."""
-    remaining = data.get("remaining_issues") or []
-    if not data.get("repaired"):
-        text = "Nothing to repair: the mesh is already closed and manifold."
-        if remaining:
-            text = "Nothing was repaired. Remaining: " + "; ".join(remaining) + "."
-        return text, None
-
-    steps = ", ".join(data.get("steps") or [])
-    lines = [
-        f"Repaired in {data.get('passes', '?')} pass(es) ({steps}).",
-        ("Still remaining: " + "; ".join(remaining) + ".") if remaining
-        else "The mesh is now closed (watertight) and manifold.",
-        f"New mesh path: {data['path']} ({data.get('face_count', '?'):,} faces).",
-    ]
-    if data.get("textures_dropped"):
-        lines.append("The textures and UVs were dropped: the repaired mesh is geometry only.")
-    payload = {"type": "mesh_update", "url": data["url"], "face_count": data.get("face_count")}
-    return "\n".join(lines), payload
+    if op.agent.format_result is not None:
+        text = op.agent.format_result(data)
+    elif payload is not None:
+        faces = data.get("face_count")
+        text = f"{op.label} done. New mesh path: {data['path']}" + (f" ({faces:,} faces)." if faces else ".")
+    else:
+        text = f"{op.label}: {json.dumps(data)[:2000]}"
+    return text, payload
 
 
 async def execute_tool(name: str, arguments: dict, context: dict) -> tuple[str, dict | None]:
@@ -439,6 +376,10 @@ async def execute_tool(name: str, arguments: dict, context: dict) -> tuple[str, 
     """
     async with httpx.AsyncClient(timeout=60.0) as client:
         try:
+            op = _agent_op(name)
+            if op is not None:
+                return await _run_agent_op(client, op, arguments)
+
             if name == "list_models":
                 r = await client.get(f"{MODLY_API}/model/all")
                 r.raise_for_status()
@@ -463,33 +404,6 @@ async def execute_tool(name: str, arguments: dict, context: dict) -> tuple[str, 
                     info += f" ({mesh_triangles:,} triangles)"
                 return info, None
 
-            elif name == "inspect_mesh":
-                r = await client.post(
-                    f"{MODLY_API}/optimize/op/inspect_mesh",
-                    json={"path": arguments["path"]},
-                )
-                r.raise_for_status()
-                return _format_inspection(r.json()), None
-
-            elif name == "suggest_fixes":
-                r = await client.post(
-                    f"{MODLY_API}/optimize/op/suggest_fixes",
-                    json={"path": arguments["path"]},
-                )
-                r.raise_for_status()
-                return _format_fixes(r.json()), None
-
-            elif name == "repair_mesh":
-                params = {}
-                if arguments.get("fill_holes") is not None:
-                    params["fill_holes"] = bool(arguments["fill_holes"])
-                r = await client.post(
-                    f"{MODLY_API}/optimize/op/repair_mesh",
-                    json={"path": arguments["path"], "params": params},
-                )
-                r.raise_for_status()
-                return _format_repair(r.json())
-
             elif name == "arrange_mesh":
                 scale_params = {
                     key: arguments[key] for key in ("size", "unit", "dimension")
@@ -511,26 +425,6 @@ async def execute_tool(name: str, arguments: dict, context: dict) -> tuple[str, 
                     f"New mesh path: {data['path']}. Dimensions (x × y × z, metres): {dims}."
                 )
                 return text, {"type": "mesh_update", "url": data["url"]}
-
-            elif name == "decimate_mesh":
-                r = await client.post(
-                    f"{MODLY_API}/optimize/mesh",
-                    json={"path": arguments["path"], "target_faces": arguments["target_faces"]},
-                )
-                r.raise_for_status()
-                data = r.json()
-                payload = {"type": "mesh_update", "url": data["url"], "face_count": data.get("face_count")}
-                return f"Decimated to {data.get('face_count', '?')} faces.", payload
-
-            elif name == "smooth_mesh":
-                r = await client.post(
-                    f"{MODLY_API}/optimize/smooth",
-                    json={"path": arguments["path"], "iterations": arguments["iterations"]},
-                )
-                r.raise_for_status()
-                data = r.json()
-                payload = {"type": "mesh_update", "url": data["url"]}
-                return f"Smoothed mesh ({arguments['iterations']} iterations).", payload
 
             elif name == "get_generation_status":
                 r = await client.get(f"{MODLY_API}/generate/status/{arguments['job_id']}")
