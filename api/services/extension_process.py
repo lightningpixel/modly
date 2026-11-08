@@ -12,7 +12,6 @@ import json
 import os
 import platform
 import queue
-import re
 import subprocess
 import sys
 import threading
@@ -21,10 +20,10 @@ from collections import deque
 from pathlib import Path
 from typing import Callable, Optional
 
-from services.subprocess_death import describe_death
+from services.subprocess_death import MISSING_MODULE_RE, describe_death
 
 _RUNNER_PATH = Path(__file__).parent.parent / "runner.py"
-_MISSING_MODULE_RE = re.compile(r"No module named ['\"]([^'\"]+)['\"]")
+_MISSING_MODULE_RE = MISSING_MODULE_RE
 # Raw stderr lines kept per subprocess, to explain a crash (#369).
 _STDERR_TAIL = 400
 _AUTO_REPAIR_PACKAGE_MAP = {
@@ -37,6 +36,18 @@ def _venv_python(ext_dir: Path) -> Path:
     if platform.system() == "Windows":
         return ext_dir / "venv" / "Scripts" / "python.exe"
     return ext_dir / "venv" / "bin" / "python"
+
+
+class _Run:
+    """One subprocess lifetime: what is needed to explain its death."""
+
+    def __init__(self, proc: subprocess.Popen, stderr_thread: threading.Thread, stderr_tail: deque) -> None:
+        self.proc = proc
+        self.stderr_thread = stderr_thread
+        self.stderr_tail = stderr_tail
+        # Set when Modly kills it on purpose: not a crash, and its SIGKILL
+        # must not be reported as the OOM killer.
+        self.stopped_by_modly = False
 
 
 class ExtensionProcess:
@@ -56,9 +67,7 @@ class ExtensionProcess:
         self._queue:  queue.Queue                = queue.Queue()
         self._lock:   threading.Lock             = threading.Lock()
         self._loaded: bool                       = False
-        self._stderr_tail: deque                 = deque(maxlen=_STDERR_TAIL)
-        self._stderr_thread: Optional[threading.Thread] = None
-        self._stopped_by_modly: bool             = False
+        self._run:    Optional[_Run]             = None
 
         # Mirrors BaseGenerator attributes used by the registry
         self.hf_repo          = manifest.get("hf_repo", "")
@@ -131,7 +140,6 @@ class ExtensionProcess:
             # older reader thread cannot poison startup for the new process.
             run_queue: queue.Queue = queue.Queue()
             self._queue = run_queue
-            self._stopped_by_modly = False
             self._proc = subprocess.Popen(
                 [str(python), str(_RUNNER_PATH)],
                 stdin=subprocess.PIPE,
@@ -156,11 +164,11 @@ class ExtensionProcess:
 
             # Background thread: forward stderr to our stderr
             # (and keep its last lines to explain a crash).
-            self._stderr_tail = deque(maxlen=_STDERR_TAIL)
+            stderr_tail: deque = deque(maxlen=_STDERR_TAIL)
             stderr_fwd = threading.Thread(
-                target=self._stderr_loop, args=(self._proc, self._stderr_tail), daemon=True,
+                target=self._stderr_loop, args=(self._proc, stderr_tail), daemon=True,
             )
-            self._stderr_thread = stderr_fwd
+            self._run = _Run(self._proc, stderr_fwd, stderr_tail)
             stderr_fwd.start()
 
             # Wait for ready — runner sends params_schema in this message
@@ -280,35 +288,48 @@ class ExtensionProcess:
             self._proc.stdin.flush()
 
     def _recv(self, timeout: float | None = 120.0, phase: str = "unexpectedly") -> dict:
+        run = self._run
         try:
             msg = self._queue.get(timeout=timeout)
         except queue.Empty:
             raise TimeoutError(f"[{self.MODEL_ID}] No response from subprocess after {timeout}s")
         if msg is None:
-            raise self._death_error(phase)
+            raise self._death_error(phase, run)
         return msg
 
-    def _death_error(self, phase: str) -> RuntimeError:
-        """Why the subprocess died, with its exit code and last stderr lines.
+    def _death_error(self, phase: str, run: Optional[_Run]) -> RuntimeError:
+        """Why the subprocess of `run` died, with its exit code and last stderr lines.
 
         stdout closing is how we notice the death; the process may need a moment
         to finish exiting, and the stderr thread to drain what is left.
         """
         self._loaded = False
-        if self._stopped_by_modly:
-            # stop() killed it (Free Memory / unload): not a crash, and its
-            # SIGKILL must not be reported as the OOM killer.
+        if run is None:
+            return RuntimeError(describe_death(self.MODEL_ID, phase, None, []))
+        if run.stopped_by_modly:
             return RuntimeError(f"[{self.MODEL_ID}] Subprocess was stopped by Modly {phase}")
-        returncode = None
-        proc = self._proc
-        if proc is not None:
+        try:
+            returncode = run.proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            # stdout closed but the process lives on: it can no longer answer,
+            # so kill it rather than leave a worker _ensure_started would reuse.
+            returncode = None
             try:
-                returncode = proc.wait(timeout=5.0)
+                run.proc.kill()
+                run.proc.wait(timeout=5.0)
             except Exception:
-                returncode = proc.poll()
-        if self._stderr_thread is not None:
-            self._stderr_thread.join(timeout=2.0)
-        return RuntimeError(describe_death(self.MODEL_ID, phase, returncode, list(self._stderr_tail)))
+                pass
+        run.stderr_thread.join(timeout=2.0)
+        return RuntimeError(describe_death(self.MODEL_ID, phase, returncode, list(run.stderr_tail)))
+
+    def _mark_stopped_by_modly(self, proc: Optional[subprocess.Popen]) -> Optional[_Run]:
+        """Flag `proc` as killed on purpose, before the kill: the reader may see
+        stdout close before kill() returns."""
+        run = self._run
+        if run is not None and proc is not None and run.proc is proc:
+            run.stopped_by_modly = True
+            return run
+        return None
 
     def _ensure_started(self) -> None:
         if self._proc is None or self._proc.poll() is not None:
@@ -343,7 +364,7 @@ class ExtensionProcess:
         if self._proc and self._proc.poll() is None:
             try:
                 self._send({"action": "unload"})
-                self._recv(timeout=30.0)
+                self._recv(timeout=30.0, phase="while unloading")
             except Exception:
                 pass
         self._loaded = False
@@ -375,6 +396,7 @@ class ExtensionProcess:
         # native call (octree decode, marching cubes, etc.) that ignores stdin.
         CANCEL_GRACE_SECONDS = 3.0
 
+        run = self._run
         cancel_sent_at: Optional[float] = None
         while True:
             # Check for cancellation
@@ -396,6 +418,7 @@ class ExtensionProcess:
                         # generation forces a fresh load.
                         try:
                             if self._proc and self._proc.poll() is None:
+                                self._mark_stopped_by_modly(self._proc)
                                 self._proc.kill()
                                 self._proc.wait(timeout=5.0)
                         except Exception:
@@ -416,7 +439,7 @@ class ExtensionProcess:
                 continue
 
             if msg is None:
-                raise self._death_error("during generation")
+                raise self._death_error("during generation", run)
 
             t = msg.get("type")
 
@@ -493,11 +516,14 @@ class ExtensionProcess:
         proc = self._proc
         self._loaded = False
         if proc and proc.poll() is None:
-            self._stopped_by_modly = True
+            marked = self._mark_stopped_by_modly(proc)
             try:
                 proc.kill()
                 proc.wait(timeout=5)
             except Exception as exc:
+                # Still alive: a later death would be a real crash.
+                if marked is not None:
+                    marked.stopped_by_modly = False
                 # Keep the process reference so callers can verify that the
                 # worker may still be alive and refuse to mutate its venv.
                 self._proc = proc
@@ -506,6 +532,8 @@ class ExtensionProcess:
                 ) from exc
             if proc.poll() is None:
                 self._proc = proc
+                if marked is not None:
+                    marked.stopped_by_modly = False
                 raise RuntimeError(
                     f"[{self.MODEL_ID}] Extension subprocess is still running"
                 )

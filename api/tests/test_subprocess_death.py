@@ -1,5 +1,7 @@
 """#369: a dead extension subprocess must say why it died."""
+import io
 import os
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -40,8 +42,8 @@ class DescribeDeathTests(unittest.TestCase):
         self.assertIn("signal 9", msg)
         self.assertIn("out-of-memory killer", msg)
 
-    def test_stderr_cause_beats_exit_code(self) -> None:
-        msg = describe_death("x", "while starting", 0xC0000005, ["ImportError: DLL load failed while importing _C"])
+    def test_dll_failure_is_named_when_python_exited_normally(self) -> None:
+        msg = describe_death("x", "while starting", 1, ["ImportError: DLL load failed while importing _C"])
         self.assertIn("Likely cause: a system library (DLL)", msg)
 
     def test_missing_module_names_the_module(self) -> None:
@@ -58,6 +60,25 @@ class DescribeDeathTests(unittest.TestCase):
         msg = describe_death("x", "during generation", 1, ["something odd happened"])
         self.assertNotIn("Likely cause", msg)
         self.assertIn("  something odd happened", msg)
+
+    def test_earlier_import_warning_does_not_hide_a_native_crash(self) -> None:
+        # xformers prints this on every Windows import, then works fine.
+        msg = describe_death("x", "during generation", 0xC0000005, [
+            "A matching Triton is not available, some optimizations will not be enabled",
+            "ModuleNotFoundError: No module named 'triton'",
+        ])
+        self.assertIn("Likely cause: access violation", msg)
+        self.assertNotIn("Repair the extension", msg)
+
+    def test_clear_stderr_cause_beats_a_native_exit_code(self) -> None:
+        msg = describe_death("x", "while loading the model", 0xC0000409,
+                             ["torch.OutOfMemoryError: CUDA out of memory."])
+        self.assertIn("GPU ran out of memory", msg)
+
+    def test_cause_found_beyond_the_cut(self) -> None:
+        long_line = "OSError: " + "C:\\models\\x" * 60 + " Error while deserializing header: HeaderTooLarge"
+        msg = describe_death("x", "while loading the model", 1, [long_line])
+        self.assertIn("corrupted or incomplete", msg)
 
     def test_tail_is_bounded(self) -> None:
         lines = relevant_lines([f"line {i}" for i in range(100)] + ["x" * 1000])
@@ -84,6 +105,13 @@ _FAKE_RUNNER = textwrap.dedent("""
 """)
 
 
+def _reap(proc: ExtensionProcess) -> None:
+    child = proc._proc
+    if child is not None and child.poll() is None:
+        child.kill()
+        child.wait(timeout=10)
+
+
 class RealSubprocessDeathTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -100,12 +128,11 @@ class RealSubprocessDeathTests(unittest.TestCase):
 
     def _load_with(self, mode: str) -> tuple[ExtensionProcess, str]:
         proc = ExtensionProcess(ext_dir=Path(self.tmp.name), manifest={"id": "fake/generate"})
-        with patch.dict(os.environ, {"FAKE_DEATH": mode}), \
-                patch("sys.stderr", new=open(os.devnull, "w", encoding="utf-8")):
+        # StringIO, not a file: the stderr thread may still print after the test.
+        with patch.dict(os.environ, {"FAKE_DEATH": mode}), patch("sys.stderr", new=io.StringIO()):
             with self.assertRaises(RuntimeError) as ctx:
                 proc.load()
-            sys.stderr.close()
-        self.addCleanup(lambda: proc._proc and proc._proc.poll() is None and proc._proc.kill())
+        self.addCleanup(_reap, proc)
         return proc, str(ctx.exception)
 
     def test_crash_during_load_reports_its_stderr(self) -> None:
@@ -130,12 +157,49 @@ class RealSubprocessDeathTests(unittest.TestCase):
         with patch.dict(os.environ, {"FAKE_DEATH": "never"}):
             proc._start()
         proc.stop()
-        proc._proc = None
         proc._queue.put(None)
         with self.assertRaises(RuntimeError) as ctx:
             proc._recv(timeout=1.0, phase="during generation")
         self.assertIn("stopped by Modly", str(ctx.exception))
         self.assertNotIn("killer", str(ctx.exception))
+
+    def test_failed_stop_keeps_reporting_real_crashes(self) -> None:
+        proc = ExtensionProcess(ext_dir=Path(self.tmp.name), manifest={"id": "fake/generate"})
+        with patch.dict(os.environ, {"FAKE_DEATH": "silent"}):
+            proc._start()
+        self.addCleanup(_reap, proc)
+        child = proc._proc
+        with patch.object(child, "kill", side_effect=PermissionError("denied")):
+            with self.assertRaises(RuntimeError):
+                proc.stop()
+        self.assertFalse(proc._run.stopped_by_modly)
+
+    def test_a_restart_does_not_borrow_the_new_process_output(self) -> None:
+        proc = ExtensionProcess(ext_dir=Path(self.tmp.name), manifest={"id": "fake/generate"})
+        with patch.dict(os.environ, {"FAKE_DEATH": "oom"}), patch("sys.stderr", new=io.StringIO()):
+            proc._start()
+            old_run = proc._run
+            proc._send({"action": "load"})
+            old_run.proc.wait(timeout=10)
+            old_run.stderr_thread.join(timeout=5)
+        with patch.dict(os.environ, {"FAKE_DEATH": "never"}):
+            proc._start()  # a new worker replaces the dead one
+        self.addCleanup(proc.stop)
+        msg = str(proc._death_error("during generation", old_run))
+        self.assertIn("(exit code 1)", msg)
+        self.assertIn("Tried to allocate 4.00 GiB", msg)
+
+    def test_worker_that_closed_stdout_but_lives_on_is_killed(self) -> None:
+        proc = ExtensionProcess(ext_dir=Path(self.tmp.name), manifest={"id": "fake/generate"})
+        with patch.dict(os.environ, {"FAKE_DEATH": "never"}):
+            proc._start()
+        self.addCleanup(_reap, proc)
+        run = proc._run
+        with patch.object(run.proc, "wait", side_effect=[subprocess.TimeoutExpired("py", 5), None]), \
+                patch.object(run.proc, "kill", wraps=run.proc.kill) as kill:
+            proc._death_error("during generation", run)
+        kill.assert_called_once()
+        run.proc.wait(timeout=10)
 
 
 if __name__ == "__main__":
