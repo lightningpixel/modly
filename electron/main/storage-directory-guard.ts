@@ -1,8 +1,33 @@
-/** Fail-closed validation for settings-driven directory moves and deletions. */
+/**
+ * Fail-closed validation for settings-driven directory moves and deletions.
+ *
+ * Modly only moves or deletes what it can tell is its own (#351: deleting the
+ * "old models" wiped a whole drive the user had picked as models folder):
+ * - a folder Modly created holds STORAGE_MARKER, or is the <base>/<kind>
+ *   folder first-run setup creates next to <base>/extensions: all of it is Modly's;
+ * - in any other models folder, only the sub-folders named after a known
+ *   extension are; everything else is left where it is.
+ */
 import { randomUUID } from 'node:crypto'
-import { cp, lstat, mkdir, readdir, rename, rm, rmdir } from 'node:fs/promises'
+import { cp, lstat, mkdir, readdir, rename, rm, rmdir, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
+
+export const STORAGE_MARKER = '.modly-storage'
+const MARKER_CONTENT = JSON.stringify({
+  createdBy: 'Modly',
+  note: 'Modly created this folder and may move or delete what is inside it.',
+}, null, 2) + '\n'
+
+export type StorageKind = 'models' | 'workspace' | 'workflows'
+const STORAGE_KINDS: readonly string[] = ['models', 'workspace', 'workflows']
+
+export type StorageEntries = {
+  /** Entry names Modly may move or delete. */
+  modly: string[]
+  /** Entry names Modly did not create: never moved or deleted. */
+  other: string[]
+}
 
 /** Top-level Windows folders owned by the OS, refused on any drive. */
 const WINDOWS_SYSTEM_DIRS = new Set([
@@ -23,6 +48,8 @@ type Options = {
   platform?: NodeJS.Platform
   homeDir?: string
   appDir?: string
+  /** Installed and built-in extension ids: the names of Modly's model folders. */
+  knownModelIds?: Iterable<string>
 }
 
 type PathApi = typeof path.win32
@@ -105,10 +132,9 @@ function verifyNoOtherStorageInside(
   }
 }
 
-/** Only exact configured roots, plus the specific workspace/tmp cleanup, are deletable. */
-export function validateStorageDeletion(
-  directory: string, dirs: StorageDirs, userData: string, options: Options = {},
-): string {
+function resolveDeletion(
+  directory: string, dirs: StorageDirs, userData: string, options: Options,
+): { safe: string; key: string } {
   const api = pathApi(options)
   const target = absoluteDirectory(directory, api)
   const roots: Array<[string, string]> = [
@@ -122,24 +148,38 @@ export function validateStorageDeletion(
   if (selected) {
     const safe = verifySource(selected[1], userData, options)
     verifyNoOtherStorageInside(safe, selected[0], dirs, options)
-    return safe
+    return { safe, key: selected[0] }
   }
   const workspace = verifySource(dirs.workspaceDir, userData, options)
   if (equalPath(api, target, api.join(workspace, 'tmp'))) {
     verifyNoOtherStorageInside(target, 'workspace', dirs, options)
-    return target
+    return { safe: target, key: 'workspace-tmp' }
   }
   throw new Error('Path is not an approved Modly storage directory')
 }
 
-/** A folder move may delete its source: restrict source and destination equally. */
-export function validateStorageMove(
-  source: string, destination: string, dirs: StorageDirs, userData: string, options: Options = {},
-): { src: string; dest: string } {
+/** Only exact configured roots, plus the specific workspace/tmp cleanup, are deletable. */
+export function validateStorageDeletion(
+  directory: string, dirs: StorageDirs, userData: string, options: Options = {},
+): string {
+  return resolveDeletion(directory, dirs, userData, options).safe
+}
+
+/**
+ * A folder the user picks as storage: not a drive root, a system folder, nor
+ * an ancestor of the home, application or user-data folders.
+ */
+export function validateStorageLocation(directory: string, userData: string, options: Options = {}): string {
+  return verifySource(directory, userData, options)
+}
+
+function resolveMove(
+  source: string, destination: string, dirs: StorageDirs, userData: string, options: Options,
+): { src: string; dest: string; kind: StorageKind } {
   const api = pathApi(options)
   const src = verifySource(source, userData, options)
   const selected = storageEntries(dirs).find(([key, val]) =>
-    ['models', 'workspace', 'workflows'].includes(key) && equalPath(api, api.normalize(val), src))
+    STORAGE_KINDS.includes(key) && equalPath(api, api.normalize(val), src))
   if (!selected) throw new Error('Source is not a configured Modly storage directory')
   verifyNoOtherStorageInside(src, selected[0], dirs, options)
   const dest = verifySource(destination, userData, options)
@@ -154,7 +194,95 @@ export function validateStorageMove(
       throw new Error('Destination overlaps configured storage')
     }
   }
+  return { src, dest, kind: selected[0] as StorageKind }
+}
+
+/** A folder move may delete its source: restrict source and destination equally. */
+export function validateStorageMove(
+  source: string, destination: string, dirs: StorageDirs, userData: string, options: Options = {},
+): { src: string; dest: string } {
+  const { src, dest } = resolveMove(source, destination, dirs, userData, options)
   return { src, dest }
+}
+
+async function exists(file: string): Promise<boolean> {
+  try {
+    await lstat(file)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Whether Modly created `directory`: it holds the marker, or it is the
+ * <base>/<kind> folder first-run setup creates beside <base>/extensions
+ * (installs made before the marker existed).
+ */
+export async function isModlyOwnedRoot(
+  kind: StorageKind, directory: string, dirs: StorageDirs, options: Options = {},
+): Promise<boolean> {
+  const api = pathApi(options)
+  const dir = api.normalize(directory)
+  if (await exists(api.join(dir, STORAGE_MARKER))) return true
+  if (!dirs.extensionsDir) return false
+  const extensions = api.normalize(dirs.extensionsDir)
+  return api.basename(dir).toLowerCase() === kind
+    && api.basename(extensions).toLowerCase() === 'extensions'
+    && equalPath(api, api.dirname(dir), api.dirname(extensions))
+}
+
+/** Splits a storage folder's entries into Modly's own and everything else. */
+export async function listStorageEntries(
+  kind: StorageKind, directory: string, dirs: StorageDirs, options: Options = {},
+): Promise<StorageEntries> {
+  let entries
+  try {
+    entries = (await readdir(directory, { withFileTypes: true })).filter((e) => e.name !== STORAGE_MARKER)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { modly: [], other: [] }
+    throw error
+  }
+  if (await isModlyOwnedRoot(kind, directory, dirs, options)) {
+    return { modly: entries.map((e) => e.name), other: [] }
+  }
+  if (kind !== 'models') return { modly: [], other: entries.map((e) => e.name) }
+
+  const fold = (name: string) => (pathApi(options) === path.win32 ? name.toLowerCase() : name)
+  const known = new Set([...(options.knownModelIds ?? [])].map(fold))
+  const modly: string[] = []
+  const other: string[] = []
+  for (const entry of entries) {
+    // A real folder named after an extension; never a link out of the folder.
+    if (entry.isDirectory() && !entry.isSymbolicLink() && known.has(fold(entry.name))) modly.push(entry.name)
+    else other.push(entry.name)
+  }
+  return { modly, other }
+}
+
+/** Removes `directory` if nothing but the marker is left in it. */
+async function removeIfEmpty(directory: string): Promise<void> {
+  let names: string[]
+  try {
+    names = await readdir(directory)
+  } catch {
+    return
+  }
+  if (names.some((n) => n !== STORAGE_MARKER)) return
+  await rm(path.join(directory, STORAGE_MARKER), { force: true })
+  await rmdir(directory).catch(() => {})
+}
+
+/**
+ * Makes `directory` ready as a storage folder and marks it Modly's when it is
+ * new or empty. A folder that already holds the user's files stays unmarked,
+ * so Modly will never delete them.
+ */
+export async function claimStorageDirectory(directory: string, userData: string, options: Options = {}): Promise<void> {
+  const safe = validateStorageLocation(directory, userData, options)
+  await assertNoSymlinkAncestors(safe, options)
+  await mkdir(safe, { recursive: true })
+  if ((await readdir(safe)).length === 0) await writeFile(path.join(safe, STORAGE_MARKER), MARKER_CONTENT)
 }
 
 /** Reject symlinks or Windows junctions in existing path ancestors. */
@@ -185,23 +313,38 @@ export async function assertEmptyDestination(directory: string): Promise<void> {
   }
 }
 
-/** Main-process IPC handlers must use guarded operations, never raw rm/cp. */
+/**
+ * Main-process IPC handlers must use guarded operations, never raw rm/cp.
+ * For the models, workspace and workflows folders only Modly's own entries are
+ * deleted; the folder itself goes only once nothing else is left in it.
+ */
 export async function deleteStorageDirectory(
   directory: string, dirs: StorageDirs, userData: string, options: Options = {},
-): Promise<void> {
-  const safe = validateStorageDeletion(directory, dirs, userData, options)
+): Promise<{ removed: string[]; kept: string[] }> {
+  const api = pathApi(options)
+  const { safe, key } = resolveDeletion(directory, dirs, userData, options)
   await assertNoSymlinkAncestors(safe, options)
-  await rm(safe, { recursive: true, force: true })
+  if (!STORAGE_KINDS.includes(key)) {
+    // Extensions, generation cache and workspace/tmp hold only Modly's files.
+    await rm(safe, { recursive: true, force: true })
+    return { removed: [api.basename(safe)], kept: [] }
+  }
+  const { modly, other } = await listStorageEntries(key as StorageKind, safe, dirs, options)
+  for (const name of modly) await rm(api.join(safe, name), { recursive: true, force: true })
+  await removeIfEmpty(safe)
+  return { removed: modly, kept: other }
 }
 
+/** Moves Modly's own entries of a storage folder; anything else stays put. */
 export async function moveStorageDirectory(
   source: string, destination: string, dirs: StorageDirs, userData: string, options: Options = {},
-): Promise<void> {
+): Promise<{ moved: string[]; kept: string[] }> {
   const api = pathApi(options)
-  const { src, dest } = validateStorageMove(source, destination, dirs, userData, options)
+  const { src, dest, kind } = resolveMove(source, destination, dirs, userData, options)
   await assertNoSymlinkAncestors(src, options)
   await assertNoSymlinkAncestors(dest, options)
   await assertEmptyDestination(dest)
+  const { modly, other } = await listStorageEntries(kind, src, dirs, options)
 
   const parent = api.dirname(dest)
   await mkdir(parent, { recursive: true })
@@ -210,7 +353,12 @@ export async function moveStorageDirectory(
   // and a retry does not trip over a half-filled destination.
   const staging = api.join(parent, '.' + api.basename(dest) + '.modly-move-' + randomUUID())
   try {
-    await cp(src, staging, { recursive: true, force: false, errorOnExist: true })
+    await mkdir(staging)
+    for (const name of modly) {
+      await cp(api.join(src, name), api.join(staging, name), { recursive: true, force: false, errorOnExist: true })
+    }
+    // Modly made this folder, so it may manage everything in it later.
+    await writeFile(api.join(staging, STORAGE_MARKER), MARKER_CONTENT)
     // Remove the verified-empty destination; rmdir fails closed if a file appeared.
     try {
       await rmdir(dest)
@@ -223,7 +371,9 @@ export async function moveStorageDirectory(
     throw err
   }
 
-  // The source is deleted only once its complete copy sits at the destination.
+  // The source entries are deleted only once their complete copy sits at the destination.
   await assertNoSymlinkAncestors(src, options)
-  await rm(src, { recursive: true, force: true })
+  for (const name of modly) await rm(api.join(src, name), { recursive: true, force: true })
+  await removeIfEmpty(src)
+  return { moved: modly, kept: other }
 }

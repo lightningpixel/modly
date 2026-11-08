@@ -95,10 +95,14 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         ipcRenderer.invoke('fs:listFiles', dirPath, extensions) as Promise<string[]>,
       selectTextFile:    (): Promise<string | null> =>
         ipcRenderer.invoke('fs:selectTextFile') as Promise<string | null>,
-      moveDirectory:     (args: { src: string; dest: string }): Promise<{ success: boolean; error?: string }> =>
-        ipcRenderer.invoke('fs:moveDirectory', args) as Promise<{ success: boolean; error?: string }>,
-      deleteDirectory:   (dirPath: string): Promise<{ success: boolean; error?: string }> =>
-        ipcRenderer.invoke('fs:deleteDirectory', dirPath) as Promise<{ success: boolean; error?: string }>,
+      moveDirectory:     (args: { src: string; dest: string }): Promise<{ success: boolean; error?: string; kept?: string[] }> =>
+        ipcRenderer.invoke('fs:moveDirectory', args) as Promise<{ success: boolean; error?: string; kept?: string[] }>,
+      deleteDirectory:   (dirPath: string): Promise<{ success: boolean; error?: string; kept?: string[] }> =>
+        ipcRenderer.invoke('fs:deleteDirectory', dirPath) as Promise<{ success: boolean; error?: string; kept?: string[] }>,
+      storageEntries:    (kind: 'models' | 'workspace' | 'workflows'): Promise<{ modly: string[]; other: string[] }> =>
+        ipcRenderer.invoke('fs:storageEntries', kind) as Promise<{ modly: string[]; other: string[] }>,
+      checkStorageLocation: (dirPath: string): Promise<{ ok: boolean; error?: string }> =>
+        ipcRenderer.invoke('fs:checkStorageLocation', dirPath) as Promise<{ ok: boolean; error?: string }>,
       readScreenshotDataUrl: (filename: string): Promise<string> =>
         ipcRenderer.invoke('fs:readScreenshotDataUrl', filename) as Promise<string>,
     },

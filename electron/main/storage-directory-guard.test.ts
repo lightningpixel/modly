@@ -165,20 +165,21 @@ test('real move does not overwrite destination files or erase unrelated data', a
     workflowsDir: join(base, 'workflows'), extensionsDir: join(base, 'extensions'),
     dependenciesDir: join(base, 'dependencies'), agentDir: join(base, 'agent'),
   }
-  const options = { platform: process.platform, homeDir: join(base, 'other-home') }
+  const options = { platform: process.platform, homeDir: join(base, 'other-home'), knownModelIds: ['triposg'] }
   try {
-    await mkdir(source)
+    await mkdir(join(source, 'triposg'), { recursive: true })
     await mkdir(destination, { recursive: true })
-    await writeFile(join(source, 'asset.glb'), 'model')
+    await writeFile(join(source, 'triposg', 'asset.glb'), 'model')
     await writeFile(join(destination, 'personal.txt'), 'preserve')
     await assert.rejects(() => moveStorageDirectory(source, destination, unixDirs,
       join(base, 'userData'), options), /empty/i)
     assert.equal(await readFile(join(destination, 'personal.txt'), 'utf8'), 'preserve')
-    assert.equal(await readFile(join(source, 'asset.glb'), 'utf8'), 'model')
+    assert.equal(await readFile(join(source, 'triposg', 'asset.glb'), 'utf8'), 'model')
     // The folder picker usually hands back an existing, empty folder.
     await rm(join(destination, 'personal.txt'))
     await moveStorageDirectory(source, destination, unixDirs, join(base, 'userData'), options)
-    assert.equal(await readFile(join(destination, 'asset.glb'), 'utf8'), 'model')
+    assert.equal(await readFile(join(destination, 'triposg', 'asset.glb'), 'utf8'), 'model')
+    assert.deepEqual((await readdir(destination)).sort(), ['.modly-storage', 'triposg'])
     await assert.rejects(() => access(source))
     assert.deepEqual(await readdir(join(base, 'migrated')), ['models'])
   } finally {
