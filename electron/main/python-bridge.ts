@@ -7,6 +7,7 @@ import { ensureAgentDir, getSettings } from './settings-store'
 import { getHfToken } from './hf-token'
 import { logger } from './logger'
 import { cleanPythonEnv, getVenvPythonExe } from './python-setup'
+import { appendTail, describeStartupFailure, detectPortProblem, findPortHolder } from './startup-error'
 
 const API_PORT = 8765
 const API_HOST = '127.0.0.1'
@@ -18,6 +19,11 @@ export class PythonBridge {
   private startPromise: Promise<void> | null = null
   private getWindow: (() => BrowserWindow | null) | null = null
   private intentionalStop = false
+  // What the current/last process left behind, to explain a startup failure.
+  private stderrTail = ''
+  private exitCode: number | null = null
+  private spawnError: string | null = null
+  private streamsClosed: Promise<void> = Promise.resolve()
 
   setWindowGetter(fn: () => BrowserWindow | null): void {
     this.getWindow = fn
@@ -48,35 +54,57 @@ export class PythonBridge {
 
     await this.killProcessOnPort()
 
-    this.process = spawn(pythonExecutable, ['-m', 'uvicorn', 'main:app', '--host', API_HOST, '--port', String(API_PORT)], {
-      cwd: apiDir,
-      env: {
-        ...cleanPythonEnv(),
-        PYTHONUNBUFFERED:       '1',
-        // mesh_ops uses Electron in Node mode for the existing meshoptimizer
-        // backend, so packaged builds do not depend on a system Node install.
-        MODLY_NODE_EXECUTABLE:  process.execPath,
-        // We decode both pipes as UTF-8 below (Buffer.toString() default), and
-        // the API forwards extension output — tqdm bars included — through its
-        // own stderr. Without this the API would encode them with the Windows
-        // locale codec and the HUD log pane would show █ escapes.
-        PYTHONIOENCODING:       'utf-8',
-        // No PYTHONPATH needed - the venv's Python has its own isolated site-packages
-        MODELS_DIR:             this.resolveModelsDir(),
-        WORKSPACE_DIR:          this.resolveWorkspaceDir(),
-        EXTENSIONS_DIR:         this.resolveExtensionsDir(),
-        // llm_server.py keeps everything of the local LLM here: engine, GGUF models, logs, config.
-        MODLY_LLM_DIR:          this.resolveAgentDir(),
-        SELECTED_MODEL_ID:      process.env['SELECTED_MODEL_ID'] ?? '',
-        HUGGING_FACE_HUB_TOKEN: this.resolveHfToken(),
-        HF_TOKEN:               this.resolveHfToken(),
-      },
-      // On Unix, put the bridge in its own process group so every subprocess
-      // it spawns (extension runners, etc.) inherits that group. On shutdown
-      // we SIGKILL the whole group (negative PID) to take them all out
-      // together — otherwise children get reparented to launchd and keep
-      // holding MPS-wired memory until the user kills them manually.
-      detached: process.platform !== 'win32',
+    try {
+      this.process = spawn(pythonExecutable, ['-m', 'uvicorn', 'main:app', '--host', API_HOST, '--port', String(API_PORT)], {
+        cwd: apiDir,
+        env: {
+          ...cleanPythonEnv(),
+          PYTHONUNBUFFERED:       '1',
+          // mesh_ops uses Electron in Node mode for the existing meshoptimizer
+          // backend, so packaged builds do not depend on a system Node install.
+          MODLY_NODE_EXECUTABLE:  process.execPath,
+          // We decode both pipes as UTF-8 below (Buffer.toString() default), and
+          // the API forwards extension output — tqdm bars included — through its
+          // own stderr. Without this the API would encode them with the Windows
+          // locale codec and the HUD log pane would show █ escapes.
+          PYTHONIOENCODING:       'utf-8',
+          // No PYTHONPATH needed - the venv's Python has its own isolated site-packages
+          MODELS_DIR:             this.resolveModelsDir(),
+          WORKSPACE_DIR:          this.resolveWorkspaceDir(),
+          EXTENSIONS_DIR:         this.resolveExtensionsDir(),
+          // llm_server.py keeps everything of the local LLM here: engine, GGUF models, logs, config.
+          MODLY_LLM_DIR:          this.resolveAgentDir(),
+          SELECTED_MODEL_ID:      process.env['SELECTED_MODEL_ID'] ?? '',
+          HUGGING_FACE_HUB_TOKEN: this.resolveHfToken(),
+          HF_TOKEN:               this.resolveHfToken(),
+        },
+        // On Unix, put the bridge in its own process group so every subprocess
+        // it spawns (extension runners, etc.) inherits that group. On shutdown
+        // we SIGKILL the whole group (negative PID) to take them all out
+        // together — otherwise children get reparented to launchd and keep
+        // holding MPS-wired memory until the user kills them manually.
+        detached: process.platform !== 'win32',
+      })
+    } catch (err) {
+      // Windows reports some failures (e.g. EFTYPE) by throwing here instead of
+      // emitting 'error'.
+      const spawnError = err instanceof Error ? err.message : String(err)
+      throw new Error(describeStartupFailure({ port: API_PORT, exitCode: null, spawnError, stderr: '' }))
+    }
+
+    const proc = this.process
+    this.stderrTail = ''
+    this.exitCode = null
+    this.spawnError = null
+    this.streamsClosed = new Promise((resolve) => proc.once('close', () => resolve()))
+
+    // Without a listener, a failed spawn (missing exe, blocked by an antivirus)
+    // throws in the main process and startup only ends on the 90 s timeout.
+    proc.on('error', (err) => {
+      console.error('[PythonBridge] Failed to start Python:', err)
+      logger.python(`[spawn error] ${err.message}`)
+      this.spawnError = err.message
+      if (this.process === proc) this.process = null
     })
 
     this.process.stdout?.on('data', (data) => {
@@ -87,6 +115,7 @@ export class PythonBridge {
     })
 
     this.process.stderr?.on('data', (data) => {
+      this.stderrTail = appendTail(this.stderrTail, data.toString())
       const msg = data.toString().trim()
       console.error('[FastAPI]', msg)
       logger.python(`[stderr] ${msg}`)
@@ -96,8 +125,9 @@ export class PythonBridge {
     this.process.on('exit', (code) => {
       const wasReady = this.ready
       console.log('[PythonBridge] Process exited with code', code)
+      this.exitCode = code
       this.ready = false
-      this.process = null
+      if (this.process === proc) this.process = null
       if (wasReady && !this.intentionalStop) {
         const getWindow = this.getWindow
         if (!getWindow) return
@@ -188,7 +218,7 @@ export class PythonBridge {
 
   private async waitUntilReady(maxRetries = 180, delayMs = 500): Promise<void> {
     for (let i = 0; i < maxRetries; i++) {
-      if (!this.process) throw new Error('FastAPI process exited unexpectedly during startup')
+      if (!this.process) throw await this.startupError()
       try {
         await axios.get(`${API_BASE_URL}/health`, { timeout: 2000 })
         this.ready = true
@@ -199,6 +229,21 @@ export class PythonBridge {
       }
     }
     throw new Error('FastAPI did not start in time')
+  }
+
+  private async startupError(): Promise<Error> {
+    // 'exit' can fire before the last stderr chunk (the traceback) is read.
+    await Promise.race([this.streamsClosed, new Promise((r) => setTimeout(r, 1000))])
+    const portHolder = detectPortProblem(this.stderrTail) === 'in-use' ? findPortHolder(API_PORT) : null
+    const message = describeStartupFailure({
+      port: API_PORT,
+      exitCode: this.exitCode,
+      spawnError: this.spawnError,
+      stderr: this.stderrTail,
+      portHolder,
+    })
+    logger.python(`[startup failed] ${message}`)
+    return new Error(message)
   }
 
   private resolvePythonExecutable(): string {
