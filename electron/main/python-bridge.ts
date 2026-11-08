@@ -7,11 +7,20 @@ import { ensureAgentDir, getSettings } from './settings-store'
 import { getHfToken } from './hf-token'
 import { logger } from './logger'
 import { cleanPythonEnv, getVenvPythonExe } from './python-setup'
-import { appendTail, describeStartupFailure, detectPortProblem, findPortHolder } from './startup-error'
+import { appendTail, describeStartupFailure, detectPortProblem } from './startup-error'
+import {
+  DEFAULT_API_PORT, findPortHolder, isModlyBackend, isPortFree, killListener, osAssignedPort,
+  pickPort, removePortFile, writePortFile,
+} from './api-port'
 
-const API_PORT = 8765
 const API_HOST = '127.0.0.1'
-export const API_BASE_URL = `http://${API_HOST}:${API_PORT}`
+// 8765 unless another program holds it; chosen again at every start.
+let apiPort = DEFAULT_API_PORT
+
+/** The backend origin. Its port is only settled once the bridge has started. */
+export function apiBaseUrl(): string {
+  return `http://${API_HOST}:${apiPort}`
+}
 
 export class PythonBridge {
   private process: ChildProcess | null = null
@@ -52,10 +61,22 @@ export class PythonBridge {
     console.log('[PythonBridge] Starting FastAPI at', apiDir)
     console.log('[PythonBridge] Python executable:', pythonExecutable)
 
-    await this.killProcessOnPort()
+    apiPort = await pickPort(apiPort, {
+      isFree:  (port) => isPortFree(API_HOST, port),
+      isModly: (port) => isModlyBackend(API_HOST, port),
+      kill:    (port) => { killListener(port) },
+      osPort:  () => osAssignedPort(API_HOST),
+      log:     (msg) => { console.log('[PythonBridge]', msg); logger.python(msg) },
+    })
+    if (apiPort !== DEFAULT_API_PORT) {
+      const holder = findPortHolder(DEFAULT_API_PORT)
+      const msg = `Port ${DEFAULT_API_PORT} is used by ${holder ?? 'another program'}; the backend uses port ${apiPort}`
+      console.log('[PythonBridge]', msg)
+      logger.python(msg)
+    }
 
     try {
-      this.process = spawn(pythonExecutable, ['-m', 'uvicorn', 'main:app', '--host', API_HOST, '--port', String(API_PORT)], {
+      this.process = spawn(pythonExecutable, ['-m', 'uvicorn', 'main:app', '--host', API_HOST, '--port', String(apiPort)], {
         cwd: apiDir,
         env: {
           ...cleanPythonEnv(),
@@ -77,6 +98,8 @@ export class PythonBridge {
           SELECTED_MODEL_ID:      process.env['SELECTED_MODEL_ID'] ?? '',
           HUGGING_FACE_HUB_TOKEN: this.resolveHfToken(),
           HF_TOKEN:               this.resolveHfToken(),
+          // The port is not fixed: the API and the extensions it runs call back here.
+          MODLY_API_URL:          apiBaseUrl(),
         },
         // On Unix, put the bridge in its own process group so every subprocess
         // it spawns (extension runners, etc.) inherits that group. On shutdown
@@ -89,7 +112,7 @@ export class PythonBridge {
       // Windows reports some failures (e.g. EFTYPE) by throwing here instead of
       // emitting 'error'.
       const spawnError = err instanceof Error ? err.message : String(err)
-      throw new Error(describeStartupFailure({ port: API_PORT, exitCode: null, spawnError, stderr: '' }))
+      throw new Error(describeStartupFailure({ port: apiPort, exitCode: null, spawnError, stderr: '' }))
     }
 
     const proc = this.process
@@ -147,6 +170,7 @@ export class PythonBridge {
     const proc = this.process
     this.process = null
     this.ready = false
+    removePortFile(app.getPath('userData'))
     if (process.platform === 'win32') {
       const { execSync } = require('child_process')
       try { execSync(`taskkill /PID ${proc.pid} /T /F`) } catch {}
@@ -186,42 +210,15 @@ export class PythonBridge {
   }
 
   isReady(): boolean { return this.ready }
-  getPort(): number { return API_PORT }
-
-  private async killProcessOnPort(): Promise<void> {
-    const { execSync } = require('child_process')
-
-    if (process.platform !== 'win32') {
-      try { execSync(`lsof -ti tcp:${API_PORT} | xargs kill -9 2>/dev/null || true`, { shell: true }) } catch {}
-      return
-    }
-
-    for (let attempt = 0; attempt < 3; attempt++) {
-      let output = ''
-      try {
-        output = execSync(`netstat -ano | findstr ":${API_PORT} "`, { encoding: 'utf8', shell: true }) as string
-      } catch { break }
-
-      const pids = new Set<string>()
-      for (const line of output.split('\n')) {
-        const match = line.trim().match(/\s+(\d+)$/)
-        if (match && match[1] !== '0') pids.add(match[1])
-      }
-      if (pids.size === 0) break
-
-      for (const pid of pids) {
-        try { execSync(`taskkill /PID ${pid} /T /F`, { shell: true }) } catch {}
-      }
-      await new Promise((r) => setTimeout(r, 300))
-    }
-  }
+  getPort(): number { return apiPort }
 
   private async waitUntilReady(maxRetries = 180, delayMs = 500): Promise<void> {
     for (let i = 0; i < maxRetries; i++) {
       if (!this.process) throw await this.startupError()
       try {
-        await axios.get(`${API_BASE_URL}/health`, { timeout: 2000 })
+        await axios.get(`${apiBaseUrl()}/health`, { timeout: 2000 })
         this.ready = true
+        writePortFile(app.getPath('userData'), apiPort)
         console.log('[PythonBridge] FastAPI is ready')
         return
       } catch {
@@ -234,9 +231,9 @@ export class PythonBridge {
   private async startupError(): Promise<Error> {
     // 'exit' can fire before the last stderr chunk (the traceback) is read.
     await Promise.race([this.streamsClosed, new Promise((r) => setTimeout(r, 1000))])
-    const portHolder = detectPortProblem(this.stderrTail) === 'in-use' ? findPortHolder(API_PORT) : null
+    const portHolder = detectPortProblem(this.stderrTail) === 'in-use' ? findPortHolder(apiPort) : null
     const message = describeStartupFailure({
-      port: API_PORT,
+      port: apiPort,
       exitCode: this.exitCode,
       spawnError: this.spawnError,
       stderr: this.stderrTail,

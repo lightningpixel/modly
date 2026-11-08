@@ -83,34 +83,3 @@ test('appendTail keeps only the end and relevantLines caps the count', async () 
   const many = Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n')
   assert.deepEqual(relevantLines(many, 3), ['line 37', 'line 38', 'line 39'])
 })
-
-test('parseNetstatListener finds the listener whatever the state language', async () => {
-  const { parseNetstatListener } = await load()
-  const netstat = [
-    '',
-    'Connexions actives',
-    '',
-    '  Proto  Adresse locale         Adresse distante       État',
-    '  TCP    127.0.0.1:52000        127.0.0.1:8765         ESTABLISHED     900',
-    '  TCP    127.0.0.1:18765        0.0.0.0:0              LISTENING       111',
-    '  TCP    0.0.0.0:8765           0.0.0.0:0              ABHÖREN         4321',
-    '  TCP    [::]:8765              [::]:0                 LISTENING       4321',
-  ].join('\r\n')
-  assert.equal(parseNetstatListener(netstat, 8765), '4321')
-  assert.equal(parseNetstatListener(netstat, 9999), null)
-})
-
-test('findPortHolder names a real listening process', async () => {
-  const { findPortHolder } = await load()
-  const net = await import('node:net')
-  const server = net.createServer()
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
-  const { port } = server.address() as { port: number }
-  try {
-    const holder = findPortHolder(port)
-    assert.ok(holder?.endsWith(` (PID ${process.pid})`), holder ?? 'null')
-    assert.match(holder ?? '', /node/i)
-  } finally {
-    server.close()
-  }
-})

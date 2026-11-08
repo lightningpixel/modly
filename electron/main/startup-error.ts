@@ -1,8 +1,6 @@
 // Turns a FastAPI process that died during startup into a message the user can
 // act on. python-bridge.ts gathers the stderr and exit code.
 
-import { execFileSync } from 'child_process'
-
 const TAIL_MAX_CHARS = 16_000
 const SHOWN_LINES = 15
 
@@ -72,39 +70,3 @@ export function describeStartupFailure(f: StartupFailure): string {
   return `The Python backend stopped during startup${code}:\n\n${lines.join('\n')}`
 }
 
-/** Names the process listening on `port`, e.g. "wslrelay.exe (PID 4321)". */
-export function findPortHolder(port: number): string | null {
-  try {
-    if (process.platform === 'win32') {
-      const netstat = execFileSync('netstat', ['-ano', '-p', 'tcp'], { encoding: 'utf8' })
-      const pid = parseNetstatListener(netstat, port)
-      if (!pid) return null
-      const csv = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], { encoding: 'utf8' })
-      const name = csv.match(/^"([^"]+)"/)?.[1]
-      return name ? `${name} (PID ${pid})` : `PID ${pid}`
-    }
-    const out = execFileSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fpc'], { encoding: 'utf8' })
-    const pid = out.match(/^p(\d+)/m)?.[1]
-    const name = out.match(/^c(.+)$/m)?.[1]
-    if (!pid) return null
-    return name ? `${name} (PID ${pid})` : `PID ${pid}`
-  } catch {
-    return null
-  }
-}
-
-/**
- * PID of the socket listening on `port` in `netstat -ano` output. The state
- * column is translated by Windows, so a listener is recognised by its empty
- * remote address (0.0.0.0:0 / [::]:0) instead.
- */
-export function parseNetstatListener(netstat: string, port: number): string | null {
-  for (const line of netstat.split(/\r?\n/)) {
-    const cols = line.trim().split(/\s+/)
-    if (cols.length < 5 || !/^TCP/i.test(cols[0])) continue
-    if (!cols[1].endsWith(`:${port}`) || !/:0$/.test(cols[2])) continue
-    const pid = cols[cols.length - 1]
-    if (/^\d+$/.test(pid) && pid !== '0') return pid
-  }
-  return null
-}
