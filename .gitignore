@@ -43,3 +43,6 @@ Thumbs.db
 # Local dev helpers
 install.bat
 launch.bat
+
+# Local task notes (plans, lessons), never committed
+/tasks/
