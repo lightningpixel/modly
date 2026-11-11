@@ -67,6 +67,7 @@ import {
   assertCompatibleExtensionUpdateType,
   expectedModelIds,
   markExtensionInstallationInterrupted,
+  parseGitHubRepoUrl,
   validateExtensionQuarantinePayload,
   validateExtensionReloadPayload,
   validateExistingExtensionReplacement,
@@ -1534,11 +1535,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
     try {
       // 1. Parse and validate GitHub URL
-      const parsed  = new URL(githubUrl.trim())
-      if (parsed.hostname !== 'github.com') throw new Error('Invalid URL: must be a GitHub repository (github.com)')
-      const parts = parsed.pathname.split('/').filter(Boolean)
-      if (parts.length < 2) throw new Error('Invalid URL: expected format https://github.com/owner/repo')
-      const [owner, repo] = parts
+      const { owner, repo } = parseGitHubRepoUrl(githubUrl)
 
       emit({ step: 'downloading', percent: 0 })
 

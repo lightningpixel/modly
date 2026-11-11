@@ -507,3 +507,25 @@ test('validateInstallManifest validates weight variants and keeps them off proce
   }, files, 'repository'), /weight_variants is supported only for model nodes/)
 })
 
+test('parseGitHubRepoUrl resolves owner and repo from the URL forms people paste (#280)', () => {
+  const mod = loadModule()
+  const expected = { owner: 'DrHepa', repo: 'modly-trellis-text-extension' }
+  for (const url of [
+    'https://github.com/DrHepa/modly-trellis-text-extension',
+    '  https://github.com/DrHepa/modly-trellis-text-extension/  ',
+    // The "Code > HTTPS" clone URL: the GitHub API answers 404 for "<repo>.git"
+    'https://github.com/DrHepa/modly-trellis-text-extension.git',
+    'https://github.com/DrHepa/modly-trellis-text-extension/tree/master',
+    'https://github.com/DrHepa/modly-trellis-text-extension?tab=readme-ov-file',
+  ]) {
+    assert.deepEqual(mod.parseGitHubRepoUrl(url), expected, url)
+  }
+})
+
+test('parseGitHubRepoUrl rejects URLs that do not name a GitHub repository', () => {
+  const mod = loadModule()
+  assert.throws(() => mod.parseGitHubRepoUrl('https://gitlab.com/owner/repo'), /must be a GitHub repository/)
+  assert.throws(() => mod.parseGitHubRepoUrl('https://github.com/owner'), /expected format/)
+  assert.throws(() => mod.parseGitHubRepoUrl('https://github.com/owner/.git'), /expected format/)
+})
+
