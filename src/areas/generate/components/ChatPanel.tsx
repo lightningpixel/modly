@@ -302,6 +302,7 @@ export default function ChatPanel(): JSX.Element {
   const meshStats        = useAppStore((s) => s.meshStats)
   const updateCurrentJob = useAppStore((s) => s.updateCurrentJob)
   const pushMeshUrl      = useAppStore((s) => s.pushMeshUrl)
+  const applyMeshEdit    = useAppStore((s) => s.applyMeshEdit)
   const undoMesh         = useAppStore((s) => s.undoMesh)
 
   const isOllama = provider === 'ollama'
@@ -494,8 +495,7 @@ export default function ChatPanel(): JSX.Element {
 
   async function applyToolPayload(payload: AgentActionPayload | null) {
     if (payload?.type === 'mesh_update' && payload.url) {
-      updateCurrentJob({ outputUrl: payload.url })
-      pushMeshUrl(payload.url)
+      applyMeshEdit(payload.url)
     }
     if (payload?.type === 'create_workflow' && payload.workflow) {
       const draft = payload.workflow as Omit<Workflow, 'id' | 'createdAt' | 'updatedAt'>

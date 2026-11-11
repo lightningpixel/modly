@@ -1,5 +1,14 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import {
+  createMeshHistory,
+  currentMeshUrl,
+  recordMesh,
+  recordMeshEdit,
+  stepBack,
+  stepForward,
+  type MeshHistory,
+} from './meshHistory'
 
 export type UiScale = 'small' | 'medium' | 'large' | 'very-large'
 export type BackendStatus = 'not_started' | 'starting' | 'ready' | 'error'
@@ -133,10 +142,12 @@ interface AppState {
   showToast: (message: string, durationMs?: number) => void
   hideToast: () => void
 
-  // Mesh URL history (undo/redo)
-  meshHistory: string[]
-  historyIndex: number
+  // Mesh undo/redo stack for the model in the viewer (reset by setCurrentJob)
+  meshHistory: MeshHistory
+  /** Record a freshly loaded/generated mesh as the current state. */
   pushMeshUrl: (url: string) => void
+  /** Show an edited mesh, undoable back to the one it was made from. */
+  applyMeshEdit: (url: string) => void
   undoMesh: () => void
   redoMesh: () => void
   clearMeshHistory: () => void
@@ -221,32 +232,34 @@ export const useAppStore = create<AppState>()(
       showToast: (message, durationMs) => set({ toast: { id: Date.now(), message, durationMs } }),
       hideToast: () => set({ toast: null }),
 
-      meshHistory: [],
-      historyIndex: -1,
+      meshHistory: createMeshHistory(),
 
-      pushMeshUrl: (url) => {
-        const { meshHistory, historyIndex } = get()
-        const next = [...meshHistory.slice(0, historyIndex + 1), url]
-        set({ meshHistory: next, historyIndex: next.length - 1 })
+      pushMeshUrl: (url) => set({ meshHistory: recordMesh(get().meshHistory, url) }),
+
+      applyMeshEdit: (url) => {
+        const { currentJob, meshHistory } = get()
+        if (!currentJob) return
+        set({
+          meshHistory: recordMeshEdit(meshHistory, currentJob.outputUrl, url),
+          currentJob: { ...currentJob, outputUrl: url },
+        })
       },
 
       undoMesh: () => {
-        const { meshHistory, historyIndex } = get()
-        if (historyIndex <= 0) return
-        const newIndex = historyIndex - 1
-        set({ historyIndex: newIndex })
-        get().updateCurrentJob({ outputUrl: meshHistory[newIndex] })
+        const meshHistory = stepBack(get().meshHistory)
+        if (meshHistory === get().meshHistory) return
+        set({ meshHistory })
+        get().updateCurrentJob({ outputUrl: currentMeshUrl(meshHistory) })
       },
 
       redoMesh: () => {
-        const { meshHistory, historyIndex } = get()
-        if (historyIndex >= meshHistory.length - 1) return
-        const newIndex = historyIndex + 1
-        set({ historyIndex: newIndex })
-        get().updateCurrentJob({ outputUrl: meshHistory[newIndex] })
+        const meshHistory = stepForward(get().meshHistory)
+        if (meshHistory === get().meshHistory) return
+        set({ meshHistory })
+        get().updateCurrentJob({ outputUrl: currentMeshUrl(meshHistory) })
       },
 
-      clearMeshHistory: () => set({ meshHistory: [], historyIndex: -1 }),
+      clearMeshHistory: () => set({ meshHistory: createMeshHistory() }),
 
       showRamIndicator: true,
       setShowRamIndicator: (v) => set({ showRamIndicator: v }),
@@ -295,7 +308,12 @@ export const useAppStore = create<AppState>()(
         }
       },
 
-      setCurrentJob: (job) => set({ currentJob: job, meshStats: job === null ? null : get().meshStats }),
+      // A new job is a different model: its undo stack starts from its own mesh.
+      setCurrentJob: (job) => set({
+        currentJob: job,
+        meshStats: job === null ? null : get().meshStats,
+        meshHistory: createMeshHistory(job?.status === 'done' ? job.outputUrl : undefined),
+      }),
 
       updateCurrentJob: (patch) => {
         const current = get().currentJob

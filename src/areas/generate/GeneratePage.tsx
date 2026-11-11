@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import type { ReactNode } from 'react'
 import { useAppStore, DEFAULT_LIGHT_SETTINGS } from '@shared/stores/appStore'
 import type { GenerationJob, LightSettings, PointLight } from '@shared/stores/appStore'
+import { redoDepth, undoDepth } from '@shared/stores/meshHistory'
 import { useApi } from '@shared/hooks/useApi'
 import { ColorPicker } from '@shared/components/ui'
 import GenerationHUD from './components/GenerationHUD'
@@ -691,15 +692,15 @@ export default function GeneratePage(): JSX.Element {
   const currentJob = useAppStore((s) => s.currentJob)
   const apiUrl = useAppStore((s) => s.apiUrl)
   const showError = useAppStore((s) => s.showError)
-  const updateCurrentJob = useAppStore((s) => s.updateCurrentJob)
   const setCurrentJob = useAppStore((s) => s.setCurrentJob)
   const meshStats = useAppStore((s) => s.meshStats)
   const meshSelected = useAppStore((s) => s.meshSelected)
   const pushMeshUrl = useAppStore((s) => s.pushMeshUrl)
   const undoMesh = useAppStore((s) => s.undoMesh)
   const redoMesh = useAppStore((s) => s.redoMesh)
-  const canUndo = useAppStore((s) => s.historyIndex > 0)
-  const canRedo = useAppStore((s) => s.historyIndex < s.meshHistory.length - 1)
+  const applyMeshEdit = useAppStore((s) => s.applyMeshEdit)
+  const undoSteps = useAppStore((s) => undoDepth(s.meshHistory))
+  const redoSteps = useAppStore((s) => redoDepth(s.meshHistory))
   const { optimizeMesh, smoothMesh, importMesh } = useApi()
   const assetLibraryService = useMemo(() => getDefaultAssetLibraryService(), [])
 
@@ -894,8 +895,7 @@ export default function GeneratePage(): JSX.Element {
     try {
       const path = getOptimizePath(currentJob.outputUrl)
       const { url } = await smoothMesh(path, iterations)
-      updateCurrentJob({ outputUrl: url })
-      pushMeshUrl(url)
+      applyMeshEdit(url)
       setOpenPanel(null)
     } catch (err) {
       showError(err instanceof Error ? err.message : String(err))
@@ -910,8 +910,7 @@ export default function GeneratePage(): JSX.Element {
     try {
       const path = getOptimizePath(currentJob.outputUrl)
       const { url } = await optimizeMesh(path, targetFaces)
-      updateCurrentJob({ outputUrl: url })
-      pushMeshUrl(url)
+      applyMeshEdit(url)
       setOpenPanel(null)
     } catch (err) {
       showError(err instanceof Error ? err.message : String(err))
@@ -971,20 +970,25 @@ export default function GeneratePage(): JSX.Element {
           {/* Undo / Redo */}
           <button
             onClick={undoMesh}
-            disabled={!canUndo}
-            title="Undo (Ctrl+Z)"
-            className="flex items-center justify-center w-7 h-7 rounded-lg text-[11px] font-medium bg-zinc-800 border border-zinc-700/50 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+            disabled={undoSteps === 0}
+            title={undoSteps > 0 ? `Undo (Ctrl+Z) — ${undoSteps} step${undoSteps > 1 ? 's' : ''}` : 'Undo (Ctrl+Z)'}
+            className="relative flex items-center justify-center w-7 h-7 rounded-lg text-[11px] font-medium bg-zinc-800 border border-zinc-700/50 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition-colors disabled:opacity-30 disabled:pointer-events-none"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
               <path d="M3 7v6h6" />
               <path d="M3 13a9 9 0 1 0 2.28-5.93" />
             </svg>
+            {undoSteps > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-0.5 rounded-full bg-zinc-700 text-zinc-200 text-[9px] leading-[14px] text-center">
+                {undoSteps}
+              </span>
+            )}
           </button>
           <button
             onClick={redoMesh}
-            disabled={!canRedo}
-            title="Redo (Ctrl+Y)"
-            className="flex items-center justify-center w-7 h-7 rounded-lg text-[11px] font-medium bg-zinc-800 border border-zinc-700/50 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+            disabled={redoSteps === 0}
+            title={redoSteps > 0 ? `Redo (Ctrl+Y) — ${redoSteps} step${redoSteps > 1 ? 's' : ''}` : 'Redo (Ctrl+Y)'}
+            className="relative flex items-center justify-center w-7 h-7 rounded-lg text-[11px] font-medium bg-zinc-800 border border-zinc-700/50 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition-colors disabled:opacity-30 disabled:pointer-events-none"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
               <path d="M21 7v6h-6" />
