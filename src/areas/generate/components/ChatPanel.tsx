@@ -7,6 +7,8 @@ import { useExtensionsStore } from '@shared/stores/extensionsStore'
 import { useWorkflowRunStore } from '@areas/workflows/workflowRunStore'
 import { buildAllWorkflowExtensions } from '@areas/workflows/mockExtensions'
 import { readAgentEvents, toolStopTitle } from '@shared/utils/agentStream'
+import { adviceText, ollamaAdvice } from '@shared/utils/ollamaHealth'
+import OllamaBanner, { useOllamaHealth } from './OllamaBanner'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -302,6 +304,9 @@ export default function ChatPanel(): JSX.Element {
   const pushMeshUrl      = useAppStore((s) => s.pushMeshUrl)
   const undoMesh         = useAppStore((s) => s.undoMesh)
 
+  const isOllama = provider === 'ollama'
+  const ollama   = useOllamaHealth(isOllama, apiUrl, providerBaseUrl(provider, externalConfig), model)
+
   const workflows     = useWorkflowsStore((s) => s.workflows)
   const saveWorkflow  = useWorkflowsStore((s) => s.save)
   const setActiveWorkflow = useWorkflowsStore((s) => s.setActive)
@@ -374,6 +379,7 @@ export default function ChatPanel(): JSX.Element {
     setError(null)
     const id = `a-${Date.now()}`
     let finished = false
+    let failure: string | null = null
     try {
       const context = { ...buildContext(), ...extraContext }
 
@@ -440,6 +446,8 @@ export default function ChatPanel(): JSX.Element {
             break
           case 'done':
             finished = true
+            // A guardrail stop means the LLM answered: nothing to ask Ollama.
+            if (event.error && !event.stopped) failure = event.message
             patch((m) => ({
               ...m,
               // An error comes after whatever text had already streamed; a
@@ -457,6 +465,7 @@ export default function ChatPanel(): JSX.Element {
         }
       }
       if (!finished) setError('The response was interrupted.')
+      if (failure !== null && isOllama) await explainOllamaFailure(id, failure)
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       setError(msg.includes('fetch') ? 'Cannot reach Modly API. Is the backend running?' : msg)
@@ -470,6 +479,17 @@ export default function ChatPanel(): JSX.Element {
       }
       setIsLoading(false)
     }
+  }
+
+  // A failed Ollama turn: re-ping it (refreshing the banner) and, when it's
+  // down or the model isn't pulled, say so instead of the raw provider error.
+  async function explainOllamaFailure(id: string, rawError: string) {
+    const health = await ollama.check()
+    const advice = health ? ollamaAdvice(health) : null
+    if (!advice) return
+    setMessages((prev) => prev.map((m) => (m.id === id
+      ? { ...m, content: m.content.replace(rawError, adviceText(advice)) }
+      : m)))
   }
 
   async function applyToolPayload(payload: AgentActionPayload | null) {
@@ -662,6 +682,9 @@ export default function ChatPanel(): JSX.Element {
           <div ref={endRef} />
         </div>
       </div>
+
+      {/* Ollama down / model not pulled */}
+      <OllamaBanner health={ollama.health} checking={ollama.checking} onRetry={() => { void ollama.check() }} />
 
       {/* Input bar */}
       <div className="shrink-0 px-3 pb-3 pt-2 border-t border-zinc-800">
