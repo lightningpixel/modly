@@ -9,11 +9,12 @@ import uuid
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from services import llm_server
+from services import ollama_health as ollama_health_service
 from services.llm_server import llama_pool
 from services.mesh_ops import MeshOp, MeshOpNotFoundError, MeshOpsRegistry, mesh_ops_registry
 
@@ -570,6 +571,17 @@ async def list_external_models(req: ExternalModelsRequest):
             return {"models": sorted(m["id"] for m in data if isinstance(m, dict) and m.get("id"))}
         except Exception:
             return {"models": []}
+
+
+@router.get("/ollama/health")
+async def ollama_health(base_url: str = "http://localhost:11434/v1", model: str = ""):
+    """Is Ollama up, and is `model` pulled? `status` is `ok`, `unreachable`,
+    `model_missing` or `no_model`; the chat panel turns it into a banner.
+    Only local addresses are accepted (400 otherwise)."""
+    try:
+        return await ollama_health_service.check(base_url, model)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 async def _unload_llm_after_workflow(request: AgentChatRequest, actions_done: list[ActionDone]) -> None:
