@@ -17,7 +17,7 @@ useAppStore.getState = () => appState
 `)
 const axiosStub = stub('axios.ts', `const axios: any = { create: () => (globalThis as any).__sceneClient }; export default axios; export type AxiosInstance = any`)
 const extStub = stub('ext.ts', `export const getWorkflowExtension = (id: string, all: any[]) => all.find((value) => value.id === id); export type WorkflowExtension = any`)
-const notifyStub = stub('notify.ts', `export const showCompletionNotification = async () => {}; export const showErrorNotification = async () => {}`)
+const notifyStub = stub('notify.ts', `export const showCompletionNotification = async () => {}; export const showRunErrorNotification = async () => {}`)
 const aliases = new Map([
   ['axios', axiosStub], ['@shared/stores/appStore', appStoreStub],
   ['./mockExtensions', extStub], ['@shared/utils/notification', notifyStub],
