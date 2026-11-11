@@ -10,6 +10,7 @@ import { ModelLibraryModal } from '@shared/components/ui/ModelLibraryModal'
 import type { LlmModel } from '@shared/stores/llmModelsStore'
 import { formatBytes } from '@shared/utils/format'
 import { Section, Card, SegmentedControl } from '@shared/ui'
+import { TOOL_LIMITS, clampToolLimit } from '@shared/utils/agentStream'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -82,6 +83,33 @@ function StepTitle({ n, children }: { n: number; children: React.ReactNode }): J
   )
 }
 
+/** A tool-loop limit, saved on blur or Enter so typing isn't clamped mid-number. */
+function ToolLimitInput({ kind, value, onChange, label }: {
+  kind: keyof typeof TOOL_LIMITS
+  value: number
+  onChange: (value: number) => void
+  label: string
+}): JSX.Element {
+  const [draft, setDraft] = useState<string | null>(null) // null: showing the saved value
+  const commit = () => {
+    if (draft !== null && draft.trim() !== '') onChange(clampToolLimit(kind, Number(draft)))
+    setDraft(null)
+  }
+  return (
+    <input
+      type="number"
+      aria-label={label}
+      min={TOOL_LIMITS[kind].min}
+      max={TOOL_LIMITS[kind].max}
+      value={draft ?? String(value)}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === 'Enter') commit() }}
+      className="w-24 bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-accent/50"
+    />
+  )
+}
+
 const inputCls = 'w-full bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-accent/50'
 const secondaryBtnCls = 'px-2.5 py-1 rounded-md text-[11px] font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors disabled:opacity-50'
 const primaryBtnCls = 'px-3 py-1.5 rounded-lg bg-accent hover:bg-accent-dark text-white text-xs font-medium transition-colors'
@@ -121,8 +149,8 @@ const THINKING_OPTIONS: { value: ThinkingMode; label: string; desc: string }[] =
 
 export function AgentSection(): JSX.Element {
   const {
-    provider, localModel, external, defaultThinking,
-    setProvider, setExternal, setDefaultThinking,
+    provider, localModel, external, defaultThinking, toolBudget, toolTimeout,
+    setProvider, setExternal, setDefaultThinking, setToolBudget, setToolTimeout,
   } = useAgentStore()
   const apiUrl = useAppStore((s) => s.apiUrl)
 
@@ -435,6 +463,19 @@ export function AgentSection(): JSX.Element {
                 </label>
               ))}
             </div>
+          </Card>
+
+          <Card title="Tool calls" description="Guardrails that stop a chat turn stuck calling tools.">
+            <Block
+              label="Tool budget"
+              description={`Tool calls allowed per message (${TOOL_LIMITS.budget.min}–${TOOL_LIMITS.budget.max}).`}
+              action={<ToolLimitInput kind="budget" label="Tool budget" value={toolBudget} onChange={setToolBudget} />}
+            />
+            <Block
+              label="Tool timeout"
+              description={`Seconds one tool call may take (${TOOL_LIMITS.timeout.min}–${TOOL_LIMITS.timeout.max}).`}
+              action={<ToolLimitInput kind="timeout" label="Tool timeout" value={toolTimeout} onChange={setToolTimeout} />}
+            />
           </Card>
         </div>
 

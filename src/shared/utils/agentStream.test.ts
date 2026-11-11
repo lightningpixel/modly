@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { createSseParser, readAgentEvents } from './agentStream.ts'
+import { clampToolLimit, createSseParser, readAgentEvents, TOOL_LIMITS, toolStopTitle } from './agentStream.ts'
 
 const line = (event: object): string => `data: ${JSON.stringify(event)}\n\n`
 
@@ -54,4 +54,20 @@ test('a response body is read into events, multi-byte characters intact', async 
 
   assert.deepEqual(events.map((e) => e.type), ['token', 'done'])
   assert.deepEqual(events[0], { type: 'token', text: 'é→' })
+})
+
+test('a tool-loop stop gets a short title for its code', () => {
+  const stop = { tool: 'repair_mesh', message: 'm' }
+
+  assert.equal(toolStopTitle({ ...stop, code: 'tool_budget_exhausted', limit: 10 }), 'Tool budget reached (10 calls)')
+  assert.equal(toolStopTitle({ ...stop, code: 'tool_timeout', limit: 120 }), 'repair mesh timed out (120 s)')
+})
+
+test('tool limits are kept within what the API accepts', () => {
+  assert.equal(clampToolLimit('budget', 0), TOOL_LIMITS.budget.min)
+  assert.equal(clampToolLimit('budget', 7.6), 8)
+  assert.equal(clampToolLimit('budget', 1e6), TOOL_LIMITS.budget.max)
+  assert.equal(clampToolLimit('timeout', 1), TOOL_LIMITS.timeout.min)
+  assert.equal(clampToolLimit('timeout', 90), 90)
+  assert.equal(clampToolLimit('timeout', Number.NaN), TOOL_LIMITS.timeout.default)
 })
