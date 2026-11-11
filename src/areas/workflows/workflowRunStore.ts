@@ -3,7 +3,7 @@ import axios, { AxiosInstance } from 'axios'
 import { useAppStore } from '@shared/stores/appStore'
 import { getWorkflowExtension } from './mockExtensions'
 import { hasUnsupportedSceneShape } from './sceneShape'
-import { showCompletionNotification, showErrorNotification } from '@shared/utils/notification'
+import { showCompletionNotification, showRunErrorNotification } from '@shared/utils/notification'
 import type { WorkflowExtension } from './mockExtensions'
 import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
 import { isBranchStarter, isSceneOutput, resolveDataSource, reachesSceneOutput, nearestUpstreamWaits } from './nodeBehaviors'
@@ -973,7 +973,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
         if (!_cancel.current) {
           set((s) => ({ runState: { ...s.runState, status: 'error', error: String(err) }, activeNodeId: null }))
           useAppStore.getState().updateCurrentJob({ status: 'error', error: String(err) })
-          void showErrorNotification(String(err), 'Workflow run failed')
+          void showRunErrorNotification({ title: 'Workflow run failed', name: workflow.name, error: err })
         }
       }
     },
@@ -1032,6 +1032,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
           for (const d of descendantWaits(waitId, ctx)) {
             if (newWaitStates[d] === 'blocked') newWaitStates[d] = 'error'
           }
+          void showRunErrorNotification({ title: 'Workflow branch failed', name: ctx.workflow.name, error: err })
         }
         const allFinished = ctx.waitIds.every((id) => newWaitStates[id] === 'done' || newWaitStates[id] === 'error')
         const anyError    = ctx.waitIds.some((id) => newWaitStates[id] === 'error')

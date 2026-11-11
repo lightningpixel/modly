@@ -1,7 +1,7 @@
 import { useCallback, useRef } from 'react'
 import { useAppStore } from '@shared/stores/appStore'
 import { useApi } from './useApi'
-import { showCompletionNotification, showErrorNotification } from '@shared/utils/notification'
+import { showCompletionNotification, showRunErrorNotification } from '@shared/utils/notification'
 
 export function useGeneration() {
   const { currentJob, setCurrentJob, updateCurrentJob, generationOptions, selectedImageData, pushMeshUrl, clearMeshHistory } = useAppStore()
@@ -36,7 +36,7 @@ export function useGeneration() {
 
         updateCurrentJob({ status: 'generating', progress: 0 })
 
-        await pollUntilDone(jobId)
+        await pollUntilDone(jobId, job.modelId)
       } catch (err) {
         if (cancelledRef.current) {
           setCurrentJob(null)
@@ -53,14 +53,14 @@ export function useGeneration() {
           status: 'error',
           error: errorMessage
         })
-        void showErrorNotification(errorMessage, 'Generation failed')
+        void showRunErrorNotification({ title: 'Generation failed', name: job.modelId, error: errorMessage })
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps -- useApi re-creates its fns each render, so this re-memoizes anyway (values stay fresh)
     [generateFromImage, pollJobStatus, cancelJob, setCurrentJob, updateCurrentJob]
   )
 
-  const pollUntilDone = async (jobId: string) => {
+  const pollUntilDone = async (jobId: string, modelId: string) => {
     while (true) {
       await new Promise((r) => setTimeout(r, 1000))
 
@@ -86,7 +86,7 @@ export function useGeneration() {
 
       if (result.status === 'error') {
         updateCurrentJob({ status: 'error', error: result.error })
-        void showErrorNotification(result.error ?? 'Unknown error', 'Generation failed')
+        void showRunErrorNotification({ title: 'Generation failed', name: modelId, error: result.error, cancelled: cancelledRef.current })
         break
       }
 
