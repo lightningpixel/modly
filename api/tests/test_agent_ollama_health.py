@@ -3,6 +3,7 @@ import unittest
 from unittest import mock
 
 import httpx
+from fastapi import HTTPException
 
 import routers.agent as agent
 from services import ollama_health
@@ -56,11 +57,41 @@ class OllamaHealthTests(unittest.TestCase):
             requests.append(request)
             return httpx.Response(200, json=_tags("qwen2.5:3b"))
 
-        result, _ = _check(handler, base_url="http://192.168.1.20:9999/v1/")
+        result, _ = _check(handler, base_url="http://127.0.0.1:9999/v1/")
 
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(str(requests[0].url), "http://192.168.1.20:9999/api/tags")
-        self.assertEqual(result["base_url"], "http://192.168.1.20:9999")
+        self.assertEqual(str(requests[0].url), "http://127.0.0.1:9999/api/tags")
+        self.assertEqual(result["base_url"], "http://127.0.0.1:9999")
+
+    def test_rejects_urls_that_are_not_local(self) -> None:
+        # The API answers any origin (CORS *): a web page must not be able to use
+        # this endpoint to probe the user's network.
+        requests = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json=_tags("qwen2.5:3b"))
+
+        for url in (
+            "http://192.168.1.20:11434/v1",
+            "http://example.com/v1",
+            "http://user:pass@localhost:11434/v1",
+            "file:///etc/passwd",
+            "ftp://localhost/v1",
+            "http://localhost.evil.com:11434",
+        ):
+            with self.assertRaises(HTTPException, msg=url) as ctx:
+                _check(handler, base_url=url)
+            self.assertEqual(ctx.exception.status_code, 400, url)
+        self.assertEqual(requests, [])
+
+    def test_accepts_loopback_hosts(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=_tags("qwen2.5:3b"))
+
+        for url in ("http://localhost:11434/v1", "http://127.0.0.1:11434", "http://[::1]:11434/v1"):
+            result, _ = _check(handler, base_url=url)
+            self.assertEqual(result["status"], "ok", url)
 
     def test_model_missing_when_not_pulled(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -98,13 +129,13 @@ class OllamaHealthTests(unittest.TestCase):
 
     def test_unreachable_on_connection_error(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
-            raise httpx.ConnectError("connection refused", request=request)
+            raise httpx.ConnectError("[Errno 111] internal detail", request=request)
 
         result, _ = _check(handler)
 
         self.assertEqual(result["status"], "unreachable")
         self.assertEqual(result["base_url"], "http://localhost:11434")
-        self.assertIn("connection refused", result["detail"])
+        self.assertEqual(result["detail"], "connection refused")
 
     def test_unreachable_on_timeout(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -116,12 +147,13 @@ class OllamaHealthTests(unittest.TestCase):
 
     def test_unreachable_when_something_else_answers(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, text="not found")
+            return httpx.Response(404, text="secret upstream body")
 
         result, _ = _check(handler)
 
         self.assertEqual(result["status"], "unreachable")
-        self.assertIn("404", result["detail"])
+        # Generic: nothing of the upstream answer is echoed back to the caller.
+        self.assertEqual(result["detail"], "not an Ollama server")
 
     def test_unreachable_on_non_json_body(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:

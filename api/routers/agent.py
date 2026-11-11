@@ -9,7 +9,7 @@ import uuid
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -576,8 +576,12 @@ async def list_external_models(req: ExternalModelsRequest):
 @router.get("/ollama/health")
 async def ollama_health(base_url: str = "http://localhost:11434/v1", model: str = ""):
     """Is Ollama up, and is `model` pulled? `status` is `ok`, `unreachable`,
-    `model_missing` or `no_model`; the chat panel turns it into a banner."""
-    return await ollama_health_service.check(base_url, model)
+    `model_missing` or `no_model`; the chat panel turns it into a banner.
+    Only local addresses are accepted (400 otherwise)."""
+    try:
+        return await ollama_health_service.check(base_url, model)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 async def _unload_llm_after_workflow(request: AgentChatRequest, actions_done: list[ActionDone]) -> None:
