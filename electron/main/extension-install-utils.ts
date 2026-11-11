@@ -58,6 +58,19 @@ export function assertSupportedSceneNodeShape(
   }
 }
 
+/**
+ * Owner and repo of a pasted github.com URL. Accepts the clone URL form
+ * ("<repo>.git"), which the GitHub API would otherwise answer with a 404.
+ */
+export function parseGitHubRepoUrl(input: string): { owner: string; repo: string } {
+  const parsed = new URL(input.trim())
+  if (parsed.hostname !== 'github.com') throw new Error('Invalid URL: must be a GitHub repository (github.com)')
+  const [owner, rawRepo] = parsed.pathname.split('/').filter(Boolean)
+  const repo = rawRepo?.replace(/\.git$/, '')
+  if (!owner || !repo) throw new Error('Invalid URL: expected format https://github.com/owner/repo')
+  return { owner, repo }
+}
+
 export type IncompleteInstallRecoveryAction =
   | 'none'
   | 'remove-incomplete'
