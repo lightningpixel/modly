@@ -26,6 +26,11 @@ class _FakeUpload:
         return self._data
 
 
+class _FakeGenerator:
+    def params_schema(self) -> list:
+        return []
+
+
 class _FakeRegistry:
     """Accepts any model id and exposes the attrs cancel_run pokes at."""
 
@@ -33,7 +38,7 @@ class _FakeRegistry:
     _active_id = None
 
     def get_generator(self, model_id: str) -> object:
-        return object()
+        return _FakeGenerator()
 
     def get_manifest(self, model_id: str) -> dict:
         return {"output": "mesh"}
@@ -120,6 +125,7 @@ class WorkflowRunJobLifecycleTests(unittest.TestCase):
                 self._loaded = True
                 self._proc = Proc(self)
             def is_loaded(self): return self.loaded
+            def params_schema(self): return []
             def load(self): self.loaded = True
             def unload(self): self.loaded = False
             def generate(self, image_bytes, params, progress_cb, cancel_event=None):

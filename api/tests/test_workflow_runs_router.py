@@ -18,11 +18,24 @@ class _FakeUpload:
         return self._data
 
 
+class _FakeGenerator:
+    """Declares a params_schema the way BaseGenerator/ExtensionProcess do."""
+
+    def __init__(self, schema: list | None = None) -> None:
+        self._schema = schema or []
+
+    def params_schema(self) -> list:
+        return self._schema
+
+
 class _FakeRegistry:
     """Accepts any model id so the route reaches the point where it files the run."""
 
+    def __init__(self, schema: list | None = None) -> None:
+        self._gen = _FakeGenerator(schema)
+
     def get_generator(self, model_id: str) -> object:
-        return object()
+        return self._gen
 
     def get_manifest(self, model_id: str) -> dict:
         return {"output": "mesh"}
@@ -102,6 +115,7 @@ class _SwitchTrackingRegistry(_FakeRegistry):
     """Records whether switch_model ran, to prove a rejected request never reaches it."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.switched = False
 
     def switch_model(self, model_id: str) -> None:
@@ -150,6 +164,65 @@ class CreateRunRemeshValidationTests(unittest.TestCase):
                 )
             )
         self.assertFalse(registry.switched)
+
+
+class CreateRunParamsTests(unittest.TestCase):
+    """#384: params a model does not declare must not be accepted silently."""
+
+    # Mirrors hunyuan3d-mini-turbo: texture_resolution is not part of its schema.
+    _SCHEMA = [{"id": "octree_resolution"}, {"id": "seed"}]
+
+    def setUp(self) -> None:
+        self._previous = workflow_runs.generator_registry
+        workflow_runs.generator_registry = _FakeRegistry(self._SCHEMA)
+
+    def tearDown(self) -> None:
+        workflow_runs.generator_registry = self._previous
+
+    def _create(self, params: str) -> tuple[dict, BackgroundTasks]:
+        background = BackgroundTasks()
+        response = asyncio.run(
+            workflow_runs.create_run_from_image(
+                background,
+                image=_FakeUpload(),
+                model_id="hunyuan3d-mini-turbo",
+                collection="Default",
+                params=params,
+            )
+        )
+        return response, background
+
+    def test_undeclared_params_are_reported_in_the_response(self) -> None:
+        response, _ = self._create(
+            '{"remesh":"quad","enable_texture":true,"texture_resolution":2048,"octree_resolution":256}'
+        )
+        self.assertEqual(
+            response["undeclared_params"], ["remesh", "enable_texture", "texture_resolution"]
+        )
+
+    def test_declared_params_are_not_reported(self) -> None:
+        response, _ = self._create('{"octree_resolution": 256, "seed": 7}')
+        self.assertEqual(response["undeclared_params"], [])
+
+    def test_undeclared_params_are_still_forwarded_to_the_generator(self) -> None:
+        # A schema is UI metadata, not an exhaustive contract: hunyuan reads enable_texture
+        # without declaring it, so dropping or rejecting undeclared keys would break it.
+        _, background = self._create('{"enable_texture": true, "texture_resolution": 2048}')
+        forwarded = background.tasks[0].args[2]
+        self.assertTrue(forwarded["enable_texture"])
+        self.assertEqual(forwarded["texture_resolution"], 2048)
+
+    def test_invalid_params_json_is_rejected(self) -> None:
+        # Previously parsed as {} so every param was dropped without a word.
+        with self.assertRaises(HTTPException) as ctx:
+            self._create("{'texture_resolution': 2048}")
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("params", str(ctx.exception.detail))
+
+    def test_non_object_params_json_is_rejected(self) -> None:
+        with self.assertRaises(HTTPException) as ctx:
+            self._create('[["texture_resolution", 2048]]')
+        self.assertEqual(ctx.exception.status_code, 400)
 
 
 if __name__ == "__main__":
