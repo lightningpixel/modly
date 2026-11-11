@@ -45,10 +45,14 @@ async def create_run_from_image(
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(400, "File must be an image")
 
+    # Malformed params used to fall back to {} and run on defaults, dropping every value the
+    # caller set without a word (#384). Refuse instead, naming the field.
     try:
         model_params = json.loads(params)
     except (json.JSONDecodeError, TypeError):
-        model_params = {}
+        raise HTTPException(400, "params must be a JSON object")
+    if not isinstance(model_params, dict):
+        raise HTTPException(400, "params must be a JSON object")
 
     full_params = {
         "remesh": "quad",
@@ -64,10 +68,23 @@ async def create_run_from_image(
     collection = sanitize_collection(collection)
 
     try:
-        generator_registry.get_generator(model_id)
+        generator = generator_registry.get_generator(model_id)
         output_kind = generator_registry.get_manifest(model_id).get("output", "mesh")
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+    # Report the params this model does not declare, so a caller learns that e.g.
+    # texture_resolution may have no effect on it (#384). Reported, not rejected: a schema
+    # describes the UI controls, not every key a generator reads (hunyuan3d-mini consumes the
+    # undeclared enable_texture), so a 400 here would refuse requests that work. Still
+    # forwarded unchanged, exactly as /generate/from-image does.
+    declared = {field.get("id") for field in generator.params_schema()}
+    undeclared_params = [key for key in model_params if key not in declared]
+    if undeclared_params:
+        print(
+            f"[workflow-runs] {model_id} does not declare params {undeclared_params}; "
+            "the model may ignore them."
+        )
 
     job_id = str(uuid.uuid4())
     image_bytes = await image.read()
@@ -81,7 +98,7 @@ async def create_run_from_image(
         _run_generation, job_id, image_bytes, full_params, collection, output_kind, model_id
     )
 
-    return {"run_id": job_id, "status": "pending"}
+    return {"run_id": job_id, "status": "pending", "undeclared_params": undeclared_params}
 
 
 @router.get("/{run_id}", response_model=WorkflowRunStatus)
