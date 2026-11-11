@@ -6,13 +6,13 @@ import { useWorkflowsStore } from '@shared/stores/workflowsStore'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
 import { useWorkflowRunStore } from '@areas/workflows/workflowRunStore'
 import { buildAllWorkflowExtensions } from '@areas/workflows/mockExtensions'
-import { readAgentEvents } from '@shared/utils/agentStream'
+import { readAgentEvents, toolStopTitle } from '@shared/utils/agentStream'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 import type { ThinkingMode } from '@shared/stores/agentStore'
 import type { Workflow } from '@shared/types/electron.d'
-import type { AgentAction, AgentActionPayload } from '@shared/utils/agentStream'
+import type { AgentAction, AgentActionPayload, ToolStop } from '@shared/utils/agentStream'
 
 interface Message {
   id: string
@@ -21,6 +21,7 @@ interface Message {
   thinking?: string
   imageDataUrls?: string[]
   actions?: ActionDone[]
+  stopped?: ToolStop | null
   streaming?: boolean
 }
 
@@ -78,7 +79,11 @@ const TOOL_LABELS: Record<string, string> = {
   create_workflow:      'Created workflow',
 }
 
-function ActionsCard({ actions, onUndo }: { actions: ActionDone[]; onUndo?: () => void }): JSX.Element {
+function ActionsCard({ actions, stopped, onUndo }: {
+  actions: ActionDone[]
+  stopped?: ToolStop | null
+  onUndo?: () => void
+}): JSX.Element {
   const [expanded, setExpanded] = useState(false)
   const meshActions = actions.filter((a) => a.payload?.type === 'mesh_update')
   const running = actions.find((a) => a.running)
@@ -129,6 +134,7 @@ function ActionsCard({ actions, onUndo }: { actions: ActionDone[]; onUndo?: () =
             <div key={a.id ?? i} className="flex items-center justify-between px-3 py-1.5">
               <span className="text-zinc-400">{TOOL_LABELS[a.tool] ?? a.tool.replace(/_/g, ' ')}</span>
               {a.running && <span className="text-zinc-500">in progress…</span>}
+              {a.error?.code === 'tool_timeout' && <span className="text-amber-400">timed out</span>}
               {a.payload?.type === 'mesh_update' && a.payload.face_count && (
                 <span className="text-emerald-400 font-mono">{a.payload.face_count.toLocaleString()} faces</span>
               )}
@@ -140,6 +146,21 @@ function ActionsCard({ actions, onUndo }: { actions: ActionDone[]; onUndo?: () =
               )}
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Why the tool loop was stopped — shown even when collapsed */}
+      {stopped && (
+        <div role="alert" className="flex gap-2 px-3 py-2 border-t border-amber-500/20 bg-amber-500/5">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+            className="text-amber-400 shrink-0 mt-px">
+            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+            <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+          <div className="flex flex-col gap-0.5 min-w-0">
+            <span className="text-amber-300 font-medium">{toolStopTitle(stopped)}</span>
+            <span className="text-zinc-400 leading-relaxed">{stopped.message}</span>
+          </div>
         </div>
       )}
     </div>
@@ -247,7 +268,7 @@ function WorkflowProgressCard({ name }: { name: string }): JSX.Element {
 // ─── Main component ──────────────────────────────────────────────────────────
 
 export default function ChatPanel(): JSX.Element {
-  const { provider, localModel, external, defaultThinking } = useAgentStore()
+  const { provider, localModel, external, defaultThinking, toolBudget, toolTimeout } = useAgentStore()
   const { models: llmModels } = useLlmModels()
   const isLocal        = provider === 'local'
   const externalConfig = external[provider]
@@ -383,6 +404,8 @@ export default function ChatPanel(): JSX.Element {
             : { type: 'external', base_url: providerBaseUrl(provider, externalConfig), api_key: externalConfig?.apiKey ?? '' },
           context,
           thinking: thinkingMode,
+          tool_budget: toolBudget,
+          tool_timeout: toolTimeout,
         }),
       })
       if (!res.ok || !res.body) throw new Error(`API error ${res.status}`)
@@ -410,7 +433,7 @@ export default function ChatPanel(): JSX.Element {
             patch((m) => ({
               ...m,
               actions: (m.actions ?? []).map((a) => (a.id === event.id
-                ? { ...a, result: event.result, payload: event.payload, running: false }
+                ? { ...a, result: event.result, payload: event.payload, error: event.error, running: false }
                 : a)),
             }))
             await applyToolPayload(event.payload)
@@ -419,8 +442,11 @@ export default function ChatPanel(): JSX.Element {
             finished = true
             patch((m) => ({
               ...m,
-              // An error comes after whatever text had already streamed.
-              content: !m.content ? event.message : event.error ? `${m.content}\n\n${event.message}` : m.content,
+              // An error comes after whatever text had already streamed; a
+              // tool-loop stop is shown by the actions card instead.
+              content: event.stopped ? m.content
+                : !m.content ? event.message : event.error ? `${m.content}\n\n${event.message}` : m.content,
+              stopped: event.stopped,
               thinking: event.thinking ?? m.thinking,
               streaming: false,
             }))
@@ -603,7 +629,7 @@ export default function ChatPanel(): JSX.Element {
                   {msg.thinking && <ThinkingBlock content={msg.thinking} />}
                   {msg.content && <ProseMessage content={msg.content} />}
                   {msg.actions && msg.actions.length > 0 && (
-                    <ActionsCard actions={msg.actions} onUndo={undoMesh} />
+                    <ActionsCard actions={msg.actions} stopped={msg.stopped} onUndo={undoMesh} />
                   )}
                   {!msg.streaming && <FeedbackRow content={msg.content} />}
                 </div>

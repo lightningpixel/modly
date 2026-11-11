@@ -11,18 +11,45 @@ export interface AgentActionPayload {
   workflow?: Omit<Workflow, 'id' | 'createdAt' | 'updatedAt'>
 }
 
+/** Why a guardrail ended the tool loop; `message` says what to do next. */
+export interface ToolStop {
+  code: 'tool_budget_exhausted' | 'tool_timeout'
+  tool: string
+  limit: number // tool calls for the budget, seconds for the timeout
+  message: string
+}
+
 export interface AgentAction {
   tool: string
   result: string
   payload?: AgentActionPayload | null
+  error?: ToolStop | null
 }
 
 export type AgentEvent =
   | { type: 'token'; text: string }
   | { type: 'thinking'; text: string }
   | { type: 'tool_start'; id: string; tool: string; arguments: Record<string, unknown> }
-  | { type: 'tool_done'; id: string; tool: string; result: string; payload: AgentActionPayload | null }
-  | { type: 'done'; message: string; actions: AgentAction[]; thinking: string | null; error: boolean }
+  | { type: 'tool_done'; id: string; tool: string; result: string; payload: AgentActionPayload | null; error?: ToolStop | null }
+  | { type: 'done'; message: string; actions: AgentAction[]; thinking: string | null; error: boolean; stopped?: ToolStop | null }
+
+/** Bounds of the request's `tool_budget` (calls per turn) and `tool_timeout` (seconds per call). */
+export const TOOL_LIMITS = {
+  budget:  { min: 1, max: 100,  default: 10 },
+  timeout: { min: 5, max: 3600, default: 120 },
+} as const
+
+export function clampToolLimit(kind: keyof typeof TOOL_LIMITS, value: number): number {
+  const { min, max, default: fallback } = TOOL_LIMITS[kind]
+  if (!Number.isFinite(value)) return fallback
+  return Math.min(max, Math.max(min, Math.round(value)))
+}
+
+export function toolStopTitle(stop: ToolStop): string {
+  return stop.code === 'tool_timeout'
+    ? `${stop.tool.replace(/_/g, ' ')} timed out (${stop.limit} s)`
+    : `Tool budget reached (${stop.limit} calls)`
+}
 
 function parseBlock(block: string): AgentEvent | null {
   const data = block

@@ -372,11 +372,13 @@ async def _run_agent_op(client: httpx.AsyncClient, op: MeshOp, arguments: dict) 
     return text, payload
 
 
-async def execute_tool(name: str, arguments: dict, context: dict) -> tuple[str, dict | None]:
+async def execute_tool(
+    name: str, arguments: dict, context: dict, *, timeout: float = 60.0,
+) -> tuple[str, dict | None]:
     """Execute a tool and return (result_text, action_payload).
     action_payload carries data the frontend needs to react (e.g. new mesh URL).
     """
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             op = _agent_op(name)
             if op is not None:
@@ -516,18 +518,24 @@ class AgentChatRequest(BaseModel):
     provider: ProviderConfig = ProviderConfig()
     context: dict = {}
     thinking: str = "auto"  # "auto" | "on" | "off"
+    # Guardrails of the tool loop: tool calls allowed in one turn, and seconds
+    # one call may take. The chat sends the values set in Settings → Agent.
+    tool_budget: int = Field(default=10, ge=1, le=100)
+    tool_timeout: float = Field(default=120.0, gt=0, le=3600)
 
 
 class ActionDone(BaseModel):
     tool: str
     result: str
     payload: dict | None = None
+    error: dict | None = None  # the stop, when a guardrail cut this call short
 
 
 class AgentChatResponse(BaseModel):
     message: str
     actions: list[ActionDone] = []
     thinking: str | None = None
+    stopped: dict | None = None
 
 
 def _auth_headers(base_url: str, api_key: Optional[str]) -> dict:
@@ -777,7 +785,10 @@ async def _read_round(response: httpx.Response, round_: _Round):
         yield event
 
 
-def _done(message: str, actions: list[ActionDone], thinking: list[str], error: bool = False) -> dict:
+def _done(
+    message: str, actions: list[ActionDone], thinking: list[str], error: bool = False,
+    stopped: dict | None = None,
+) -> dict:
     return {
         "type": "done",
         "message": message,
@@ -786,7 +797,30 @@ def _done(message: str, actions: list[ActionDone], thinking: list[str], error: b
         # The message reports a failure rather than answering: the chat shows
         # it after whatever text already streamed.
         "error": error,
+        # Set when a guardrail ended the tool loop (see _tool_stop).
+        "stopped": stopped,
     }
+
+
+def _tool_stop(code: str, tool: str, limit: float) -> dict:
+    """Why a guardrail ended the tool loop, and what the user can do about it.
+
+    tool_budget_exhausted — the model asked for a call past the turn's budget
+    tool_timeout          — one call ran past its timeout
+    """
+    if code == "tool_budget_exhausted":
+        message = (
+            f"Stopped after {limit:g} tool calls: the agent kept calling tools without "
+            f"finishing (it wanted to run {tool} next). Try a more specific request, "
+            f"or raise the tool budget in Settings → Agent."
+        )
+    else:
+        message = (
+            f"Stopped: {tool} did not finish within {limit:g} s. It may still be "
+            f"running in the background. Try again on a lighter mesh, or raise the "
+            f"tool timeout in Settings → Agent."
+        )
+    return {"code": code, "tool": tool, "limit": limit, "message": message}
 
 
 def _release_claimed(claim: asyncio.Future) -> None:
@@ -882,6 +916,7 @@ async def _chat_events(request: AgentChatRequest):
     all_thinking:  list[str]       = []
     final: str | None = None
     error: str | None = None
+    stopped: dict | None = None
     answered = False
 
     try:
@@ -898,7 +933,8 @@ async def _chat_events(request: AgentChatRequest):
                     stream=True,
                 )
 
-            for _ in range(10):  # max tool-call rounds
+            # Bounded: a round either answers or spends at least one tool call.
+            while stopped is None:
                 round_ = _Round(answered, bool(all_thinking))
                 r = await post()
                 try:
@@ -934,11 +970,29 @@ async def _chat_events(request: AgentChatRequest):
 
                 for tc in tool_calls:
                     fn = tc["function"]
+                    if len(actions_done) >= request.tool_budget:
+                        stopped = _tool_stop("tool_budget_exhausted", fn["name"], request.tool_budget)
+                        break
                     arguments = _tool_arguments(fn.get("arguments"))
                     yield {"type": "tool_start", "id": tc["id"], "tool": fn["name"], "arguments": arguments}
-                    result_text, payload = await execute_tool(fn["name"], arguments, request.context)
-                    actions_done.append(ActionDone(tool=fn["name"], result=result_text, payload=payload))
-                    yield {"type": "tool_done", "id": tc["id"], "tool": fn["name"], "result": result_text, "payload": payload}
+                    try:
+                        result_text, payload = await asyncio.wait_for(
+                            execute_tool(fn["name"], arguments, request.context, timeout=request.tool_timeout),
+                            request.tool_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        # Cancelling the call drops its HTTP request, but a mesh op
+                        # the API already started runs to its end in a worker
+                        # thread; its result is never shown.
+                        stopped = _tool_stop("tool_timeout", fn["name"], request.tool_timeout)
+                        result_text, payload = stopped["message"], None
+                    actions_done.append(ActionDone(tool=fn["name"], result=result_text, payload=payload, error=stopped))
+                    yield {
+                        "type": "tool_done", "id": tc["id"], "tool": fn["name"],
+                        "result": result_text, "payload": payload, "error": stopped,
+                    }
+                    if stopped is not None:
+                        break
                     messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result_text})
     except httpx.HTTPError as e:
         error = f"Could not reach the LLM at {base_url}: {e}"
@@ -953,8 +1007,8 @@ async def _chat_events(request: AgentChatRequest):
 
     if error is not None:
         yield _done(error, actions_done, all_thinking, error=True)
-    elif final is None:
-        yield _done("Reached maximum tool iterations.", actions_done, all_thinking, error=True)
+    elif stopped is not None:
+        yield _done(stopped["message"], actions_done, all_thinking, error=True, stopped=stopped)
     else:
         yield _done(final, actions_done, all_thinking)
 
@@ -966,7 +1020,9 @@ async def agent_chat(request: AgentChatRequest):
     async for event in _chat_events(request):
         if event["type"] == "done":
             done = event
-    return AgentChatResponse(message=done["message"], actions=done["actions"], thinking=done["thinking"])
+    return AgentChatResponse(
+        message=done["message"], actions=done["actions"], thinking=done["thinking"], stopped=done["stopped"],
+    )
 
 
 @router.post("/chat/stream")
