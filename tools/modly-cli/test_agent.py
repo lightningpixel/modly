@@ -11,7 +11,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 MODULE_PATH = Path(__file__).with_name("agent.py")
 SPEC = importlib.util.spec_from_file_location("modly_agent", MODULE_PATH)
@@ -26,6 +26,67 @@ class OutputTests(unittest.TestCase):
         with redirect_stdout(buf):
             agent._json_print({"ok": True, "nested": {"x": 1}}, compact=True)
         self.assertEqual(buf.getvalue(), '{"nested":{"x":1},"ok":true}\n')
+
+
+class DownloadTests(unittest.TestCase):
+    def test_success_replaces_destination_only_after_download(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td) / "mesh.glb"
+            dest.write_bytes(b"original")
+            chunks = iter([b"new ", b"mesh", b""])
+
+            def read(_size: int) -> bytes:
+                self.assertEqual(dest.read_bytes(), b"original")
+                return next(chunks)
+
+            response = MagicMock()
+            response.__enter__.return_value.read.side_effect = read
+            with patch.object(agent.urllib.request, "urlopen", return_value=response):
+                self.assertEqual(agent._download("http://example.test/mesh", dest, timeout=1), 8)
+            self.assertEqual(dest.read_bytes(), b"new mesh")
+            self.assertEqual(list(Path(td).iterdir()), [dest])
+
+    def test_interrupted_download_preserves_destination_and_cleans_temporary_file(self) -> None:
+        for existing in (False, True):
+            for failure in (ConnectionResetError("connection lost"), KeyboardInterrupt()):
+                with self.subTest(existing=existing, failure=type(failure).__name__):
+                    with tempfile.TemporaryDirectory() as td:
+                        dest = Path(td) / "mesh.glb"
+                        if existing:
+                            dest.write_bytes(b"original")
+                        response = MagicMock()
+                        response.__enter__.return_value.read.side_effect = [b"partial", failure]
+                        expected = KeyboardInterrupt if isinstance(failure, KeyboardInterrupt) else agent.ModlyCliError
+                        with patch.object(agent.urllib.request, "urlopen", return_value=response):
+                            with self.assertRaises(expected):
+                                agent._download("http://example.test/mesh", dest, timeout=1)
+                        if existing:
+                            self.assertEqual(dest.read_bytes(), b"original")
+                        else:
+                            self.assertFalse(dest.exists())
+                        self.assertEqual(list(Path(td).iterdir()), [dest] if existing else [])
+
+    def test_replace_failure_preserves_destination_and_cleans_temporary_file(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td) / "mesh.glb"
+            dest.write_bytes(b"original")
+            with (
+                patch.object(agent.urllib.request, "urlopen", return_value=io.BytesIO(b"new mesh")),
+                patch.object(agent.os, "replace", side_effect=PermissionError("destination locked")),
+            ):
+                with self.assertRaises(agent.ModlyCliError) as ctx:
+                    agent._download("http://example.test/mesh", dest, timeout=1)
+            self.assertEqual(ctx.exception.code, "WRITE_FAILED")
+            self.assertEqual(dest.read_bytes(), b"original")
+            self.assertEqual(list(Path(td).iterdir()), [dest])
+
+    def test_success_creates_destination_in_new_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td) / "exports" / "mesh.glb"
+            with patch.object(agent.urllib.request, "urlopen", return_value=io.BytesIO(b"new mesh")):
+                self.assertEqual(agent._download("http://example.test/mesh", dest, timeout=1), 8)
+            self.assertEqual(dest.read_bytes(), b"new mesh")
+            self.assertEqual(list(dest.parent.iterdir()), [dest])
 
 
 class CommandTests(unittest.TestCase):
