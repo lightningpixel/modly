@@ -6,6 +6,10 @@ import { Environment, GizmoHelper, Lightformer, OrbitControls, useGizmoContext, 
 import { EffectComposer, Outline, Select, Selection } from '@react-three/postprocessing'
 import * as THREE from 'three'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
+import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
+import { OBJExporter } from 'three/examples/jsm/exporters/OBJExporter.js'
+import { PLYExporter } from 'three/examples/jsm/exporters/PLYExporter.js'
+import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js'
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh'
 
 // Patch THREE pour utiliser BVH sur tous les meshes — réduit le raycast O(N) → O(log N)
@@ -20,6 +24,65 @@ import type { LightSettings, PointLight } from '@shared/stores/appStore'
 import { DEFAULT_LIGHT_SETTINGS } from '@shared/stores/appStore'
 
 export type GizmoMode = 'translate' | 'rotate' | 'scale'
+export type MeshExportFormat = 'glb' | 'obj' | 'stl' | 'ply'
+export type MeshExportHandler = (format: MeshExportFormat) => Promise<Blob | null>
+
+function cloneForExport(source: THREE.Object3D): THREE.Object3D {
+  const hadOriginalMaterial = Object.prototype.hasOwnProperty.call(source.userData, 'originalMaterial')
+  const originalMaterial = source.userData.originalMaterial as THREE.Material | THREE.Material[] | undefined
+  const savedUserData = source.userData
+
+  // originalMaterial is a live Three.js object held in userData for display-mode
+  // switching. Leave it out of the clone's serializable userData, then restore it
+  // on the source object before returning.
+  if (hadOriginalMaterial) {
+    source.userData = { ...savedUserData }
+    delete source.userData.originalMaterial
+  }
+  const clone = (() => {
+    try {
+      return source.clone(false)
+    } finally {
+      source.userData = savedUserData
+    }
+  })()
+
+  if (source instanceof THREE.Mesh && clone instanceof THREE.Mesh) {
+    clone.geometry = source.geometry
+    clone.material = originalMaterial ?? source.material
+  }
+
+  for (const child of source.children) {
+    clone.add(cloneForExport(child))
+  }
+  return clone
+}
+
+async function exportMeshObject(object: THREE.Object3D, format: MeshExportFormat): Promise<Blob> {
+  object.updateMatrixWorld(true)
+
+  switch (format) {
+    case 'glb': {
+      const data = await new GLTFExporter().parseAsync(object, { binary: true })
+      if (!(data instanceof ArrayBuffer)) throw new Error('GLB export did not return binary data')
+      return new Blob([data], { type: 'model/gltf-binary' })
+    }
+    case 'obj': {
+      const data = new OBJExporter().parse(object)
+      return new Blob([data], { type: 'text/plain' })
+    }
+    case 'stl': {
+      const data = new STLExporter().parse(object, { binary: true })
+      const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength).slice()
+      return new Blob([bytes], { type: 'application/octet-stream' })
+    }
+    case 'ply': {
+      const data = new PLYExporter().parse(object, () => {}, { binary: true })
+      if (!data) throw new Error('PLY export did not return binary data')
+      return new Blob([data], { type: 'application/octet-stream' })
+    }
+  }
+}
 
 const SELECTION_OUTLINE_VISIBLE_COLOR = 0x8b5cf6
 const SELECTION_OUTLINE_HIDDEN_COLOR = 0x5b21b6
@@ -198,6 +261,19 @@ interface MeshModelProps {
   onObject: (obj: THREE.Object3D | null) => void
 }
 
+function centerSceneOnGrid(scene: THREE.Object3D): void {
+  scene.position.set(0, 0, 0)
+  scene.rotation.set(0, 0, 0)
+  scene.scale.set(1, 1, 1)
+  scene.updateMatrixWorld(true)
+
+  const box = new THREE.Box3().setFromObject(scene)
+  const center = new THREE.Vector3()
+  box.getCenter(center)
+  scene.position.set(-center.x, -box.min.y, -center.z)
+  scene.updateMatrixWorld(true)
+}
+
 function MeshModel({ url, jobId, viewMode, selected, onStats, onSelect, onObject }: MeshModelProps): JSX.Element {
   const extension = url.split('?')[0]?.split('.').pop()?.toLowerCase()
   const common = { url, jobId, viewMode, selected, onStats, onSelect, onObject }
@@ -279,13 +355,7 @@ function SceneMeshModel({
   useEffect(() => {
     // Clear any cached transform before measuring (useGLTF may reuse a scene
     // that still carries an earlier gizmo pose).
-    scene.position.set(0, 0, 0)
-    scene.rotation.set(0, 0, 0)
-    scene.scale.set(1, 1, 1)
-    const box = new THREE.Box3().setFromObject(scene)
-    const center = new THREE.Vector3()
-    box.getCenter(center)
-    scene.position.set(-center.x, -box.min.y, -center.z)
+    centerSceneOnGrid(scene)
 
     // Compute stats
     let vertices = 0
@@ -916,6 +986,8 @@ export default function Viewer3D({
   lightSettings = DEFAULT_LIGHT_SETTINGS,
   gizmoMode = null,
   gizmoUndoRef,
+  gizmoResetRef,
+  meshExportRef,
   pointLights = [],
   selectedPointLightId = null,
   onSelectPointLight,
@@ -924,6 +996,8 @@ export default function Viewer3D({
   lightSettings?: LightSettings
   gizmoMode?: GizmoMode | null
   gizmoUndoRef?: MutableRefObject<(() => boolean) | null>
+  gizmoResetRef?: MutableRefObject<(() => boolean) | null>
+  meshExportRef?: MutableRefObject<MeshExportHandler | null>
   pointLights?: PointLight[]
   selectedPointLightId?: string | null
   onSelectPointLight?: (id: string | null) => void
@@ -949,6 +1023,16 @@ export default function Viewer3D({
   // is taken when a drag starts and committed on release only if it changed.
   const transformHistory = useRef<TransformSnapshot[]>([])
   const pendingTransform = useRef<TransformSnapshot | null>(null)
+  const gizmoDragActive = useRef(false)
+  const ignoreGizmoReleaseMiss = useRef(false)
+
+  // A gizmo drag can end with a click event that the canvas interprets as a
+  // miss. Clear that one-release guard when the user starts a new gesture.
+  useEffect(() => {
+    const clearReleaseMiss = () => { ignoreGizmoReleaseMiss.current = false }
+    window.addEventListener('pointerdown', clearReleaseMiss, true)
+    return () => window.removeEventListener('pointerdown', clearReleaseMiss, true)
+  }, [])
 
   const outputUrl = currentJob?.outputUrl ?? ''
   const modelUrl =
@@ -994,12 +1078,14 @@ export default function Viewer3D({
 
   // Deselect both mesh and point light when clicking empty space
   const handlePointerMissed = useCallback(() => {
+    if (gizmoDragActive.current || ignoreGizmoReleaseMiss.current) return
     setSelected(false)
     onSelectPointLight?.(null)
   }, [setSelected, onSelectPointLight])
 
   // Select mesh and deselect any selected point light
   const handleMeshSelect = useCallback(() => {
+    if (gizmoDragActive.current || ignoreGizmoReleaseMiss.current) return
     setSelected(true)
     onSelectPointLight?.(null)
   }, [setSelected, onSelectPointLight])
@@ -1017,6 +1103,8 @@ export default function Viewer3D({
 
   // Snapshot the pre-drag pose when a gizmo manipulation starts.
   const handleGizmoDragStart = useCallback(() => {
+    gizmoDragActive.current = true
+    ignoreGizmoReleaseMiss.current = false
     if (meshObject) {
       pendingTransform.current = {
         p: meshObject.position.clone(),
@@ -1028,6 +1116,8 @@ export default function Viewer3D({
 
   // Commit the snapshot on release, but only if the pose actually changed.
   const handleGizmoDragEnd = useCallback(() => {
+    gizmoDragActive.current = false
+    ignoreGizmoReleaseMiss.current = true
     const before = pendingTransform.current
     pendingTransform.current = null
     if (!before || !meshObject) return
@@ -1048,12 +1138,53 @@ export default function Viewer3D({
     return true
   }, [meshObject])
 
+  const resetTransform = useCallback((): boolean => {
+    if (!meshObject) return false
+    const before = {
+      p: meshObject.position.clone(),
+      q: meshObject.quaternion.clone(),
+      s: meshObject.scale.clone(),
+    }
+
+    centerSceneOnGrid(meshObject)
+    const changed = !meshObject.position.equals(before.p)
+      || !meshObject.quaternion.equals(before.q)
+      || !meshObject.scale.equals(before.s)
+    if (changed) transformHistory.current.push(before)
+    return changed
+  }, [meshObject])
+
+  const exportCurrentMesh = useCallback<MeshExportHandler>(async (format) => {
+    if (isSplat) return null
+    if (!meshObject) throw new Error('The mesh is still loading. Try exporting again once it appears.')
+    meshObject.updateWorldMatrix(true, false)
+    const exportObject = cloneForExport(meshObject)
+    // The clone is detached from the viewer's parent hierarchy, so preserve its
+    // full world transform (including any parent transform) at the export root.
+    exportObject.matrix.copy(meshObject.matrixWorld)
+    exportObject.matrixAutoUpdate = false
+    exportObject.matrixWorld.copy(meshObject.matrixWorld)
+    return exportMeshObject(exportObject, format)
+  }, [meshObject, isSplat])
+
+  useEffect(() => {
+    if (!meshExportRef) return
+    meshExportRef.current = exportCurrentMesh
+    return () => { if (meshExportRef.current === exportCurrentMesh) meshExportRef.current = null }
+  }, [meshExportRef, exportCurrentMesh])
+
   // Expose transform-undo so the page's Ctrl+Z undoes gizmo edits first.
   useEffect(() => {
     if (!gizmoUndoRef) return
     gizmoUndoRef.current = undoTransform
     return () => { if (gizmoUndoRef.current === undoTransform) gizmoUndoRef.current = null }
   }, [gizmoUndoRef, undoTransform])
+
+  useEffect(() => {
+    if (!gizmoResetRef) return
+    gizmoResetRef.current = resetTransform
+    return () => { if (gizmoResetRef.current === resetTransform) gizmoResetRef.current = null }
+  }, [gizmoResetRef, resetTransform])
 
   // Drop the transform history when the model changes.
   useEffect(() => {
