@@ -34,6 +34,12 @@ def _stage(
     return replace(context, output_path=output_path, progress_cb=progress_cb)
 
 
+def _scratch(context: MeshOpContext) -> tempfile.TemporaryDirectory:
+    """A scratch directory for intermediate files, under a temp_dir that may not exist yet."""
+    Path(context.temp_dir).mkdir(parents=True, exist_ok=True)
+    return tempfile.TemporaryDirectory(dir=str(context.temp_dir))
+
+
 def _scale(size: float, unit: str, dimension: str) -> dict[str, Any]:
     return {"size": float(size), "unit": unit, "dimension": dimension}
 
@@ -54,7 +60,9 @@ def _arrange_steps(applied, requested: Mapping[str, Mapping[str, Any]]) -> list[
 
 
 def recompute_normals(input_path: Path, output_path: Path) -> Path:
-    """Rewrite every vertex normal from the face winding, keeping UVs and materials.
+    """Orient the faces outwards, then rewrite every vertex normal from them.
+
+    UVs and materials are kept.
 
     Decimation moves vertices but keeps their old normals, and generated meshes
     often ship with none or with inverted ones; area-weighted normals derived
@@ -70,6 +78,9 @@ def recompute_normals(input_path: Path, output_path: Path) -> Path:
     for geometry in geometries:
         if not isinstance(geometry, trimesh.Trimesh) or not len(geometry.faces):
             continue
+        # Make the winding consistent and outward first: normals derived from
+        # inside-out faces would point inwards too.
+        trimesh.repair.fix_normals(geometry, multibody=True)
         triangles = geometry.triangles
         face_normals = trimesh.util.unitize(
             np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
@@ -98,7 +109,7 @@ def prepare_for_printing(
 ) -> MeshOpResult:
     """Repair until watertight, lay flat, scale in millimetres, rest on the plate."""
     output_path = _output_path(context, "prepare-for-printing")
-    with tempfile.TemporaryDirectory(dir=str(context.temp_dir)) as scratch:
+    with _scratch(context) as scratch:
         context.log("Preset: prepare for printing")
         repaired = auto_repair_mesh(
             input_path,
@@ -188,7 +199,7 @@ def prepare_for_game(
 ) -> MeshOpResult:
     """Decimate to a poly budget, scale in metres, recompute the normals."""
     output_path = _output_path(context, "prepare-for-game")
-    with tempfile.TemporaryDirectory(dir=str(context.temp_dir)) as scratch_dir:
+    with _scratch(context) as scratch_dir:
         scratch = Path(scratch_dir)
         context.log("Preset: prepare for game")
         decimated, decimate_step = _decimate(input_path, params["target_faces"], scratch, context)
@@ -213,7 +224,7 @@ def prepare_for_web(
 ) -> MeshOpResult:
     """Decimate aggressively for a light download, then recompute the normals."""
     output_path = _output_path(context, "prepare-for-web")
-    with tempfile.TemporaryDirectory(dir=str(context.temp_dir)) as scratch_dir:
+    with _scratch(context) as scratch_dir:
         context.log("Preset: prepare for web")
         decimated, decimate_step = _decimate(
             input_path, params["target_faces"], Path(scratch_dir), context

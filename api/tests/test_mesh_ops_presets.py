@@ -38,6 +38,13 @@ def _sphere_with_inverted_normals(radius: float = 1.5) -> trimesh.Trimesh:
     return sphere
 
 
+def _sphere_with_inverted_winding(radius: float = 1.5) -> trimesh.Trimesh:
+    """Faces wound inside out, as some generators export them."""
+    sphere = trimesh.creation.icosphere(subdivisions=3, radius=radius)
+    sphere.invert()
+    return sphere
+
+
 def _fake_decimate(calls: list):
     """Stands in for the Node/meshoptimizer backend: copies the mesh as is."""
 
@@ -210,6 +217,14 @@ class PrepareForGameAndWebTests(_PresetCase):
         extents = trimesh.load(str(result.file_path)).extents
         self.assertAlmostEqual(float(extents.max()), 3.0, places=2)
         self._assert_outward_normals(result.file_path)
+
+    def test_web_turns_inside_out_faces_outwards(self) -> None:
+        path = self._export(_sphere_with_inverted_winding(), include_normals=True)
+        result = self._run("prepare_for_web", path)
+
+        self._assert_outward_normals(result.file_path)
+        mesh = trimesh.load(str(result.file_path), force="mesh")
+        self.assertGreater(mesh.volume, 0, "faces are still wound inside out")
 
     def test_textures_survive_the_web_preset(self) -> None:
         from PIL import Image
