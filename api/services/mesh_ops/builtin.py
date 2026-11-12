@@ -1,8 +1,9 @@
 """Built-in mesh operation definitions."""
 
-from .agent_format import format_fixes, format_inspection, format_repair
+from .agent_format import format_fixes, format_inspection, format_preset, format_repair
 from .inspection import inspect_mesh, suggest_fixes
 from .operations import decimate_mesh, repair_mesh, smooth_mesh
+from .presets import prepare_for_game, prepare_for_printing, prepare_for_web
 from .repair import auto_repair_mesh
 from .transforms import auto_orient, drop_to_ground, normalize_scale, recenter
 from .types import AgentTool, MeshOp
@@ -177,6 +178,73 @@ REPAIR_MESH_PARAMS = (
 )
 
 
+DIMENSION_PARAM = {
+    "id": "dimension",
+    "label": "Dimension",
+    "type": "select",
+    "default": "longest",
+    "options": [
+        {"value": "longest", "label": "Longest side"},
+        {"value": "x", "label": "Width (X)"},
+        {"value": "y", "label": "Height (Y)"},
+        {"value": "z", "label": "Depth (Z)"},
+    ],
+    "tooltip": "Which bounding-box dimension is set to the target size.",
+}
+
+
+PREPARE_FOR_PRINTING_PARAMS = (
+    {
+        "id": "size_mm",
+        "label": "Size (mm)",
+        "type": "float",
+        "default": 100.0,
+        "min": 1.0,
+        "max": 10000.0,
+        "step": 1.0,
+        "tooltip": "Printed size of the chosen dimension, in millimetres.",
+    },
+    DIMENSION_PARAM,
+)
+
+PREPARE_FOR_GAME_PARAMS = (
+    {
+        "id": "target_faces",
+        "label": "Poly Budget",
+        "type": "int",
+        "default": 20000,
+        "min": 100,
+        "max": 1000000,
+        "tooltip": "Maximum number of triangles the game asset may keep.",
+    },
+    {
+        "id": "size_m",
+        "label": "Size (m)",
+        "type": "float",
+        "default": 1.0,
+        "min": 0.01,
+        "max": 1000.0,
+        "step": 0.1,
+        "tooltip": "In-game size of the chosen dimension, in metres.",
+    },
+    DIMENSION_PARAM,
+)
+
+PREPARE_FOR_WEB_PARAMS = (
+    {
+        "id": "target_faces",
+        "label": "Poly Budget",
+        "type": "int",
+        "default": 5000,
+        "min": 100,
+        "max": 200000,
+        "tooltip": "Maximum number of triangles: fewer means a lighter download.",
+    },
+)
+
+DIMENSION_HINT = "Which side gets the size: longest, x (width), y (height) or z (depth)."
+
+
 BUILTIN_MESH_OPS = (
     MeshOp(
         id="repair",
@@ -286,5 +354,58 @@ BUILTIN_MESH_OPS = (
         params_schema=NORMALIZE_SCALE_PARAMS,
         fn=normalize_scale,
         category="transform",
+    ),
+    MeshOp(
+        id="prepare_for_printing",
+        label="Prepare for 3D Printing",
+        params_schema=PREPARE_FOR_PRINTING_PARAMS,
+        fn=prepare_for_printing,
+        category="presets",
+        agent=AgentTool(
+            description=(
+                "Make a mesh ready for 3D printing in one call: repair it until it is "
+                "watertight and manifold, lay it flat, scale it in millimetres and rest it "
+                "on the build plate. Writes a new mesh without textures."
+            ),
+            params={
+                "size_mm": "Printed size of `dimension`, in millimetres.",
+                "dimension": DIMENSION_HINT,
+            },
+            format_result=format_preset,
+        ),
+    ),
+    MeshOp(
+        id="prepare_for_game",
+        label="Prepare for Game",
+        params_schema=PREPARE_FOR_GAME_PARAMS,
+        fn=prepare_for_game,
+        category="presets",
+        agent=AgentTool(
+            description=(
+                "Make a mesh ready for a game engine in one call: decimate it to a "
+                "triangle budget, scale it in metres and recompute its normals."
+            ),
+            params={
+                "target_faces": "Triangle budget of the game asset.",
+                "size_m": "In-game size of `dimension`, in metres.",
+                "dimension": DIMENSION_HINT,
+            },
+            format_result=format_preset,
+        ),
+    ),
+    MeshOp(
+        id="prepare_for_web",
+        label="Prepare for Web",
+        params_schema=PREPARE_FOR_WEB_PARAMS,
+        fn=prepare_for_web,
+        category="presets",
+        agent=AgentTool(
+            description=(
+                "Make a mesh light enough for the web in one call: decimate it "
+                "aggressively and recompute its normals. Keeps its textures and size."
+            ),
+            params={"target_faces": "Triangle budget; lower means a lighter download."},
+            format_result=format_preset,
+        ),
     ),
 )

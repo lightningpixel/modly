@@ -30,10 +30,16 @@ class MeshOpsRegistryTests(unittest.TestCase):
                 "drop_to_ground",
                 "auto_orient",
                 "normalize_scale",
+                "prepare_for_printing",
+                "prepare_for_game",
+                "prepare_for_web",
             ],
         )
         for description in descriptions:
-            self.assertIn(description["category"], {"repair", "optimization", "analysis", "transform"})
+            self.assertIn(
+                description["category"],
+                {"repair", "optimization", "analysis", "transform", "presets"},
+            )
             self.assertFalse(description["destructive"])
             self.assertTrue(description["undoable"])
             self.assertIsInstance(description["params_schema"], list)
