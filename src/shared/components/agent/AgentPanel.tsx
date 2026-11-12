@@ -198,14 +198,28 @@ export default function AgentPanel(): JSX.Element {
     if (e.key === 'ArrowRight') { e.preventDefault(); setWidth(width - step) }
   }
 
+  const dragging = dragWidth !== null
+
   return (
+    // The slot grows from 0 to the panel width, pushing the app aside, while
+    // the panel slides in from the right. Closed, it stays mounted (a streaming
+    // turn or a running workflow keeps going) but invisible, so it takes no
+    // focus once the slide-out has ended.
+    <div
+      aria-hidden={!open}
+      style={{
+        width: open ? shownWidth : 0,
+        transition: dragging ? 'none' : `width 220ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear ${open ? '0s' : '220ms'}`,
+      }}
+      className={`relative shrink-0 overflow-hidden motion-reduce:!transition-none ${open ? 'visible' : 'invisible'}`}
+    >
     <aside
       ref={panelRef}
       aria-label="Agent"
       style={{ width: shownWidth }}
-      // Hidden rather than unmounted: a streaming turn or a running workflow
-      // keeps going while the panel is closed.
-      className={`${open ? 'flex' : 'hidden'} relative shrink-0 flex-col bg-surface-400 border-l border-zinc-800 min-h-0`}
+      className={`absolute inset-y-0 left-0 flex flex-col bg-surface-400 border-l border-zinc-800 min-h-0
+        transition-[transform,opacity] duration-200 ease-out motion-reduce:transition-none
+        ${open ? 'translate-x-0 opacity-100' : 'translate-x-6 opacity-0'}`}
     >
       {/* Resize handle */}
       <div
@@ -223,9 +237,9 @@ export default function AgentPanel(): JSX.Element {
         onDoubleClick={() => setWidth(AGENT_PANEL_DEFAULT_WIDTH)}
         onKeyDown={onHandleKeyDown}
         title="Drag to resize · double-click to reset"
-        className="absolute -left-1 top-0 bottom-0 w-2 z-20 cursor-col-resize group focus:outline-none"
+        className="absolute left-0 top-0 bottom-0 w-2 z-20 cursor-col-resize group focus:outline-none"
       >
-        <div className={`mx-auto h-full w-px transition-colors ${
+        <div className={`h-full w-px transition-colors ${
           dragWidth !== null ? 'bg-accent' : 'bg-transparent group-hover:bg-accent/60 group-focus-visible:bg-accent/60'
         }`} />
       </div>
@@ -281,5 +295,6 @@ export default function AgentPanel(): JSX.Element {
         )}
       </div>
     </aside>
+    </div>
   )
 }
