@@ -9,6 +9,10 @@ export interface AgentActionPayload {
   workflow_id?: string
   workflow_name?: string
   workflow?: Omit<Workflow, 'id' | 'createdAt' | 'updatedAt'>
+  /** `generate_from_image`: model to generate with; the Generate page's selection when absent. */
+  model_id?: string
+  /** `generate_from_image`: model parameters overriding the defaults. */
+  params?: Record<string, unknown>
 }
 
 export interface AgentAction {
@@ -17,11 +21,26 @@ export interface AgentAction {
   payload?: AgentActionPayload | null
 }
 
+/**
+ * A tool the frontend must run (it needs IPC or renderer stores). The server
+ * waits for `POST /agent/tool-result {call_id, result, error?}`, then sends the
+ * usual `tool_done` for the same `id`. `confirm` asks the user first.
+ */
+export interface ClientToolEvent {
+  type: 'client_tool'
+  id: string
+  call_id: string
+  tool: string
+  arguments: Record<string, unknown>
+  confirm: boolean
+}
+
 export type AgentEvent =
   | { type: 'token'; text: string }
   | { type: 'thinking'; text: string }
   | { type: 'tool_start'; id: string; tool: string; arguments: Record<string, unknown> }
   | { type: 'tool_done'; id: string; tool: string; result: string; payload: AgentActionPayload | null }
+  | ClientToolEvent
   | { type: 'done'; message: string; actions: AgentAction[]; thinking: string | null; error: boolean }
 
 function parseBlock(block: string): AgentEvent | null {
