@@ -5,6 +5,10 @@ import type {
   AssetLibraryReadRequest,
   AssetLibraryReadResult,
 } from '../../src/shared/types/assetLibrary'
+import type {
+  Conversation as AgentConversation,
+  ConversationSummary as AgentConversationSummary,
+} from '../main/agent-conversations'
 
 export interface IpcRendererLike {
   invoke(channel: string, ...args: unknown[]): Promise<unknown>
@@ -120,6 +124,17 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
       // Opens a file picker and copies the chosen .gguf into the agent's models folder.
       addModel: (): Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }> =>
         ipcRenderer.invoke('agent:addModel') as Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }>,
+      // Persisted chat conversations (<userData>/agent/conversations/{id}.json).
+      conversations: {
+        list:   (): Promise<AgentConversationSummary[]> =>
+          ipcRenderer.invoke('agent:conversations:list') as Promise<AgentConversationSummary[]>,
+        read:   (id: string): Promise<AgentConversation | null> =>
+          ipcRenderer.invoke('agent:conversations:read', id) as Promise<AgentConversation | null>,
+        save:   (conversation: AgentConversation): Promise<void> =>
+          ipcRenderer.invoke('agent:conversations:save', conversation) as Promise<void>,
+        remove: (id: string): Promise<void> =>
+          ipcRenderer.invoke('agent:conversations:remove', id) as Promise<void>,
+      },
     },
 
     // Settings

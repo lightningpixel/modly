@@ -50,6 +50,7 @@ import { checkSetupNeeded, markSetupDone, runFullSetup, getVenvPythonExe, ensure
 import { logger } from './logger'
 import { getProcessRunner, getPythonProcessRunner, getExtPythonExe, terminateProcessRunner, terminateAllProcessRunners } from './process-runner'
 import { getBuiltinExtensionsDir } from './builtin-sync'
+import { createConversationStorage } from './agent-conversations'
 import { spawn, execFile } from 'child_process'
 import {
   EXT_INCOMPLETE_MARKER,
@@ -1077,6 +1078,14 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     })
     return result.canceled ? null : result.filePaths[0]
   })
+
+  // Agent conversations: one JSON file each under <userData>/agent/conversations.
+  // Ids are validated in the storage layer, so no path escapes that folder.
+  const conversations = createConversationStorage(join(app.getPath('userData'), 'agent', 'conversations'))
+  ipcMain.handle('agent:conversations:list', () => conversations.list())
+  ipcMain.handle('agent:conversations:read', (_, id: string) => conversations.read(id))
+  ipcMain.handle('agent:conversations:save', (_, conversation: unknown) => conversations.save(conversation))
+  ipcMain.handle('agent:conversations:remove', (_, id: string) => conversations.remove(id))
 
   // Add a local GGUF to the agent's models folder. Picking and copying both
   // happen here, so the renderer never hands main an arbitrary path to copy.

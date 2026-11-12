@@ -8,6 +8,7 @@ import type {
   AssetLibraryReadRequest,
   AssetLibraryReadResult,
 } from './assetLibrary'
+import type { Conversation, ConversationSummary } from '../utils/agentConversations'
 
 // ─── Extension types ──────────────────────────────────────────────────────────
 
@@ -228,6 +229,16 @@ declare global {
       agent: {
         /** Opens a file picker and copies the chosen .gguf into the agent's models folder. */
         addModel: () => Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }>
+        /** Persisted chat conversations, one JSON file each in <userData>/agent/conversations. */
+        conversations: {
+          /** Newest first. */
+          list:   () => Promise<ConversationSummary[]>
+          /** null when the id is invalid, missing or the file is corrupted. */
+          read:   (id: string) => Promise<Conversation | null>
+          /** Rejects on an invalid id or shape. */
+          save:   (conversation: Conversation) => Promise<void>
+          remove: (id: string) => Promise<void>
+        }
       }
       cache: {
         clear: () => Promise<{ success: boolean; error?: string }>
