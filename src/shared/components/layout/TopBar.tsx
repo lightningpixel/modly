@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react'
 import { useAppStore } from '@shared/stores/appStore'
+import { useAgentPanelStore } from '@shared/stores/agentPanelStore'
 import MemoryIndicator from './MemoryIndicator'
 
 export default function TopBar(): JSX.Element {
   const { patchUpdateReady, platform, showRamIndicator } = useAppStore()
   const isMac = platform === 'darwin'
+  const agentOpen   = useAgentPanelStore((s) => s.open)
+  const toggleAgent = useAgentPanelStore((s) => s.toggle)
 
   const [isMaximized, setIsMaximized] = useState(false)
 
@@ -44,6 +47,27 @@ export default function TopBar(): JSX.Element {
 
       {/* Memory indicator */}
       {showRamIndicator && <MemoryIndicator />}
+
+      {/* Agent panel toggle */}
+      <button
+        onClick={toggleAgent}
+        aria-pressed={agentOpen}
+        aria-label="Agent"
+        title={`${agentOpen ? 'Hide' : 'Show'} agent (${isMac ? '⌘' : 'Ctrl+'}L)`}
+        className={`no-drag mr-3 h-7 flex items-center gap-1.5 px-2.5 rounded-md border text-[11px] font-medium transition-colors ${
+          agentOpen
+            ? 'bg-accent/20 border-accent/40 text-accent-light'
+            : 'border-zinc-700/70 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 hover:border-zinc-600'
+        }`}
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+          <rect x="3" y="11" width="18" height="10" rx="2" />
+          <circle cx="12" cy="5" r="2" /><path d="M12 7v4" />
+          <line x1="8" y1="16" x2="8" y2="16.01" strokeWidth="2.4" strokeLinecap="round" />
+          <line x1="16" y1="16" x2="16" y2="16.01" strokeWidth="2.4" strokeLinecap="round" />
+        </svg>
+        Agent
+      </button>
 
       {/* Patch update badge */}
       {patchUpdateReady && (

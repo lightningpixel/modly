@@ -8,30 +8,19 @@ import { useWorkflowRunStore } from '@areas/workflows/workflowRunStore'
 import { buildAllWorkflowExtensions } from '@areas/workflows/mockExtensions'
 import { readAgentEvents, toolStopTitle } from '@shared/utils/agentStream'
 import { adviceText, ollamaAdvice } from '@shared/utils/ollamaHealth'
-import OllamaBanner, { useOllamaHealth } from './OllamaBanner'
-import { commitSculpt } from '../sculpt/sculptStore'
+import OllamaBanner, { useOllamaHealth } from '@areas/generate/components/OllamaBanner'
+import { commitSculpt } from '@areas/generate/sculpt/sculptStore'
+import { useAgentConversationStore } from '@shared/stores/agentConversationStore'
+import { buildAgentContext } from './agentContext'
+import { createClientToolDeps, createGenerationDeps, latestUserImage, runClientTool, startGenerationFromImage } from './clientTools'
+import { QueuedConfirmCard, useConfirmQueue } from './ConfirmCard'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 import type { ThinkingMode } from '@shared/stores/agentStore'
 import type { Workflow } from '@shared/types/electron.d'
-import type { AgentAction, AgentActionPayload, ToolStop } from '@shared/utils/agentStream'
-
-interface Message {
-  id: string
-  role: 'user' | 'assistant'
-  content: string
-  thinking?: string
-  imageDataUrls?: string[]
-  actions?: ActionDone[]
-  stopped?: ToolStop | null
-  streaming?: boolean
-}
-
-interface ActionDone extends AgentAction {
-  id?: string
-  running?: boolean
-}
+import type { AgentActionPayload, ToolStop } from '@shared/utils/agentStream'
+import type { ActionDone, AgentMessage as Message } from '@shared/stores/agentConversationStore'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -270,13 +259,18 @@ function WorkflowProgressCard({ name }: { name: string }): JSX.Element {
 
 // ─── Main component ──────────────────────────────────────────────────────────
 
-export default function ChatPanel(): JSX.Element {
+export default function AgentChat(): JSX.Element {
   const { provider, localModel, external, defaultThinking, toolBudget, toolTimeout } = useAgentStore()
   const { models: llmModels } = useLlmModels()
   const isLocal        = provider === 'local'
   const externalConfig = external[provider]
 
-  const [messages, setMessages]               = useState<Message[]>([])
+  // Messages live in the conversation store: they survive page changes and
+  // panel close, and are saved to disk.
+  const messages                              = useAgentConversationStore((s) => s.messages)
+  const setMessages                           = useAgentConversationStore((s) => s.setMessages)
+  const currentId                             = useAgentConversationStore((s) => s.currentId)
+  const setBusy                               = useAgentConversationStore((s) => s.setBusy)
   const [input, setInput]                     = useState('')
   const [isLoading, setIsLoading]             = useState(false)
   const [error, setError]                     = useState<string | null>(null)
@@ -288,6 +282,8 @@ export default function ChatPanel(): JSX.Element {
   const localModels                           = llmModels.filter((m) => m.downloaded && !(m.tags ?? []).some((t) => t === 'code' || t === 'cad'))
   const [showModelPicker, setShowModelPicker] = useState(false)
   const [pendingWorkflow, setPendingWorkflow]  = useState<{ id: string; name: string } | null>(null)
+  // Generations the agent started; the conversation stays put until they end.
+  const [generations, setGenerations]         = useState(0)
   const [attachments, setAttachments]         = useState<string[]>([]) // data URLs
   const [isDragging, setIsDragging]           = useState(false)
   const [thinkingMode, setThinkingMode]       = useState<ThinkingMode>(defaultThinking)
@@ -303,6 +299,10 @@ export default function ChatPanel(): JSX.Element {
   const pushMeshUrl      = useAppStore((s) => s.pushMeshUrl)
   const applyMeshEdit    = useAppStore((s) => s.applyMeshEdit)
   const undoMesh         = useAppStore((s) => s.undoMesh)
+
+  const clientDeps      = useMemo(() => createClientToolDeps(), [])
+  const confirm         = useConfirmQueue((s) => s.confirm)
+  const confirmRequests = useConfirmQueue((s) => s.requests)
 
   const isOllama = provider === 'ollama'
   const ollama   = useOllamaHealth(isOllama, apiUrl, providerBaseUrl(provider, externalConfig), model)
@@ -358,32 +358,33 @@ export default function ChatPanel(): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fire on run-status transition; error/outputUrl read atomically
   }, [runState.status, pendingWorkflow])
 
+  // The panel locks conversation switching while a turn or its workflow runs.
+  useEffect(() => { setBusy(isLoading || pendingWorkflow !== null || generations > 0) }, [isLoading, pendingWorkflow, generations, setBusy])
+
+  // Another conversation was opened: drop the view state of the previous one.
+  useEffect(() => {
+    setShowAll(false)
+    setError(null)
+    useConfirmQueue.getState().cancelAll()
+    useConfirmQueue.getState().clearAnswered()
+  }, [currentId])
+
   useEffect(() => {
     // Instant while streaming: a smooth scroll per token never catches up.
     endRef.current?.scrollIntoView({ behavior: isLoading ? 'auto' : 'smooth' })
   }, [messages, isLoading, pendingWorkflow])
 
-  function buildContext(): Record<string, unknown> {
-    const ctx: Record<string, unknown> = {}
-    // Read from the store, not the render: a sculpt commit may just have swapped the mesh.
-    const { currentJob, meshStats } = useAppStore.getState()
-    if (currentJob?.outputUrl) ctx.currentMeshPath = currentJob.outputUrl.replace('/workspace/', '')
-    if (meshStats?.triangles)  ctx.meshTriangles   = meshStats.triangles
-    if (workflows.length > 0)  ctx.workflows       = workflows.map((w) => ({ id: w.id, name: w.name }))
-    if (allExtensions.length > 0) ctx.extensions   = allExtensions.map((e) => ({
-      id: e.id, name: e.name, input: e.input, output: e.output,
-    }))
-    return ctx
-  }
-
   async function callAgent(msgs: Message[], extraContext: Record<string, unknown> = {}) {
+    useConfirmQueue.getState().clearAnswered()
     setIsLoading(true)
     setError(null)
     const id = `a-${Date.now()}`
     let finished = false
     let failure: string | null = null
     try {
-      const context = { ...buildContext(), ...extraContext }
+      // Read at send time: the page, the mesh (a sculpt commit may just have
+      // swapped it), workflows, extensions, models, folders and UI settings.
+      const context: Record<string, unknown> = { ...(await buildAgentContext()), ...extraContext }
 
       // Inject workflow completion as a system hint if present
       const apiMessages = msgs.map((m) => {
@@ -437,7 +438,14 @@ export default function ChatPanel(): JSX.Element {
           case 'tool_start':
             patch((m) => ({ ...m, actions: [...(m.actions ?? []), { id: event.id, tool: event.tool, result: '', running: true }] }))
             break
+          case 'client_tool':
+            // Runs in the app (stores / IPC), after a Confirm click when asked;
+            // the server waits for its result, then sends the usual tool_done.
+            // Not awaited: the stream must keep reading meanwhile.
+            void runClientTool(event, clientDeps, confirm)
+            break
           case 'tool_done':
+            useConfirmQueue.getState().cancelEvent(event.id)
             patch((m) => ({
               ...m,
               actions: (m.actions ?? []).map((a) => (a.id === event.id
@@ -463,6 +471,7 @@ export default function ChatPanel(): JSX.Element {
             // Started only now: the local LLM frees its VRAM at the end of the
             // turn, and the workflow needs the whole GPU.
             for (const action of event.actions) startWorkflow(action.payload, msgs)
+            for (const action of event.actions) startGeneration(action.payload, msgs)
             break
         }
       }
@@ -479,6 +488,8 @@ export default function ChatPanel(): JSX.Element {
           ? { ...m, streaming: false, actions: m.actions?.map((a) => ({ ...a, running: false })) }
           : m)))
       }
+      // A card still waiting when the turn ends has no one listening any more.
+      useConfirmQueue.getState().cancelAll()
       setIsLoading(false)
     }
   }
@@ -505,6 +516,20 @@ export default function ChatPanel(): JSX.Element {
       const res = await saveWorkflow(wf)
       if (res.success) setActiveWorkflow(wf.id)
     }
+  }
+
+  // Started after `done`, like workflows: the local LLM frees the GPU first.
+  function startGeneration(payload: AgentActionPayload | null | undefined, msgs: Message[]) {
+    if (payload?.type !== 'generate_from_image') return
+    const deps = createGenerationDeps()
+    // A refused start (one is already running) is not ours to count.
+    const counted = !deps.isGenerating()
+    if (counted) setGenerations((n) => n + 1)
+    void startGenerationFromImage(payload, latestUserImage(msgs), deps)
+      .then((result) => {
+        setMessages((prev) => [...prev, { id: `sys-${Date.now()}`, role: 'assistant', content: result }])
+      })
+      .finally(() => { if (counted) setGenerations((n) => n - 1) })
   }
 
   function startWorkflow(payload: AgentActionPayload | null | undefined, msgs: Message[]) {
@@ -685,6 +710,7 @@ export default function ChatPanel(): JSX.Element {
             </div>
           )}
 
+          {confirmRequests.map((request) => <QueuedConfirmCard key={request.key} request={request} />)}
           <div ref={endRef} />
         </div>
       </div>
@@ -692,8 +718,9 @@ export default function ChatPanel(): JSX.Element {
       {/* Ollama down / model not pulled */}
       <OllamaBanner health={ollama.health} checking={ollama.checking} onRetry={() => { void ollama.check() }} />
 
-      {/* Input bar */}
-      <div className="shrink-0 px-3 pb-3 pt-2 border-t border-zinc-800">
+      {/* Input bar: a composer box (text, attach, send) with the model and
+          thinking controls on a quiet line under it, as in Claude. */}
+      <div className="shrink-0 px-3 pb-2.5 pt-2">
         <input
           ref={fileInputRef}
           type="file"
@@ -702,7 +729,7 @@ export default function ChatPanel(): JSX.Element {
           className="hidden"
           onChange={(e) => { if (e.target.files) handleFiles(Array.from(e.target.files)); e.target.value = '' }}
         />
-        <div className="flex flex-col gap-1.5 bg-zinc-900 border border-zinc-700/60 rounded-2xl px-3 py-2.5">
+        <div className="flex flex-col gap-2 bg-zinc-800/70 border border-zinc-700/50 rounded-2xl px-3.5 pt-3 pb-2 shadow-sm focus-within:border-zinc-600 transition-colors">
           {/* Attachment previews */}
           {attachments.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
@@ -711,6 +738,7 @@ export default function ChatPanel(): JSX.Element {
                   <img src={url} alt="" className="h-14 w-14 object-cover rounded-lg border border-zinc-700/50" />
                   <button
                     onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
+                    aria-label="Remove image"
                     className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-zinc-700 border border-zinc-600 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
                   >
                     <svg width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
@@ -726,86 +754,91 @@ export default function ChatPanel(): JSX.Element {
             value={input}
             onChange={(e) => { setInput(e.target.value); adjustHeight() }}
             onKeyDown={handleKeyDown}
-            placeholder="Ask Modly…"
+            placeholder="Ask Modly anything…"
             rows={1}
             spellCheck={false}
-            className="w-full bg-transparent text-[12.5px] text-zinc-200 placeholder-zinc-600 focus:outline-none resize-none leading-relaxed overflow-hidden"
+            className="w-full min-h-[36px] bg-transparent text-[13px] text-zinc-100 placeholder-zinc-500 focus:outline-none resize-none leading-relaxed overflow-hidden"
           />
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-            {/* Attach image button */}
+            {/* Attach image */}
             <button
               onClick={() => fileInputRef.current?.click()}
               title="Attach image"
-              className="text-zinc-600 hover:text-zinc-400 transition-colors"
+              aria-label="Attach image"
+              className="-ml-1 w-7 h-7 rounded-lg flex items-center justify-center text-zinc-400 hover:text-zinc-100 hover:bg-zinc-700/60 transition-colors"
             >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="16" /><line x1="8" y1="12" x2="16" y2="12" />
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
               </svg>
             </button>
-            {/* Thinking toggle */}
-            <button
-              onClick={() => setThinkingMode((m) => m === 'auto' ? 'on' : m === 'on' ? 'off' : 'auto')}
-              title={`Thinking: ${thinkingMode}`}
-              className={`transition-colors ${thinkingMode === 'on' ? 'text-accent' : thinkingMode === 'off' ? 'text-zinc-700' : 'text-zinc-600 hover:text-zinc-400'}`}
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-                <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/>
-                <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/>
-                {thinkingMode === 'off' && <line x1="4" y1="4" x2="20" y2="20" strokeWidth="2" />}
-              </svg>
-            </button>
-            {/* Model selector */}
-            <div className="relative" ref={modelPickerRef}>
-              <button
-                onClick={() => setShowModelPicker((v) => !v)}
-                className="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors"
-              >
-                {isLocal ? (localModels.find((m) => m.id === model)?.name ?? model) : (model || PROVIDERS[provider].label)}
-                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <polyline points="6 9 12 15 18 9" />
-                </svg>
-              </button>
 
-              {showModelPicker && (
-                <div className="absolute bottom-full mb-2 left-0 z-50 bg-zinc-900 border border-zinc-700/60 rounded-xl shadow-xl overflow-hidden min-w-[180px]">
-                  {!isLocal ? (
-                    <p className="px-3 py-2.5 text-[11px] text-zinc-500">{PROVIDERS[provider].label} — change the model in Settings → Agent.</p>
-                  ) : localModels.length === 0 ? (
-                    <p className="px-3 py-2.5 text-[11px] text-zinc-500">No local model downloaded — open Settings → Agent.</p>
-                  ) : (
-                    localModels.map((m) => (
-                      <button
-                        key={m.id}
-                        onClick={() => { setLocalPick(m.id); setShowModelPicker(false) }}
-                        className={`w-full px-3 py-2 text-left text-[11px] hover:bg-zinc-800 transition-colors flex items-center justify-between gap-3 ${m.id === model ? 'text-zinc-100' : 'text-zinc-400'}`}
-                      >
-                        <span className="truncate">{m.name}</span>
-                        {m.id === model && (
-                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="shrink-0 text-accent">
-                            <polyline points="20 6 9 17 4 12" />
-                          </svg>
-                        )}
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
-            </div>
-
+            {/* Send */}
             <button
               onClick={handleSend}
               disabled={!input.trim() || isLoading}
-              className="w-6 h-6 rounded-full bg-accent hover:bg-accent-dark disabled:opacity-30 disabled:cursor-not-allowed text-white flex items-center justify-center transition-colors shrink-0"
+              title="Send (Enter) · new line with Shift+Enter"
+              aria-label="Send"
+              className="w-7 h-7 rounded-lg bg-accent hover:bg-accent-dark disabled:bg-zinc-700/60 disabled:text-zinc-500 disabled:cursor-not-allowed text-white flex items-center justify-center transition-colors shrink-0"
             >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" />
               </svg>
             </button>
           </div>
         </div>
-        <p className="mt-1.5 text-[10px] text-zinc-700 text-center">Shift+Enter for new line</p>
+
+        {/* Model and thinking, under the box */}
+        <div className="mt-1.5 flex items-center justify-end gap-1 px-1">
+          <div className="relative" ref={modelPickerRef}>
+            <button
+              onClick={() => setShowModelPicker((v) => !v)}
+              aria-haspopup="listbox"
+              aria-expanded={showModelPicker}
+              className="flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] text-zinc-300 hover:bg-zinc-800 transition-colors"
+            >
+              <span className="truncate max-w-[180px]">
+                {isLocal ? (localModels.find((m) => m.id === model)?.name ?? model) : (model || PROVIDERS[provider].label)}
+              </span>
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="text-zinc-500">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+
+            {showModelPicker && (
+              <div className="absolute bottom-full mb-1.5 right-0 z-50 bg-zinc-900 border border-zinc-700/60 rounded-xl shadow-xl overflow-hidden min-w-[200px]">
+                {!isLocal ? (
+                  <p className="px-3 py-2.5 text-[11px] text-zinc-500">{PROVIDERS[provider].label} — change the model in Settings → Agent.</p>
+                ) : localModels.length === 0 ? (
+                  <p className="px-3 py-2.5 text-[11px] text-zinc-500">No local model downloaded — open Settings → Agent.</p>
+                ) : (
+                  localModels.map((m) => (
+                    <button
+                      key={m.id}
+                      onClick={() => { setLocalPick(m.id); setShowModelPicker(false) }}
+                      className={`w-full px-3 py-2 text-left text-[11px] hover:bg-zinc-800 transition-colors flex items-center justify-between gap-3 ${m.id === model ? 'text-zinc-100' : 'text-zinc-400'}`}
+                    >
+                      <span className="truncate">{m.name}</span>
+                      {m.id === model && (
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="shrink-0 text-accent">
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                      )}
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Thinking: auto → on → off */}
+          <button
+            onClick={() => setThinkingMode((m) => m === 'auto' ? 'on' : m === 'on' ? 'off' : 'auto')}
+            title="Thinking: click to switch between auto, on and off"
+            className={`px-1.5 py-1 rounded-md text-[11px] hover:bg-zinc-800 transition-colors ${thinkingMode === 'on' ? 'text-accent-light' : 'text-zinc-500 hover:text-zinc-300'}`}
+          >
+            {thinkingMode === 'auto' ? 'Thinking auto' : thinkingMode === 'on' ? 'Thinking on' : 'Thinking off'}
+          </button>
+        </div>
       </div>
 
     </div>
