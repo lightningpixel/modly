@@ -54,7 +54,7 @@ interface Fake {
   posted: ToolResultBody[]
   ui: { uiScale: UiScale; useAtkinsonFont: boolean; showRamIndicator: boolean }
   dirs: { modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string }
-  history: { index: number; length: number }
+  history: { undo: number; redo: number }
   dirItems: Record<string, string[]>
 }
 
@@ -66,7 +66,7 @@ function fake(overrides: Partial<ClientToolDeps> = {}): Fake {
   const state = {
     ui: { uiScale: 'medium' as UiScale, useAtkinsonFont: false, showRamIndicator: true },
     dirs: { modelsDir: 'C:\\Modly\\models', workspaceDir: 'C:\\Modly\\workspace', workflowsDir: 'C:\\Modly\\workflows', extensionsDir: 'C:\\Modly\\extensions' },
-    history: { index: 1, length: 3 },
+    history: { undo: 1, redo: 1 },
     dirItems: {} as Record<string, string[]>,
   }
   const list = extensions()
@@ -292,8 +292,8 @@ test('undo_mesh and redo_mesh step through the history, and say when there is no
   assert.match(await run('redo_mesh', {}, f), /^Redid/)
   assert.deepEqual(f.calls, [['undo'], ['redo']])
 
-  f.history.index = 0
-  f.history.length = 1
+  f.history.undo = 0
+  f.history.redo = 0
   assert.equal(await run('undo_mesh', {}, f), 'There is no mesh change to undo.')
   assert.equal(await run('redo_mesh', {}, f), 'There is no mesh change to redo.')
   assert.equal(f.calls.length, 2)

@@ -8,6 +8,7 @@ import { useAppStore } from '../../stores/appStore'
 import { useExtensionsStore } from '../../stores/extensionsStore'
 import { useWorkflowsStore } from '../../stores/workflowsStore'
 import { useNavStore } from '../../stores/navStore'
+import { redoDepth, undoDepth } from '../../stores/meshHistory'
 import { showCompletionNotification, showRunErrorNotification } from '../../utils/notification'
 
 // Tools the agent asks the frontend to run, because they need IPC or the
@@ -76,7 +77,8 @@ export interface ClientToolDeps {
     apply: (kind: StorageKind, path: string) => Promise<void>
   }
   mesh: {
-    history: () => { index: number; length: number }
+    /** Steps available each way on the mesh undo stack. */
+    history: () => { undo: number; redo: number }
     undo: () => void
     redo: () => void
   }
@@ -482,8 +484,7 @@ export const clientTools: Record<string, ClientTool> = {
     describe: () => 'Undo the last mesh change',
     check: () => null,
     async execute(_args, deps) {
-      const { index } = deps.mesh.history()
-      if (index <= 0) return 'There is no mesh change to undo.'
+      if (deps.mesh.history().undo <= 0) return 'There is no mesh change to undo.'
       deps.mesh.undo()
       return 'Undid the last mesh change; the viewer shows the previous mesh.'
     },
@@ -493,8 +494,7 @@ export const clientTools: Record<string, ClientTool> = {
     describe: () => 'Redo the mesh change',
     check: () => null,
     async execute(_args, deps) {
-      const { index, length } = deps.mesh.history()
-      if (index >= length - 1) return 'There is no mesh change to redo.'
+      if (deps.mesh.history().redo <= 0) return 'There is no mesh change to redo.'
       deps.mesh.redo()
       return 'Redid the mesh change; the viewer shows the next mesh.'
     },
@@ -727,7 +727,7 @@ export function createClientToolDeps(): ClientToolDeps {
       },
     },
     mesh: {
-      history: () => ({ index: app().historyIndex, length: app().meshHistory.length }),
+      history: () => ({ undo: undoDepth(app().meshHistory), redo: redoDepth(app().meshHistory) }),
       undo: () => app().undoMesh(),
       redo: () => app().redoMesh(),
     },
