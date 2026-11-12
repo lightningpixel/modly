@@ -38,6 +38,35 @@ test('malformed and non-data lines are skipped', () => {
   ])
 })
 
+test('a client_tool event passes through with its call id, arguments and confirm flag', () => {
+  const parser = createSseParser()
+  const event = {
+    type: 'client_tool',
+    id: 'call_1',
+    call_id: 'c-42',
+    tool: 'uninstall_extension',
+    arguments: { extension_id: 'triposr' },
+    confirm: true,
+  }
+  const done = { type: 'tool_done', id: 'call_1', tool: 'uninstall_extension', result: 'ok', payload: null }
+
+  const events = parser.push(line(event) + line(done))
+
+  assert.deepEqual(events, [event, done])
+  const [parsed] = events
+  assert.ok(parsed.type === 'client_tool' && parsed.call_id === 'c-42' && parsed.confirm)
+})
+
+test('a generate_from_image payload keeps its model id', () => {
+  const parser = createSseParser()
+  const payload = { type: 'generate_from_image', model_id: 'sf3d/main' }
+
+  const [event] = parser.push(line({ type: 'tool_done', id: 't', tool: 'generate_from_image', result: 'queued', payload }))
+
+  assert.ok(event.type === 'tool_done')
+  assert.deepEqual(event.payload, payload)
+})
+
 test('a response body is read into events, multi-byte characters intact', async () => {
   const bytes = new TextEncoder().encode(line({ type: 'token', text: 'é→' }) + line({ type: 'done', message: 'é→', actions: [], thinking: null, error: false }))
   // Split inside the multi-byte "é" so the decoder has to carry it over.
