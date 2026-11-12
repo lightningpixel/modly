@@ -189,7 +189,9 @@ class PatchVerticesRouteTests(unittest.TestCase):
         attributes = out_gltf["meshes"][0]["primitives"][0]["attributes"]
         np.testing.assert_array_equal(_accessor_floats(out_gltf, out_bin, attributes["NORMAL"]), normals)
 
-    def test_shared_position_accessor_only_changes_patched_primitive(self) -> None:
+    def test_shared_position_accessor_moves_every_primitive_using_it(self) -> None:
+        # The viewer loads one accessor as one BufferAttribute, so a stroke on
+        # either primitive moves both; the file must agree or the mesh tears.
         source = self.collection / "shared.glb"
         _shared_accessor_glb(source)
         moved = np.array([[5, 5, 5], [6, 5, 5], [5, 6, 5]], dtype="<f4")
@@ -199,14 +201,27 @@ class PatchVerticesRouteTests(unittest.TestCase):
         out_gltf, out_bin = _read_glb(self.workspace / response["path"])
         first = out_gltf["meshes"][0]["primitives"][0]["attributes"]
         second = out_gltf["meshes"][1]["primitives"][0]["attributes"]
-        self.assertEqual(first, {"POSITION": 0})
         self.assertNotEqual(second["POSITION"], 0)
-        self.assertNotIn("NORMAL", second)
-        np.testing.assert_array_equal(
-            _accessor_floats(out_gltf, out_bin, 0),
-            np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype="<f4"),
-        )
+        self.assertEqual(first, second)
         np.testing.assert_array_equal(_accessor_floats(out_gltf, out_bin, second["POSITION"]), moved)
+
+    def test_primitive_sharing_positions_but_not_normals_keeps_its_normals(self) -> None:
+        source = self.collection / "shared.glb"
+        _shared_accessor_glb(source)
+        gltf, binary = _read_glb(source)
+        gltf["meshes"][0]["primitives"][0]["attributes"]["NORMAL"] = 0  # its own (dummy) normals
+        _write_glb(source, gltf, binary)
+        moved = np.array([[5, 5, 5], [6, 5, 5], [5, 6, 5]], dtype="<f4")
+        normals = np.array([[0, 0, 1]] * 3, dtype="<f4")
+        response = self._patch("Default/shared.glb", [{
+            "mesh": 1, "primitive": 0, "positions": _b64(moved), "normals": _b64(normals),
+        }])
+        out_gltf, _ = _read_glb(self.workspace / response["path"])
+        first = out_gltf["meshes"][0]["primitives"][0]["attributes"]
+        second = out_gltf["meshes"][1]["primitives"][0]["attributes"]
+        self.assertEqual(first["POSITION"], second["POSITION"])
+        self.assertEqual(first["NORMAL"], 0)
+        self.assertNotEqual(second["NORMAL"], 0)
 
     def test_new_buffer_views_are_four_byte_aligned(self) -> None:
         source = self.collection / "odd.glb"

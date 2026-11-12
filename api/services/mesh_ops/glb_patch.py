@@ -85,13 +85,24 @@ def patch_glb_bytes(data: bytes, patches: list[VertexPatch]) -> bytes:
         if patch.normals is not None:
             normals_raw, _ = _decode(patch.normals, count, f"{label} normals")
 
-        new_attributes = dict(attributes)
-        new_attributes["POSITION"] = _append_accessor(
+        old_normal = attributes.get("NORMAL")
+        new_position = _append_accessor(
             out, views, accessors, positions_raw, count, bounds=_bounds(positions),
         )
+        new_normal = None
         if normals_raw is not None:
-            new_attributes["NORMAL"] = _append_accessor(out, views, accessors, normals_raw, count)
-        primitive["attributes"] = new_attributes
+            new_normal = _append_accessor(out, views, accessors, normals_raw, count)
+
+        # The viewer loads an accessor once and shares it between the primitives
+        # using it, so the stroke moved all of them: repoint them all, or the
+        # unpatched ones snap back and the mesh tears. Normals follow only where
+        # they were shared as well.
+        for other in _primitives_using(meshes, "POSITION", position_index):
+            other_attributes = dict(other.get("attributes") or {})
+            other_attributes["POSITION"] = new_position
+            if new_normal is not None and other_attributes.get("NORMAL") == old_normal:
+                other_attributes["NORMAL"] = new_normal
+            other["attributes"] = other_attributes
 
     buffers[0]["byteLength"] = len(out)
     return _build_glb(gltf, bytes(out))
@@ -150,6 +161,15 @@ def _primitive(meshes: list, mesh: int, primitive: int) -> dict:
             f"({len(primitives)} primitives)"
         )
     return primitives[primitive]
+
+
+def _primitives_using(meshes: list, attribute: str, accessor: int) -> list[dict]:
+    return [
+        primitive
+        for mesh in meshes
+        for primitive in (mesh.get("primitives") or [])
+        if (primitive.get("attributes") or {}).get(attribute) == accessor
+    ]
 
 
 def _decode(encoded: str, count: int, label: str) -> tuple[bytes, array]:
