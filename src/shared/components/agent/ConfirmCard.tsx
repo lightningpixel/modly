@@ -26,6 +26,11 @@ interface ConfirmQueueState {
   cancelAll: () => void
   /** Forgets answered requests. */
   clearAnswered: () => void
+  /** Cancels the pending card of one client_tool event (the server stopped waiting for it). */
+  cancelEvent: (eventId: string) => void
+  /** Called whenever a card is queued; the panel uses it to open itself so the card is seen. */
+  onQueued: (() => void) | null
+  setOnQueued: (callback: (() => void) | null) => void
 }
 
 // Resolvers stay out of the state: they are not data to render.
@@ -49,6 +54,7 @@ export const useConfirmQueue = create<ConfirmQueueState>((set, get) => ({
     return new Promise<boolean>((resolve) => {
       resolvers.set(key, resolve)
       set((s) => ({ requests: [...s.requests, request] }))
+      get().onQueued?.()
     })
   },
 
@@ -69,6 +75,13 @@ export const useConfirmQueue = create<ConfirmQueueState>((set, get) => ({
   clearAnswered() {
     set((s) => ({ requests: s.requests.filter((r) => r.status === 'pending') }))
   },
+
+  cancelEvent(eventId) {
+    for (const r of get().requests) if (r.status === 'pending' && r.eventId === eventId) get().answer(r.key, false)
+  },
+
+  onQueued: null,
+  setOnQueued: (callback) => set({ onQueued: callback }),
 }))
 
 // ─── Card ─────────────────────────────────────────────────────────────────────

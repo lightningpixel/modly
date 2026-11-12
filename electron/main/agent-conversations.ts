@@ -2,6 +2,7 @@
 // <userData>/agent/conversations/{id}.json.
 
 import { join } from 'path'
+import { randomUUID } from 'crypto'
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'fs/promises'
 
 export interface ConversationSummary {
@@ -75,7 +76,7 @@ export function createConversationStorage(dir: string) {
       await mkdir(dir, { recursive: true })
       const target = fileFor(conversation.id)
       // Write then rename: a crash mid-write never leaves a truncated file.
-      const tmp = `${target}.${process.pid}.${Date.now()}.tmp`
+      const tmp = `${target}.${randomUUID()}.tmp`
       await writeFile(tmp, JSON.stringify(conversation), 'utf-8')
       try {
         await rename(tmp, target)

@@ -71,8 +71,11 @@ export interface ClientToolDeps {
   }
   storage: {
     get: () => Promise<StorageDirs>
-    listDir: (dirPath: string) => Promise<string[]>
-    moveDirectory: (args: { src: string; dest: string }) => Promise<OpResult>
+    /** What Modly created in the current folder (moved) and what it did not (left alone), as Settings sees it. */
+    entries: (kind: StorageKind) => Promise<{ modly: string[]; other: string[] }>
+    /** Settings' guard: refuses a drive root, a system folder or an ancestor of home/app data. */
+    checkLocation: (path: string) => Promise<{ ok: boolean; error?: string }>
+    moveDirectory: (args: { src: string; dest: string }) => Promise<OpResult & { kept?: string[] }>
     /** Saves the new folder, the way Settings > Storage does once files are moved. */
     apply: (kind: StorageKind, path: string) => Promise<void>
   }
@@ -469,12 +472,18 @@ export const clientTools: Record<string, ClientTool> = {
         }
       }
 
-      const items = current ? await deps.storage.listDir(current).catch(() => [] as string[]) : []
+      const location = await deps.storage.checkLocation(path).catch((err) => ({ ok: false, error: errorText(err) }))
+      if (!location.ok) return fail(`${location.error ?? `${quote(path)} cannot hold Modly data.`} Nothing changed.`)
+
+      // Files count too: a workflows folder holds only JSON files.
+      const items = current ? (await deps.storage.entries(kind).catch(() => ({ modly: [] as string[] }))).modly : []
+      let kept: string[] = []
       if (items.length > 0) {
         const moved = await deps.storage.moveDirectory({ src: current, dest: path })
         if (!moved.success) {
           return fail(`Could not move the ${kind} files to ${quote(path)}: ${moved.error ?? 'unknown error'}. Nothing changed.`)
         }
+        kept = moved.kept ?? []
       }
       try {
         await deps.storage.apply(kind, path)
@@ -483,9 +492,12 @@ export const clientTools: Record<string, ClientTool> = {
           ? `Moved the ${kind} files to ${quote(path)}, but saving the new folder failed: ${errorText(err)}. Set it in Settings > Storage.`
           : `Saving the new ${kind} folder failed: ${errorText(err)}. Nothing changed.`)
       }
-      return items.length
-        ? `Moved ${items.length} item${items.length > 1 ? 's' : ''} from ${quote(current)} and set the ${kind} folder to ${quote(path)}.`
-        : `Set the ${kind} folder to ${quote(path)}.`
+      if (!items.length) return `Set the ${kind} folder to ${quote(path)}.`
+      const count = (n: number) => `${n} item${n > 1 ? 's' : ''}`
+      const movedCount = items.length - kept.length
+      return kept.length
+        ? `Moved ${count(movedCount)} from ${quote(current)} and set the ${kind} folder to ${quote(path)}; ${count(kept.length)} could not be moved and stayed in ${quote(current)}.`
+        : `Moved ${count(movedCount)} from ${quote(current)} and set the ${kind} folder to ${quote(path)}.`
     },
   }),
 
@@ -719,7 +731,8 @@ export function createClientToolDeps(): ClientToolDeps {
     },
     storage: {
       get: () => window.electron.settings.get(),
-      listDir: (dirPath) => window.electron.fs.listDir(dirPath),
+      entries: (kind) => window.electron.fs.storageEntries(kind),
+      checkLocation: (path) => window.electron.fs.checkStorageLocation(path),
       moveDirectory: (args) => window.electron.fs.moveDirectory(args),
       async apply(kind, path) {
         // Same calls as Settings > Storage.

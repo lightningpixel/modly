@@ -247,6 +247,9 @@ class ClientToolDeclarationTests(unittest.TestCase):
     def test_enums(self) -> None:
         props = self._tool("set_setting")["parameters"]["properties"]
         self.assertEqual(props["key"]["enum"], ["uiScale", "useAtkinsonFont", "showRamIndicator"])
+        # The app's scale names, not a number: the frontend accepts only these.
+        self.assertEqual(props["value"]["type"], ["string", "boolean"])
+        self.assertIn("small, medium, large, very-large", props["value"]["description"])
         props = self._tool("set_storage_folder")["parameters"]["properties"]
         self.assertEqual(props["kind"]["enum"], ["models", "workspace", "workflows"])
         nav = self._tool("navigate")
@@ -271,7 +274,7 @@ _CONTEXT = {
         "modelsDir": "D:/models", "workspaceDir": "D:/ws",
         "workflowsDir": "D:/wf", "extensionsDir": "D:/ext",
     },
-    "ui": {"uiScale": 1.1, "useAtkinsonFont": False, "showRamIndicator": True},
+    "ui": {"uiScale": "large", "useAtkinsonFont": False, "showRamIndicator": True},
 }
 
 
@@ -288,7 +291,7 @@ class ServerToolTests(unittest.TestCase):
 
     def test_get_settings(self) -> None:
         text, payload = _run("get_settings")
-        for expected in ("D:/models", "D:/ws", "D:/wf", "D:/ext", "uiScale: 1.1", "useAtkinsonFont: false", "showRamIndicator: true"):
+        for expected in ("D:/models", "D:/ws", "D:/wf", "D:/ext", "uiScale: large", "useAtkinsonFont: false", "showRamIndicator: true"):
             self.assertIn(expected, text)
         self.assertIsNone(payload)
         self.assertIn("No settings", _run("get_settings", context={})[0])
@@ -349,7 +352,7 @@ class ContextRenderingTests(unittest.TestCase):
             "- sf3d: SF3D",
             "- wf1: My Workflow",
             "D:/models", "D:/ws", "D:/wf", "D:/ext",
-            "uiScale: 1.1", "useAtkinsonFont: false", "showRamIndicator: true",
+            "uiScale: large", "useAtkinsonFont: false", "showRamIndicator: true",
             "Current mesh path: Default/mesh.glb",
             "- trellis/gen (image→mesh): Trellis",
         ):

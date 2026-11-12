@@ -43,7 +43,7 @@ interface AgentConversationState {
 
   setMessages: (update: AgentMessage[] | ((prev: AgentMessage[]) => AgentMessage[])) => void
   setBusy: (busy: boolean) => void
-  newConversation: () => void
+  newConversation: () => Promise<void>
   open: (id: string) => Promise<void>
   remove: (id: string) => Promise<void>
   refreshList: () => Promise<void>
@@ -63,11 +63,12 @@ let dirty = false
 let initPromise: Promise<void> | null = null
 
 export const useAgentConversationStore = create<AgentConversationState>()((set, get) => {
-  async function save(): Promise<void> {
+  /** False when the write failed: the changes stay unsaved and switching away must wait. */
+  async function save(): Promise<boolean> {
     if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
     const { currentId, createdAt, messages } = get()
     // An empty conversation never reaches the disk.
-    if (!dirty || messages.length === 0) return
+    if (!dirty || messages.length === 0) return true
     dirty = false
     const conversation: Conversation = {
       id: currentId,
@@ -79,8 +80,12 @@ export const useAgentConversationStore = create<AgentConversationState>()((set, 
     try {
       await window.electron.agent.conversations.save(conversation)
       set((s) => ({ list: upsertSummary(s.list, { id: conversation.id, title: conversation.title, updatedAt: conversation.updatedAt }) }))
+      return true
     } catch (err) {
       console.error('[agent] Failed to save conversation:', err)
+      // Still unsaved: the next change or switch tries again.
+      if (get().currentId === conversation.id) dirty = true
+      return false
     }
   }
 
@@ -104,16 +109,17 @@ export const useAgentConversationStore = create<AgentConversationState>()((set, 
 
     setBusy: (busy) => set({ busy }),
 
-    newConversation: () => {
+    newConversation: async () => {
       if (get().busy) return
-      void save()
+      // Leaving a conversation whose save failed would lose it.
+      if (!(await save())) return
       set({ currentId: newId(), createdAt: Date.now(), messages: [] })
       dirty = false
     },
 
     open: async (id) => {
       if (get().busy || id === get().currentId) return
-      await save()
+      if (!(await save())) return
       const conversation = await window.electron.agent.conversations.read(id)
       if (!conversation) {
         // Gone or corrupted on disk: drop it from the list.
@@ -165,6 +171,6 @@ export const useAgentConversationStore = create<AgentConversationState>()((set, 
       return initPromise
     },
 
-    flush: save,
+    flush: async () => { await save() },
   }
 })

@@ -103,7 +103,8 @@ function fake(overrides: Partial<ClientToolDeps> = {}): Fake {
     },
     storage: {
       get: async () => state.dirs,
-      listDir: async (dir) => state.dirItems[dir] ?? [],
+      entries: async (kind: StorageKind) => ({ modly: state.dirItems[kind] ?? [], other: [] }),
+      checkLocation: async (path: string) => (path.startsWith('C:\\Windows') ? { ok: false, error: 'This is a system folder.' } : { ok: true }),
       moveDirectory: async (args) => { rec('move', args.src, args.dest); return ok },
       apply: async (kind: StorageKind, path: string) => { rec('applyStorage', kind, path) },
     },
@@ -256,10 +257,31 @@ test('set_setting sets each UI option and validates key and value', async () => 
 
 test('set_storage_folder moves existing files, then saves the folder', async () => {
   const f = fake()
-  f.dirItems['C:\\Modly\\models'] = ['triposr', 'hunyuan']
+  f.dirItems.models = ['triposr', 'hunyuan']
   const result = await run('set_storage_folder', { kind: 'models', path: 'D:\\AI\\models' }, f)
   assert.deepEqual(f.calls, [['move', 'C:\\Modly\\models', 'D:\\AI\\models'], ['applyStorage', 'models', 'D:\\AI\\models']])
   assert.equal(result, 'Moved 2 items from “C:\\Modly\\models” and set the models folder to “D:\\AI\\models”.')
+})
+
+test('set_storage_folder moves a workflows folder that holds only files', async () => {
+  const f = fake()
+  f.dirItems.workflows = ['turntable.json']
+  const result = await run('set_storage_folder', { kind: 'workflows', path: 'D:/flows' }, f)
+  assert.deepEqual(f.calls, [['move', 'C:\\Modly\\workflows', 'D:/flows'], ['applyStorage', 'workflows', 'D:/flows']])
+  assert.match(result, /^Moved 1 item from/)
+})
+
+test('set_storage_folder refuses a location Settings would refuse', async () => {
+  const f = fake()
+  assert.equal(await run('set_storage_folder', { kind: 'models', path: 'C:\\Windows\\m' }, f), 'Error: This is a system folder. Nothing changed.')
+  assert.deepEqual(f.calls, [])
+})
+
+test('set_storage_folder says which items stayed behind', async () => {
+  const f = fake()
+  f.dirItems.models = ['a', 'b']
+  f.deps.storage.moveDirectory = async (args) => { f.calls.push(['move', args.src, args.dest]); return { success: true, kept: ['b'] } }
+  assert.match(await run('set_storage_folder', { kind: 'models', path: 'D:/m' }, f), /^Moved 1 item from .*; 1 item could not be moved and stayed in “C:\\Modly\\models”\.$/)
 })
 
 test('set_storage_folder with an empty folder only saves it', async () => {
@@ -278,7 +300,7 @@ test('set_storage_folder refuses invalid locations and keeps everything on a fai
   assert.match(await run('set_storage_folder', { kind: 'models', path: 'C:/Modly/models/' }, f), /already/)
   assert.deepEqual(f.calls, [])
 
-  f.dirItems['C:\\Modly\\workspace'] = ['a.glb']
+  f.dirItems.workspace = ['a.glb']
   f.deps.storage.moveDirectory = async () => ({ success: false, error: 'EACCES' })
   assert.equal(await run('set_storage_folder', { kind: 'workspace', path: 'E:/ws' }, f), 'Error: Could not move the workspace files to “E:/ws”: EACCES. Nothing changed.')
   assert.deepEqual(f.calls, [])

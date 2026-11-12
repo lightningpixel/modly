@@ -282,6 +282,8 @@ export default function AgentChat(): JSX.Element {
   const localModels                           = llmModels.filter((m) => m.downloaded && !(m.tags ?? []).some((t) => t === 'code' || t === 'cad'))
   const [showModelPicker, setShowModelPicker] = useState(false)
   const [pendingWorkflow, setPendingWorkflow]  = useState<{ id: string; name: string } | null>(null)
+  // Generations the agent started; the conversation stays put until they end.
+  const [generations, setGenerations]         = useState(0)
   const [attachments, setAttachments]         = useState<string[]>([]) // data URLs
   const [isDragging, setIsDragging]           = useState(false)
   const [thinkingMode, setThinkingMode]       = useState<ThinkingMode>(defaultThinking)
@@ -357,12 +359,14 @@ export default function AgentChat(): JSX.Element {
   }, [runState.status, pendingWorkflow])
 
   // The panel locks conversation switching while a turn or its workflow runs.
-  useEffect(() => { setBusy(isLoading || pendingWorkflow !== null) }, [isLoading, pendingWorkflow, setBusy])
+  useEffect(() => { setBusy(isLoading || pendingWorkflow !== null || generations > 0) }, [isLoading, pendingWorkflow, generations, setBusy])
 
   // Another conversation was opened: drop the view state of the previous one.
   useEffect(() => {
     setShowAll(false)
     setError(null)
+    useConfirmQueue.getState().cancelAll()
+    useConfirmQueue.getState().clearAnswered()
   }, [currentId])
 
   useEffect(() => {
@@ -371,6 +375,7 @@ export default function AgentChat(): JSX.Element {
   }, [messages, isLoading, pendingWorkflow])
 
   async function callAgent(msgs: Message[], extraContext: Record<string, unknown> = {}) {
+    useConfirmQueue.getState().clearAnswered()
     setIsLoading(true)
     setError(null)
     const id = `a-${Date.now()}`
@@ -440,6 +445,7 @@ export default function AgentChat(): JSX.Element {
             void runClientTool(event, clientDeps, confirm)
             break
           case 'tool_done':
+            useConfirmQueue.getState().cancelEvent(event.id)
             patch((m) => ({
               ...m,
               actions: (m.actions ?? []).map((a) => (a.id === event.id
@@ -515,9 +521,12 @@ export default function AgentChat(): JSX.Element {
   // Started after `done`, like workflows: the local LLM frees the GPU first.
   function startGeneration(payload: AgentActionPayload | null | undefined, msgs: Message[]) {
     if (payload?.type !== 'generate_from_image') return
-    void startGenerationFromImage(payload, latestUserImage(msgs), createGenerationDeps()).then((result) => {
-      setMessages((prev) => [...prev, { id: `sys-${Date.now()}`, role: 'assistant', content: result }])
-    })
+    setGenerations((n) => n + 1)
+    void startGenerationFromImage(payload, latestUserImage(msgs), createGenerationDeps())
+      .then((result) => {
+        setMessages((prev) => [...prev, { id: `sys-${Date.now()}`, role: 'assistant', content: result }])
+      })
+      .finally(() => setGenerations((n) => n - 1))
   }
 
   function startWorkflow(payload: AgentActionPayload | null | undefined, msgs: Message[]) {

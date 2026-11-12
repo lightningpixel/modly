@@ -9,6 +9,7 @@ import {
 import { useAgentConversationStore } from '@shared/stores/agentConversationStore'
 import { UNTITLED, deriveTitle, relativeDate } from '@shared/utils/agentConversations'
 import AgentChat from './AgentChat'
+import { useConfirmQueue } from './ConfirmCard'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -136,6 +137,17 @@ export default function AgentPanel(): JSX.Element {
     window.addEventListener('beforeunload', onUnload)
     return () => window.removeEventListener('beforeunload', onUnload)
   }, [])
+
+  // A confirm card is waiting for a click: show it, even if the panel was
+  // closed mid-turn or the conversation list covered the chat.
+  useEffect(() => {
+    const { setOnQueued } = useConfirmQueue.getState()
+    setOnQueued(() => {
+      setOpen(true)
+      setShowList(false)
+    })
+    return () => setOnQueued(null)
+  }, [setOpen])
 
   // Ctrl+L / Cmd+L toggles the panel, except while typing elsewhere.
   useEffect(() => {

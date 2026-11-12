@@ -64,3 +64,25 @@ test('cancelAll declines every pending request', async () => {
 test('ConfirmCard is a component', () => {
   assert.equal(typeof ConfirmCard, 'function')
 })
+
+test('cancelEvent cancels the pending card of a tool call the server gave up on', async () => {
+  const answer = queue().confirm('Delete the workflow “Turntable”', { tool: 'delete_workflow', id: 'e9', callId: 'c9', destructive: true })
+  const other = queue().confirm('Uninstall the extension “X”', { tool: 'uninstall_extension', id: 'e10', callId: 'c10', destructive: true })
+  queue().cancelEvent('e9')
+  assert.equal(await answer, false)
+  assert.deepEqual(queue().requests.map((r) => r.status), ['cancelled', 'pending'])
+  queue().cancelAll()
+  assert.equal(await other, false)
+  queue().clearAnswered()
+})
+
+test('a queued confirm calls onQueued, so the panel can open itself', async () => {
+  let opened = 0
+  queue().setOnQueued(() => { opened++ })
+  const answer = queue().confirm('Install the extension from “https://github.com/a/b”', { tool: 'install_extension', id: 'e11', callId: 'c11', destructive: false })
+  assert.equal(opened, 1)
+  queue().cancelAll()
+  assert.equal(await answer, false)
+  queue().setOnQueued(null)
+  queue().clearAnswered()
+})
