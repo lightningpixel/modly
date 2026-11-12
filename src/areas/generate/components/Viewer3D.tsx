@@ -18,6 +18,8 @@ import { useAppStore } from '@shared/stores/appStore'
 import { ViewerToolbar, type ViewMode } from './ViewerToolbar'
 import type { LightSettings, PointLight } from '@shared/stores/appStore'
 import { DEFAULT_LIGHT_SETTINGS } from '@shared/stores/appStore'
+import SculptLayer from '../sculpt/SculptLayer'
+import { useSculptStore } from '../sculpt/sculptStore'
 
 export type GizmoMode = 'translate' | 'rotate' | 'scale'
 
@@ -190,23 +192,32 @@ function ModelLoadError(): JSX.Element {
 
 interface MeshModelProps {
   url: string
+  /** Workspace URL of the file (currentJob.outputUrl): what sculpt commits patch. */
+  outputUrl: string
   jobId: string
   viewMode: ViewMode
   selected: boolean
+  /** Sculpt mode: clicks paint instead of selecting. */
+  sculpting: boolean
   onStats: (stats: { vertices: number; triangles: number }) => void
   onSelect: () => void
   onObject: (obj: THREE.Object3D | null) => void
 }
 
-function MeshModel({ url, jobId, viewMode, selected, onStats, onSelect, onObject }: MeshModelProps): JSX.Element {
-  const extension = url.split('?')[0]?.split('.').pop()?.toLowerCase()
-  const common = { url, jobId, viewMode, selected, onStats, onSelect, onObject }
-  return extension === 'obj' ? <ObjMeshModel {...common} /> : <GltfMeshModel {...common} />
+function MeshModel(props: MeshModelProps): JSX.Element {
+  const extension = props.url.split('?')[0]?.split('.').pop()?.toLowerCase()
+  return extension === 'obj' ? <ObjMeshModel {...props} /> : <GltfMeshModel {...props} />
 }
 
 function GltfMeshModel(props: MeshModelProps): JSX.Element {
-  const { scene } = useGLTF(props.url)
-  return <SceneMeshModel {...props} scene={scene} loaderType="gltf" />
+  const { scene, parser } = useGLTF(props.url)
+  return (
+    <>
+      <SceneMeshModel {...props} scene={scene} loaderType="gltf" />
+      {/* Keyed by URL: a new mesh file starts a new sculpt session. */}
+      <SculptLayer key={props.url} scene={scene} parser={parser} outputUrl={props.outputUrl} />
+    </>
+  )
 }
 
 function ObjMeshModel(props: MeshModelProps): JSX.Element {
@@ -218,6 +229,7 @@ function SceneMeshModel({
   url,
   viewMode,
   selected,
+  sculpting,
   onStats,
   onSelect,
   onObject,
@@ -351,7 +363,7 @@ function SceneMeshModel({
     <Select enabled={selected}>
       <primitive
         object={scene}
-        onClick={(e: { stopPropagation: () => void }) => { e.stopPropagation(); onSelect() }}
+        onClick={(e: { stopPropagation: () => void }) => { e.stopPropagation(); if (!sculpting) onSelect() }}
       />
     </Select>
   )
@@ -945,6 +957,10 @@ export default function Viewer3D({
 
   const [meshObject, setMeshObject] = useState<THREE.Object3D | null>(null)
 
+  const sculpting = useSculptStore((s) => s.active)
+  const sculptStatus = useSculptStore((s) => s.status)
+  const sculptError = useSculptStore((s) => s.error)
+
   // Local gizmo-transform history (live TRS), undoable with Ctrl+Z. A snapshot
   // is taken when a drag starts and committed on release only if it changed.
   const transformHistory = useRef<TransformSnapshot[]>([])
@@ -969,10 +985,16 @@ export default function Viewer3D({
   // Reset view state when model changes
   useEffect(() => {
     setSelected(false)
-    setViewMode('solid')
+    // A sculpt commit swaps in the patched file: keep the sculptor's view mode.
+    if (!useSculptStore.getState().active) setViewMode('solid')
     setStoreMeshStats(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reset only when the model changes; setters are stable
   }, [modelUrl])
+
+  // Sculpt mode owns the left button: no selection, so no transform gizmo.
+  useEffect(() => {
+    if (sculpting) setSelected(false)
+  }, [sculpting, setSelected])
 
   // Clear the shared selection when the viewer unmounts — the store would
   // otherwise keep it set and flash a stale selection on the next mount.
@@ -983,7 +1005,7 @@ export default function Viewer3D({
     const handler = (e: KeyboardEvent) => {
       if (e.key !== 'Delete') return
       if (document.activeElement instanceof HTMLInputElement) return
-      if (!selected) return
+      if (!selected || useSculptStore.getState().active) return
       setCurrentJob(null)
       setSelected(false)
     }
@@ -1126,9 +1148,11 @@ export default function Viewer3D({
                 <directionalLight position={[-4, 2, -4]} color={lightSettings.fillColor} intensity={lightSettings.fillIntensity} />
                 <MeshModel
                   url={modelUrl}
+                  outputUrl={outputUrl}
                   jobId={currentJob.id}
                   viewMode={viewMode}
                   selected={selected}
+                  sculpting={sculpting}
                   onStats={setStoreMeshStats}
                   onSelect={handleMeshSelect}
                   onObject={setMeshObject}
@@ -1154,13 +1178,13 @@ export default function Viewer3D({
             />
           ))}
 
-          {selected && meshObject && gizmoMode === 'translate' && (
+          {!sculpting && selected && meshObject && gizmoMode === 'translate' && (
             <TranslateGizmo object={meshObject} onDragStart={handleGizmoDragStart} onDragEnd={handleGizmoDragEnd} />
           )}
-          {selected && meshObject && gizmoMode === 'rotate' && (
+          {!sculpting && selected && meshObject && gizmoMode === 'rotate' && (
             <RotateGizmo object={meshObject} onDragStart={handleGizmoDragStart} onDragEnd={handleGizmoDragEnd} />
           )}
-          {selected && meshObject && gizmoMode === 'scale' && (
+          {!sculpting && selected && meshObject && gizmoMode === 'scale' && (
             <ScaleGizmo object={meshObject} onDragStart={handleGizmoDragStart} onDragEnd={handleGizmoDragEnd} />
           )}
 
@@ -1204,11 +1228,31 @@ export default function Viewer3D({
           </div>
         )}
 
+        {/* Sculpt status: preparing / saving / last error */}
+        {sculpting && (sculptStatus !== 'idle' || sculptError) && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 pointer-events-none">
+            {sculptStatus !== 'idle' ? (
+              <p role="status" className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-900/90 border border-zinc-700/60 text-xs text-zinc-200">
+                <svg className="animate-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                </svg>
+                {sculptStatus === 'preparing' ? 'Preparing mesh…' : 'Saving sculpt…'}
+              </p>
+            ) : (
+              <p role="alert" className="max-w-md px-3 py-1.5 rounded-lg bg-red-950/90 border border-red-500/40 text-xs text-red-200">
+                {sculptError}
+              </p>
+            )}
+          </div>
+        )}
+
         {/* Bottom-right hint */}
         {modelUrl && (
           <div className="absolute bottom-4 right-4 pointer-events-none">
             <p className="text-xs text-zinc-600">
-              {selected
+              {sculpting
+                ? <>Drag on the mesh to sculpt &bull; drag outside to orbit &bull; <span className="text-zinc-500">Esc</span> to finish</>
+                : selected
                 ? <>Click mesh to select &bull; <span className="text-zinc-500">Delete</span> to remove</>
                 : 'Drag to rotate \u2022 Scroll to zoom'
               }

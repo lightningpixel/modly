@@ -23,6 +23,8 @@ import {
   type MeshOpResponse,
   type ParamControl,
 } from '../meshEditPanel'
+import { commitSculpt, useSculptStore } from '../sculpt/sculptStore'
+import SculptSection from './SculptSection'
 
 // Side panel listing every mesh-ops registry op (the same ones the chat agent
 // runs), with controls generated from each op's params_schema. Ops that write
@@ -338,7 +340,9 @@ export default function EditPanel({ onClose }: { onClose: () => void }): JSX.Ele
 
   const isGenerating = currentJob?.status === 'uploading' || currentJob?.status === 'generating'
   const meshUrl = currentJob?.status === 'done' ? currentJob.outputUrl : undefined
-  const canRun = !!meshUrl && !isGenerating && running === null
+  // Ops are locked while sculpting: they would run on the file without the strokes.
+  const sculpting = useSculptStore((s) => s.active)
+  const canRun = !!meshUrl && !isGenerating && running === null && !sculpting
 
   useEffect(() => {
     let cancelled = false
@@ -370,10 +374,12 @@ export default function EditPanel({ onClose }: { onClose: () => void }): JSX.Ele
 
   async function run(op: MeshOpDescriptor, values: Params) {
     if (!meshUrl || running !== null) return
-    const sourceUrl = meshUrl
     setConfirming(null)
     setRunning(op.id)
     setResults((current) => { const next = { ...current }; delete next[op.id]; return next })
+    // Pending sculpt strokes go into the file first, so the op sees them.
+    if (!(await commitSculpt())) { setRunning(null); return }
+    const sourceUrl = useAppStore.getState().currentJob?.outputUrl ?? meshUrl
     try {
       const response = await runMeshOp(op.id, meshPathFromUrl(sourceUrl), values)
       // The viewer may have moved on (undo, another model) while the op ran:
@@ -446,6 +452,8 @@ export default function EditPanel({ onClose }: { onClose: () => void }): JSX.Ele
         {!ops && !loadError && (
           <div className="flex items-center gap-2 text-[11px] text-zinc-500"><Spinner /> Loading tools…</div>
         )}
+
+        <SculptSection running={running !== null} />
 
         {/* Mesh health: inspect_mesh as an inline report */}
         {inspectOp && (

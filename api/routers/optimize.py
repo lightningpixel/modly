@@ -24,6 +24,7 @@ from services.mesh_ops import (
     MeshOpUnavailableError,
     mesh_ops_registry,
 )
+from services.mesh_ops.glb_patch import GlbPatchError, VertexPatch, patch_glb_file
 from services.mesh_ops.transforms import apply_transforms, transform_file
 
 router = APIRouter(tags=["optimize"])
@@ -53,6 +54,18 @@ class ArrangeRequest(BaseModel):
     path: str                    # format: "{collection}/{filename}"
     steps: list[str]             # transform op ids, applied in canonical order
     params: dict[str, dict[str, object]] = Field(default_factory=dict)  # per step id
+
+
+class VertexPatchBody(BaseModel):
+    mesh: int                    # index into gltf.meshes
+    primitive: int               # index into meshes[mesh].primitives
+    positions: str               # base64 little-endian float32, vertexCount * 3
+    normals: str | None = None   # same format, optional
+
+
+class PatchVerticesRequest(BaseModel):
+    path: str                    # format: "{collection}/{filename}.glb"
+    patches: list[VertexPatchBody]
 
 
 def _resolve_input_path(raw_path: str) -> Path:
@@ -236,6 +249,25 @@ def arrange_mesh(body: ArrangeRequest):
             _operation_context(),
         )
     return _operation_response(result)
+
+
+@router.post("/patch-vertices")
+def patch_vertices(body: PatchVerticesRequest):
+    # Sculpt commit: write the viewer's edited vertex data into a copy of the
+    # GLB at container level, so textures, materials and extensions survive.
+    input_path = _resolve_input_path(body.path)
+    if input_path.suffix.lower() != ".glb":
+        raise HTTPException(400, "Sculpt patches can only be applied to .glb files")
+    output_path = _operation_output_path(
+        input_path,
+        f"{input_path.stem}_sculpt_{uuid.uuid4().hex[:8]}.glb",
+    )
+    patches = [VertexPatch(**patch.model_dump()) for patch in body.patches]
+    try:
+        patch_glb_file(input_path, output_path, patches)
+    except GlbPatchError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return _operation_response(MeshOpResult(output_path, {}))
 
 
 def _transform_output_path(input_path: Path) -> Path:

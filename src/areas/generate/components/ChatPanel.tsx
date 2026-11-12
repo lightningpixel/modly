@@ -9,6 +9,7 @@ import { buildAllWorkflowExtensions } from '@areas/workflows/mockExtensions'
 import { readAgentEvents, toolStopTitle } from '@shared/utils/agentStream'
 import { adviceText, ollamaAdvice } from '@shared/utils/ollamaHealth'
 import OllamaBanner, { useOllamaHealth } from './OllamaBanner'
+import { commitSculpt } from '../sculpt/sculptStore'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -298,8 +299,6 @@ export default function ChatPanel(): JSX.Element {
   messagesRef.current = messages
 
   const apiUrl           = useAppStore((s) => s.apiUrl)
-  const currentJob       = useAppStore((s) => s.currentJob)
-  const meshStats        = useAppStore((s) => s.meshStats)
   const updateCurrentJob = useAppStore((s) => s.updateCurrentJob)
   const pushMeshUrl      = useAppStore((s) => s.pushMeshUrl)
   const applyMeshEdit    = useAppStore((s) => s.applyMeshEdit)
@@ -366,6 +365,8 @@ export default function ChatPanel(): JSX.Element {
 
   function buildContext(): Record<string, unknown> {
     const ctx: Record<string, unknown> = {}
+    // Read from the store, not the render: a sculpt commit may just have swapped the mesh.
+    const { currentJob, meshStats } = useAppStore.getState()
     if (currentJob?.outputUrl) ctx.currentMeshPath = currentJob.outputUrl.replace('/workspace/', '')
     if (meshStats?.triangles)  ctx.meshTriangles   = meshStats.triangles
     if (workflows.length > 0)  ctx.workflows       = workflows.map((w) => ({ id: w.id, name: w.name }))
@@ -556,6 +557,11 @@ export default function ChatPanel(): JSX.Element {
   async function handleSend() {
     const text = input.trim()
     if (!text || isLoading || pendingWorkflow) return
+    // The agent edits the mesh file: pending sculpt strokes must be in it first.
+    if (!(await commitSculpt())) {
+      setError('Could not save the sculpt strokes; the message was not sent.')
+      return
+    }
 
     const userMsg: Message = {
       id: `u-${Date.now()}`,

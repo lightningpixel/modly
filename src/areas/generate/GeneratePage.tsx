@@ -10,6 +10,8 @@ import Viewer3D from './components/Viewer3D'
 import WorkflowPanel from './components/WorkflowPanel'
 import EditPanel from './components/EditPanel'
 import { meshPathFromUrl } from './meshEditPanel'
+import { commitSculpt, useSculptStore } from './sculpt/sculptStore'
+import { sculptKeyAction } from './sculpt/sculptLogic'
 import { getDefaultAssetLibraryService } from './assetLibraryService'
 import { buildOrcaSlicerDeepLink, canOpenInOrcaSlicer } from './orcaSlicerLink'
 import { resolveAssetLibraryOpenTarget, type ProjectedAssetLibraryEntry } from './assetLibraryProjection'
@@ -707,15 +709,57 @@ export default function GeneratePage(): JSX.Element {
   const { optimizeMesh, smoothMesh, importMesh } = useApi()
   const assetLibraryService = useMemo(() => getDefaultAssetLibraryService(), [])
 
+  const sculpting = useSculptStore((s) => s.active)
+
+  // Global mesh undo/redo. Pending sculpt strokes are saved first, so undo
+  // steps back over them as one edit (in sculpt mode Ctrl+Z is the stroke undo).
+  const undoMeshEdit = useCallback(async () => { if (await commitSculpt()) undoMesh() }, [undoMesh])
+  const redoMeshEdit = useCallback(async () => { if (await commitSculpt()) redoMesh() }, [redoMesh])
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!e.ctrlKey && !e.metaKey) return
-      if (e.key === 'z') { e.preventDefault(); if (gizmoUndoRef.current?.()) return; undoMesh() }
-      if (e.key === 'y') { e.preventDefault(); redoMesh() }
+      if (useSculptStore.getState().active) return // sculpt shortcuts below
+      if (e.key === 'z') { e.preventDefault(); if (gizmoUndoRef.current?.()) return; void undoMeshEdit() }
+      if (e.key === 'y') { e.preventDefault(); void redoMeshEdit() }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [undoMesh, redoMesh])
+  }, [undoMeshEdit, redoMeshEdit])
+
+  // Sculpt-mode shortcuts (see sculptKeyAction). Ignored while typing.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const sculpt = useSculptStore.getState()
+      if (!sculpt.active) return
+      const el = document.activeElement as HTMLElement | null
+      if (el && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable)) return
+      const action = sculptKeyAction(e)
+      if (!action) return
+      e.preventDefault()
+      switch (action.type) {
+        case 'undo': sculpt.undo(); break
+        case 'redo': sculpt.redo(); break
+        case 'exit': void sculpt.exit(); break
+        case 'radius': sculpt.stepRadius(action.direction); break
+        case 'brush': sculpt.setBrush(action.kind); break
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
+
+  // Sculpting replaces the transform tools.
+  useEffect(() => {
+    if (sculpting) setGizmoMode(null)
+  }, [sculpting])
+
+  // Leaving the page leaves sculpt mode; the viewer saves pending strokes as it unmounts.
+  useEffect(() => () => useSculptStore.setState({ active: false }), [])
+
+  const closeEditPanel = useCallback(async () => {
+    if (await useSculptStore.getState().exit()) setEditPanelOpen(false)
+  }, [])
 
   const hasModel = currentJob?.status === 'done' && !!currentJob.outputUrl
   const showOpenInSlicer = hasModel && canOpenInOrcaSlicer(currentJob?.outputUrl)
@@ -743,6 +787,7 @@ export default function GeneratePage(): JSX.Element {
     const handler = (e: KeyboardEvent) => {
       const el = document.activeElement as HTMLElement | null
       if (el && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable)) return
+      if (useSculptStore.getState().active) return // W/R/S/Esc belong to sculpt mode
       if (e.key === 'Escape') { setGizmoMode((m) => (m ? null : m)); return }
       if (!meshSelected && !selectedPointLightId) return
       const k = e.key.toLowerCase()
@@ -766,14 +811,21 @@ export default function GeneratePage(): JSX.Element {
     setTimeout(() => setUnloadStatus('idle'), 2000)
   }
 
-  function handleExport(format: 'glb' | 'obj' | 'stl' | 'ply') {
-    if (!currentJob?.outputUrl) return
+  /** Saves pending sculpt strokes, then returns the mesh URL to read (or null). */
+  async function committedMeshUrl(): Promise<string | null> {
+    if (!(await commitSculpt())) return null
+    return useAppStore.getState().currentJob?.outputUrl ?? null
+  }
+
+  async function handleExport(format: 'glb' | 'obj' | 'stl' | 'ply') {
+    const outputUrl = await committedMeshUrl()
+    if (!outputUrl) return
     const stem = `modly-${Date.now()}`
     const link = document.createElement('a')
     if (format === 'glb') {
-      link.href = `${apiUrl}${currentJob.outputUrl}`
+      link.href = `${apiUrl}${outputUrl}`
     } else {
-      const path = encodeURIComponent(currentJob.outputUrl.replace('/workspace/', ''))
+      const path = encodeURIComponent(outputUrl.replace('/workspace/', ''))
       link.href = `${apiUrl}/optimize/export?path=${path}&format=${format}`
     }
     link.download = `${stem}.${format}`
@@ -781,9 +833,10 @@ export default function GeneratePage(): JSX.Element {
   }
 
   async function handleOpenInOrcaSlicer() {
-    if (!currentJob?.outputUrl) return
+    const outputUrl = await committedMeshUrl()
+    if (!outputUrl) return
     try {
-      const link = buildOrcaSlicerDeepLink(apiUrl, currentJob.outputUrl)
+      const link = buildOrcaSlicerDeepLink(apiUrl, outputUrl)
       const result = await window.electron.slicer.open(link)
       if (!result.success) {
         // Deliberately not "make sure it is installed": the main process cannot
@@ -796,6 +849,8 @@ export default function GeneratePage(): JSX.Element {
   }
 
   async function handleImportMesh() {
+    // Save the strokes before the model is replaced (else they'd be dropped).
+    if (!(await commitSculpt())) return
     const filePath = await window.electron.fs.selectMeshFile()
     if (!filePath) return
     setOpenPanel(null)
@@ -855,6 +910,7 @@ export default function GeneratePage(): JSX.Element {
       setLibraryError(describeAssetLibraryOpenability(selectedEntry))
       return
     }
+    if (!(await commitSculpt())) return
 
     setLibraryOpening(true)
     setLibraryError(null)
@@ -883,10 +939,11 @@ export default function GeneratePage(): JSX.Element {
   }
 
   async function handleSmooth(iterations: number) {
-    if (!currentJob?.outputUrl) return
     setSmoothing(true)
     try {
-      const path = meshPathFromUrl(currentJob.outputUrl)
+      const outputUrl = await committedMeshUrl()
+      if (!outputUrl) return
+      const path = meshPathFromUrl(outputUrl)
       const { url } = await smoothMesh(path, iterations)
       applyMeshEdit(url)
       setOpenPanel(null)
@@ -898,10 +955,11 @@ export default function GeneratePage(): JSX.Element {
   }
 
   async function handleDecimate(targetFaces: number) {
-    if (!currentJob?.outputUrl) return
     setDecimating(true)
     try {
-      const path = meshPathFromUrl(currentJob.outputUrl)
+      const outputUrl = await committedMeshUrl()
+      if (!outputUrl) return
+      const path = meshPathFromUrl(outputUrl)
       const { url } = await optimizeMesh(path, targetFaces)
       applyMeshEdit(url)
       setOpenPanel(null)
@@ -962,7 +1020,7 @@ export default function GeneratePage(): JSX.Element {
 
           {/* Undo / Redo */}
           <button
-            onClick={undoMesh}
+            onClick={() => { void undoMeshEdit() }}
             disabled={undoSteps === 0}
             title={undoSteps > 0 ? `Undo (Ctrl+Z) — ${undoSteps} step${undoSteps > 1 ? 's' : ''}` : 'Undo (Ctrl+Z)'}
             className="relative flex items-center justify-center w-7 h-7 rounded-lg text-[11px] font-medium bg-zinc-800 border border-zinc-700/50 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition-colors disabled:opacity-30 disabled:pointer-events-none"
@@ -978,7 +1036,7 @@ export default function GeneratePage(): JSX.Element {
             )}
           </button>
           <button
-            onClick={redoMesh}
+            onClick={() => { void redoMeshEdit() }}
             disabled={redoSteps === 0}
             title={redoSteps > 0 ? `Redo (Ctrl+Y) — ${redoSteps} step${redoSteps > 1 ? 's' : ''}` : 'Redo (Ctrl+Y)'}
             className="relative flex items-center justify-center w-7 h-7 rounded-lg text-[11px] font-medium bg-zinc-800 border border-zinc-700/50 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition-colors disabled:opacity-30 disabled:pointer-events-none"
@@ -1214,7 +1272,10 @@ export default function GeneratePage(): JSX.Element {
 
         {/* Tools bar — always visible; transform tools appear once a mesh is selected */}
         <div className="flex items-center gap-2 px-3 h-10 border-b border-zinc-800 bg-surface-400 shrink-0">
-          {(meshSelected || selectedPointLightId) && (
+          {sculpting && (
+            <span className="text-[11px] text-violet-300">Sculpt mode — brushes in the Edit panel</span>
+          )}
+          {!sculpting && (meshSelected || selectedPointLightId) && (
             <>
               <ToolButton
                 label="Move"
@@ -1258,8 +1319,8 @@ export default function GeneratePage(): JSX.Element {
           {/* Mesh edit panel: every registry op, runnable without the agent */}
           <button
             type="button"
-            onClick={() => setEditPanelOpen((open) => !open)}
-            title="Mesh tools: repair, transform, optimize, inspect"
+            onClick={() => { if (editPanelOpen) void closeEditPanel(); else setEditPanelOpen(true) }}
+            title="Mesh tools: sculpt, repair, transform, optimize, inspect"
             aria-pressed={editPanelOpen}
             className={`ml-auto flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium border transition-colors
               ${editPanelOpen
@@ -1288,7 +1349,7 @@ export default function GeneratePage(): JSX.Element {
             />
             <GenerationHUD />
           </div>
-          {editPanelOpen && <EditPanel onClose={() => setEditPanelOpen(false)} />}
+          {editPanelOpen && <EditPanel onClose={() => { void closeEditPanel() }} />}
         </div>
       </div>
     </>
