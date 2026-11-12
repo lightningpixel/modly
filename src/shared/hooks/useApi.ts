@@ -1,6 +1,7 @@
 import axios from 'axios'
 import { useAppStore, GenerationOptions } from '@shared/stores/appStore'
 import type { MeshOpDescriptor, MeshOpResponse } from '@areas/generate/meshEditPanel'
+import type { VertexPatch } from '@areas/generate/sculpt/sculptLogic'
 
 export function useApi() {
   const apiUrl = useAppStore((s) => s.apiUrl)
@@ -150,5 +151,18 @@ export function useApi() {
     return data
   }
 
-  return { generateFromImage, pollJobStatus, cancelJob, getModelStatus, getAllModelsStatus, downloadModel, optimizeMesh, smoothMesh, importMesh, transformMesh, listMeshOps, runMeshOp }
+  // Writes sculpted vertex positions/normals into a copy of the mesh file.
+  // Each patch replaces whole attributes of one glTF primitive (base64 LE float32).
+  async function patchMeshVertices(
+    path: string,
+    patches: VertexPatch[],
+  ): Promise<{ path: string; url: string }> {
+    const { data } = await client.post<{ path: string; url: string }>('/optimize/patch-vertices', {
+      path,
+      patches,
+    })
+    return data
+  }
+
+  return { generateFromImage, pollJobStatus, cancelJob, getModelStatus, getAllModelsStatus, downloadModel, optimizeMesh, smoothMesh, importMesh, transformMesh, listMeshOps, runMeshOp, patchMeshVertices }
 }
