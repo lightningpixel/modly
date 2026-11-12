@@ -2,6 +2,7 @@ import type { AnyExtension, ExtensionNode, Workflow } from '../../types/electron
 import type { AgentActionPayload, ClientToolEvent } from '../../utils/agentStream'
 import type { GenerationOptions, UiScale } from '../../stores/appStore'
 import type { Page } from '../../stores/navStore'
+import { PAGE_IDS, getPage, isPage } from '../../pages/pageRegistry'
 import type { GenerationApi, GenerationStoreActions } from '../../utils/generationRunner'
 import { createGenerationApi, runGeneration } from '../../utils/generationRunner'
 import { useAppStore } from '../../stores/appStore'
@@ -534,11 +535,11 @@ export const clientTools: Record<string, ClientTool> = {
   }),
 
   navigate: defineTool({
-    describe: (args) => `Go to the ${String(args.page ?? '?')} page`,
-    check: (args) => (PAGES.includes(args.page as Page) ? null : `page must be one of: ${PAGES.join(', ')}.`),
+    describe: (args) => `Go to the ${isPage(args.page) ? getPage(args.page).label : String(args.page ?? '?')} page`,
+    check: (args) => (isPage(args.page) ? null : `page must be one of: ${PAGE_IDS.join(', ')}.`),
     async execute(args, deps) {
       deps.navigate(args.page as Page)
-      return `Opened the ${String(args.page)} page.`
+      return `Opened the ${getPage(args.page as Page).label} page.`
     },
   }),
 }
@@ -550,8 +551,6 @@ const SETTING_LABELS: Record<string, string> = {
 }
 
 const UI_SCALES: UiScale[] = ['small', 'medium', 'large', 'very-large']
-
-const PAGES: Page[] = ['generate', 'workflows', 'models', 'settings']
 
 function toBool(value: unknown): boolean | null {
   if (typeof value === 'boolean') return value

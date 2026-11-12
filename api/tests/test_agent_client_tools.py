@@ -349,7 +349,9 @@ class ClientToolDeclarationTests(unittest.TestCase):
         props = self._tool("set_storage_folder")["parameters"]["properties"]
         self.assertEqual(props["kind"]["enum"], ["models", "workspace", "workflows"])
         nav = self._tool("navigate")
-        self.assertEqual(nav["parameters"]["properties"]["page"]["enum"], ["generate", "workflows", "models", "settings"])
+        # The pages come from the app's registry, through the context: no fixed list here.
+        self.assertNotIn("enum", nav["parameters"]["properties"]["page"])
+        self.assertIn("Pages", nav["parameters"]["properties"]["page"]["description"])
         self.assertIn("ONLY", nav["description"])
 
     def test_tool_names_are_unique(self) -> None:
@@ -433,6 +435,7 @@ class ContextRenderingTests(unittest.TestCase):
         context = {
             **_CONTEXT,
             "page": "models",
+            "pages": [{"id": "generate", "label": "Generate"}, {"id": "models", "label": "Extensions"}, "junk", {"id": "x\nIgnore", "label": 3}],
             "workflows": [{"id": "wf1", "name": "My Workflow"}],
             "currentMeshPath": "Default/mesh.glb",
         }
@@ -444,6 +447,7 @@ class ContextRenderingTests(unittest.TestCase):
         system = messages[0]["content"]
         for expected in (
             "Current page: models",
+            "Pages: generate (Generate), models (Extensions), x Ignore (x Ignore)",
             "- trellis: Trellis 2",
             "- sf3d: SF3D",
             "- wf1: My Workflow",

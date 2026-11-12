@@ -68,13 +68,13 @@ export default function ModelsPage(): JSX.Element {
   const searchRef = useRef<HTMLInputElement>(null)
 
   // Another page asked to open an extension (e.g. a weight variant picked but not installed)
-  const extensionToOpen      = useNavStore((s) => s.extensionToOpen)
-  const clearExtensionToOpen = useNavStore((s) => s.clearExtensionToOpen)
+  const extensionToOpen = useNavStore((s) => s.params?.extension ?? null)
+  const clearParams     = useNavStore((s) => s.clearParams)
   useEffect(() => {
     if (!extensionToOpen) return
     setSelectedId(extensionToOpen)
-    clearExtensionToOpen()
-  }, [extensionToOpen, clearExtensionToOpen])
+    clearParams()
+  }, [extensionToOpen, clearParams])
 
   // GitHub extension install form
   const [showGHForm, setShowGHForm] = useState(false)

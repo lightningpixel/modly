@@ -6,6 +6,7 @@ import type { AgentContextInputs } from './agentContext'
 import type { ModelExtension, ProcessExtension } from '../../types/electron.d'
 import { useAppStore } from '../../stores/appStore'
 import { useNavStore } from '../../stores/navStore'
+import { PAGES } from '../../pages/pageRegistry'
 import { useWorkflowsStore } from '../../stores/workflowsStore'
 import { useExtensionsStore } from '../../stores/extensionsStore'
 
@@ -19,8 +20,11 @@ const processExt = {
 } as unknown as ProcessExtension
 const STORAGE = { modelsDir: 'M', workspaceDir: 'W', workflowsDir: 'F', extensionsDir: 'E' }
 
+const PAGE_LIST = [{ id: 'generate', label: 'Generate' }, { id: 'models', label: 'Extensions' }]
+
 const inputs = (over: Partial<AgentContextInputs> = {}): AgentContextInputs => ({
   page: 'models',
+  pages: PAGE_LIST,
   currentMeshUrl: '/workspace/Default/mesh.glb',
   meshTriangles: 1200,
   workflows: [{ id: 'wf1', name: 'Turntable' }],
@@ -35,6 +39,7 @@ const inputs = (over: Partial<AgentContextInputs> = {}): AgentContextInputs => (
 test('the context carries the page, mesh, workflows, extensions, models, storage and UI options', () => {
   assert.deepEqual(assembleAgentContext(inputs()), {
     page: 'models',
+    pages: PAGE_LIST,
     currentMeshPath: 'Default/mesh.glb',
     meshTriangles: 1200,
     workflows: [{ id: 'wf1', name: 'Turntable' }],
@@ -52,7 +57,7 @@ test('empty or unreadable parts are left out, as buildContext did', () => {
   const ctx = assembleAgentContext(inputs({
     currentMeshUrl: undefined, meshTriangles: null, workflows: [], modelExtensions: [], processExtensions: [], models: null, storage: null,
   }))
-  assert.deepEqual(Object.keys(ctx), ['page', 'ui'])
+  assert.deepEqual(Object.keys(ctx), ['page', 'pages', 'ui'])
 })
 
 test('storage keeps only the four folders, never the HF token', () => {
@@ -73,6 +78,8 @@ test('buildAgentContext reads the stores and the async sources', async () => {
 
   assert.deepEqual(ctx, {
     page: 'workflows',
+    // Every registered page, by id and sidebar label.
+    pages: PAGES.map((p) => ({ id: p.id, label: p.label })),
     workflows: [{ id: 'w', name: 'W' }],
     extensions: [{ id: 'triposr/main', name: 'MAIN', input: 'image', output: 'mesh' }],
     models: [{ id: 'triposr/main', name: 'TripoSR' }],
