@@ -15,6 +15,7 @@ import {
   meshPathFromUrl,
   paramControl,
   requiresConfirmation,
+  stepSummaries,
   summarizeDetails,
   toSliderPosition,
   type BadgeState,
@@ -292,17 +293,27 @@ function InspectionReport({ report }: { report: Record<string, unknown> }): JSX.
 }
 
 function DetailRows({ details }: { details: Record<string, unknown> }): JSX.Element | null {
+  const steps = stepSummaries(details)
   const rows = summarizeDetails(details)
-  if (rows.length === 0) return null
+  if (steps.length === 0 && rows.length === 0) return null
   return (
-    <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[10px]">
-      {rows.map(([k, v]) => (
-        <div key={k} className="contents">
-          <dt className="text-zinc-500">{k}</dt>
-          <dd className="text-zinc-300 text-right break-words">{v}</dd>
-        </div>
-      ))}
-    </dl>
+    <div className="flex flex-col gap-1.5">
+      {steps.length > 0 && (
+        <ol className="flex flex-col gap-0.5 text-[10px] text-zinc-300">
+          {steps.map((step, i) => <li key={i}>{i + 1}. {step}</li>)}
+        </ol>
+      )}
+      {rows.length > 0 && (
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[10px]">
+          {rows.map(([k, v]) => (
+            <div key={k} className="contents">
+              <dt className="text-zinc-500">{k}</dt>
+              <dd className="text-zinc-300 text-right break-words">{v}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+    </div>
   )
 }
 

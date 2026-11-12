@@ -11,6 +11,7 @@ import {
   meshPathFromUrl,
   paramControl,
   requiresConfirmation,
+  stepSummaries,
   summarizeDetails,
   toSliderPosition,
   type MeshOpDescriptor,
@@ -214,4 +215,20 @@ test('apiErrorMessage prefers the FastAPI detail', () => {
   assert.equal(apiErrorMessage({ response: { data: { detail: 'Unknown mesh operation: x' } }, message: 'Request failed' }), 'Unknown mesh operation: x')
   assert.equal(apiErrorMessage(new Error('Network Error')), 'Network Error')
   assert.equal(apiErrorMessage('boom'), 'boom')
+})
+
+test('stepSummaries reads the per-step summaries of a preset result', () => {
+  assert.deepEqual(
+    stepSummaries({
+      steps: [
+        { op: 'decimate', summary: 'Decimated to 5,000 triangles.' },
+        { op: 'recompute_normals' },
+        'not a step',
+        { op: 'normalize_scale', summary: 'Scaled the longest side to 1 m.' },
+      ],
+    }),
+    ['Decimated to 5,000 triangles.', 'Scaled the longest side to 1 m.'],
+  )
+  assert.deepEqual(stepSummaries({ steps: 'nope' }), [])
+  assert.deepEqual(stepSummaries({}), [])
 })

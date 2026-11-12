@@ -256,6 +256,15 @@ export function summarizeDetails(details: Record<string, unknown>): [string, str
   return rows
 }
 
+/** One line per step of a composite op (the prepare_for_* presets report `steps`). */
+export function stepSummaries(details: Record<string, unknown>): string[] {
+  if (!Array.isArray(details.steps)) return []
+  return details.steps.flatMap((step) => {
+    const summary = step && typeof step === 'object' ? (step as { summary?: unknown }).summary : undefined
+    return typeof summary === 'string' && summary ? [summary] : []
+  })
+}
+
 // ─── Misc ────────────────────────────────────────────────────────────────────
 
 /** Viewer mesh URL → the `path` the optimize routes expect. */
