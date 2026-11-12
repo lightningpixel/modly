@@ -93,10 +93,21 @@ def registry_tool_lines(registry: MeshOpsRegistry) -> str:
 SYSTEM_PROMPT = f"""\
 You are Modly's built-in AI assistant, specialized in 3D modeling and workflow automation.
 You help users generate 3D models from images, optimize meshes, and manage workflows directly inside the Modly application.
+You can act on the whole app (extensions, model weights, workflows, settings, generation) from any page, without changing page.
 
 ## Available tools
 
 - **list_models** — List all downloaded 3D generation models ready to use.
+- **generate_from_image(model_id?)** — Generate a 3D model from the image attached to the user's message. Omit model_id to use the model selected in the app.
+- **list_extensions** — List installed extensions.
+- **get_settings** — Show the storage folders and UI options.
+- **install_extension(github_url)** / **uninstall_extension(extension_id)** / **reload_extensions** — Manage extensions.
+- **download_model_weights(extension_id, variant?)** / **delete_model_weights(extension_id, variant?)** — Manage model weights.
+- **open_workflow(workflow_id)** / **delete_workflow(workflow_id)** — Open a workflow in the editor, or delete it.
+- **set_setting(key, value)** — Change `uiScale` (number), `useAtkinsonFont` or `showRamIndicator` (booleans).
+- **set_storage_folder(kind, path)** — Move the `models`, `workspace` or `workflows` folder.
+- **undo_mesh** / **redo_mesh** — Undo or redo the last change to the current mesh.
+- **navigate(page)** — Switch the app to another page.
 - **unload_models** — Unload all 3D generation models from GPU VRAM to free memory.
 - **get_mesh_info** — Get info about the current mesh in the 3D viewer (path, triangle count).
 {registry_tool_lines(mesh_ops_registry)}
@@ -117,6 +128,8 @@ You help users generate 3D models from images, optimize meshes, and manage workf
 - If you need to run a workflow but don't know the ID, call list_workflows first.
 - To create a workflow, ONLY use extension ids listed under "Available extensions" in the context. Never invent an id. Chain steps so each step's input type matches the previous step's output type.
 - For a workflow's input, `input_type` MUST be exactly one of: `image`, `text`, or `mesh`. These map to the Image, Text, and Load 3D Mesh nodes. Never invent another input. Pick the one matching the first step's expected input.
+- uninstall_extension, delete_model_weights, delete_workflow and set_storage_folder ask the user to confirm. If the result says the user declined, acknowledge it and do not retry.
+- Never call navigate unless the user explicitly asks to go to a page. Act from where the user is.
 - After each tool call, give a short one-sentence summary of what was done.
 - Always reply in the same language the user is writing in.
 - Be concise. No unnecessary explanations.\
@@ -281,6 +294,124 @@ TOOLS = [
 TOOLS += registry_tools(mesh_ops_registry)
 
 
+def _function(name: str, description: str, properties: dict | None = None, required: list[str] | None = None) -> dict:
+    parameters: dict = {"type": "object", "properties": properties or {}}
+    if required:
+        parameters["required"] = required
+    return {"type": "function", "function": {"name": name, "description": description, "parameters": parameters}}
+
+
+_EXTENSION_ID = {"type": "string", "description": "Exact extension id, as listed by list_extensions."}
+_WORKFLOW_ID = {"type": "string", "description": "Exact workflow id, as listed by list_workflows."}
+_VARIANT = {"type": "string", "description": "Optional weights variant, for extensions that offer several. Omit for the default."}
+
+# Server-side tools that read the request context or hand a run to the app.
+TOOLS += [
+    _function("list_extensions", "List the installed extensions, with their ids and input→output types."),
+    _function("get_settings", "Show Modly's storage folders (models, workspace, workflows, extensions) and UI options."),
+    _function(
+        "generate_from_image",
+        "Generate a 3D model from the image the user attached to their message. The app runs the "
+        "generation and shows its progress. Needs an attached image.",
+        {"model_id": {
+            "type": "string",
+            "description": "Id of a downloaded generation model (see list_models). Omit to use the model selected in the app.",
+        }},
+    ),
+]
+
+# Tools the app runs itself (Electron IPC, renderer stores), mapped to whether
+# the user must confirm them first. The frontend obeys `confirm`.
+CLIENT_TOOLS: dict[str, bool] = {
+    "install_extension": False,
+    "uninstall_extension": True,
+    "reload_extensions": False,
+    "download_model_weights": False,
+    "delete_model_weights": True,
+    "delete_workflow": True,
+    "open_workflow": False,
+    "set_setting": False,
+    "set_storage_folder": True,
+    "undo_mesh": False,
+    "redo_mesh": False,
+    "navigate": False,
+}
+
+TOOLS += [
+    _function(
+        "install_extension",
+        "Install an extension from its GitHub repository URL, then load it.",
+        {"github_url": {"type": "string", "description": "Repository URL, e.g. https://github.com/owner/repo."}},
+        ["github_url"],
+    ),
+    _function(
+        "uninstall_extension",
+        "Uninstall an extension and remove its files. The user is asked to confirm.",
+        {"extension_id": _EXTENSION_ID},
+        ["extension_id"],
+    ),
+    _function("reload_extensions", "Reload every installed extension, e.g. after its files changed on disk."),
+    _function(
+        "download_model_weights",
+        "Download the model weights an extension needs. The download continues in the background.",
+        {"extension_id": _EXTENSION_ID, "variant": _VARIANT},
+        ["extension_id"],
+    ),
+    _function(
+        "delete_model_weights",
+        "Delete an extension's downloaded model weights from disk. The user is asked to confirm.",
+        {"extension_id": _EXTENSION_ID, "variant": _VARIANT},
+        ["extension_id"],
+    ),
+    _function(
+        "delete_workflow",
+        "Delete a saved workflow. The user is asked to confirm.",
+        {"workflow_id": _WORKFLOW_ID},
+        ["workflow_id"],
+    ),
+    _function(
+        "open_workflow",
+        "Open a workflow in the workflow editor, without leaving the current page.",
+        {"workflow_id": _WORKFLOW_ID},
+        ["workflow_id"],
+    ),
+    _function(
+        "set_setting",
+        "Change a UI setting. uiScale is a number (1 = 100%); useAtkinsonFont and showRamIndicator are booleans.",
+        {
+            "key": {"type": "string", "enum": ["uiScale", "useAtkinsonFont", "showRamIndicator"]},
+            "value": {"type": ["number", "boolean"], "description": "A number for uiScale, a boolean otherwise."},
+        },
+        ["key", "value"],
+    ),
+    _function(
+        "set_storage_folder",
+        "Change where Modly stores models, the workspace or workflows. The user is asked to confirm.",
+        {
+            "kind": {"type": "string", "enum": ["models", "workspace", "workflows"]},
+            "path": {"type": "string", "description": "Absolute path of the new folder."},
+        },
+        ["kind", "path"],
+    ),
+    _function("undo_mesh", "Undo the last change to the current mesh in the viewer."),
+    _function("redo_mesh", "Redo the last undone change to the current mesh in the viewer."),
+    _function(
+        "navigate",
+        "Switch the app to another page. Use it ONLY when the user explicitly asks to go to a page; "
+        "every other tool works from any page.",
+        {"page": {"type": "string", "enum": ["generate", "workflows", "models", "settings"]}},
+        ["page"],
+    ),
+]
+
+# Seconds the app has to run a client tool that needs the user's click.
+CONFIRM_TIMEOUT = 600.0
+_NO_ANSWER = "Error: The app did not answer in time."
+
+# call_id → the turn waiting for the app's answer (see /agent/tool-result).
+_pending_client_tools: dict[str, asyncio.Future] = {}
+
+
 # Input kinds the agent may pick, mapped to the real Modly source-node types.
 # Keep this in sync with the node palette in WorkflowsPage.tsx.
 INPUT_NODES = {
@@ -374,11 +505,40 @@ async def _run_agent_op(client: httpx.AsyncClient, op: MeshOp, arguments: dict) 
     return text, payload
 
 
+def _extension_lines(extensions: list[dict]) -> list[str]:
+    return [
+        f"- {e['id']} ({e.get('input', '?')}→{e.get('output', '?')}): {e.get('name', e['id'])}"
+        for e in extensions if e.get("id")
+    ]
+
+
+def _id_name_lines(items: list[dict]) -> list[str]:
+    return [f"- {i['id']}: {i.get('name') or i['id']}" for i in items if i.get("id")]
+
+
+_STORAGE_LABELS = {
+    "modelsDir": "Models folder",
+    "workspaceDir": "Workspace folder",
+    "workflowsDir": "Workflows folder",
+    "extensionsDir": "Extensions folder",
+}
+
+
+def _settings_lines(context: dict) -> list[str]:
+    """The storage folders and UI options the app sent, one per line."""
+    storage = context.get("storage") or {}
+    ui = context.get("ui") or {}
+    lines = [f"{label}: {storage[key]}" for key, label in _STORAGE_LABELS.items() if storage.get(key)]
+    lines += [f"{key}: {_show(value)}" for key, value in ui.items() if value is not None]
+    return lines
+
+
 async def execute_tool(
-    name: str, arguments: dict, context: dict, *, timeout: float = 60.0,
+    name: str, arguments: dict, context: dict, *, timeout: float = 60.0, has_image: bool = False,
 ) -> tuple[str, dict | None]:
     """Execute a tool and return (result_text, action_payload).
     action_payload carries data the frontend needs to react (e.g. new mesh URL).
+    has_image: the user's last message carries an image (generate_from_image).
     """
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
@@ -458,6 +618,34 @@ async def execute_tool(
                     return f"Workflow '{workflow_id}' not found. Use list_workflows to see available workflows.", None
                 payload = {"type": "run_workflow", "workflow_id": workflow_id, "workflow_name": match["name"]}
                 return f"Executing workflow '{match['name']}'…", payload
+
+            elif name == "list_extensions":
+                lines = _extension_lines(context.get("extensions") or [])
+                if not lines:
+                    return "No extensions installed.", None
+                return "Installed extensions:\n" + "\n".join(lines), None
+
+            elif name == "get_settings":
+                lines = _settings_lines(context)
+                if not lines:
+                    return "No settings were sent by the app.", None
+                return "\n".join(lines), None
+
+            elif name == "generate_from_image":
+                if not has_image:
+                    return "No image is attached. Ask the user to attach the image to generate from.", None
+                model_id = arguments.get("model_id") or None
+                models = context.get("models") or []
+                label = "the selected model"
+                if model_id and models:
+                    match = next((m for m in models if m.get("id") == model_id), None)
+                    if not match:
+                        ids = ", ".join(m["id"] for m in models if m.get("id"))
+                        return f"Model '{model_id}' is not downloaded. Use one of: {ids}.", None
+                    label = match.get("name") or model_id
+                elif model_id:
+                    label = model_id
+                return f"Generating a 3D model with {label}…", {"type": "generate_from_image", "model_id": model_id}
 
             elif name == "create_workflow":
                 steps = arguments.get("steps") or []
@@ -861,6 +1049,8 @@ async def _chat_events(request: AgentChatRequest):
 
     token / thinking — answer and reasoning text, in pieces
     tool_start / tool_done — around each tool call
+    client_tool — between them, for a tool the app runs: the turn waits for
+                  its answer on POST /agent/tool-result with the same call_id
     done — always last: the final answer, every action and the full reasoning
     """
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -868,6 +1058,8 @@ async def _chat_events(request: AgentChatRequest):
     # Inject scene context so the LLM knows current state
     if request.context:
         ctx_lines = []
+        if request.context.get("page"):
+            ctx_lines.append(f"Current page: {request.context['page']}")
         if request.context.get("currentMeshPath"):
             ctx_lines.append(f"Current mesh path: {request.context['currentMeshPath']}")
         if request.context.get("meshTriangles"):
@@ -878,19 +1070,17 @@ async def _chat_events(request: AgentChatRequest):
                 "content": "Scene context:\n" + "\n".join(ctx_lines),
             })
 
-        extensions = request.context.get("extensions") or []
-        if extensions:
-            ext_lines = [
-                f"- {e['id']} ({e.get('input', '?')}→{e.get('output', '?')}): {e.get('name', e['id'])}"
-                for e in extensions
-            ]
-            messages.append({
-                "role": "system",
-                "content": (
-                    "Available extensions (use the exact id when creating workflows):\n"
-                    + "\n".join(ext_lines)
-                ),
-            })
+        sections = [
+            ("Available extensions (use the exact id when creating workflows)",
+             _extension_lines(request.context.get("extensions") or [])),
+            ("Downloaded generation models (use the exact id with generate_from_image)",
+             _id_name_lines(request.context.get("models") or [])),
+            ("Workflows", _id_name_lines(request.context.get("workflows") or [])),
+            ("Settings", _settings_lines(request.context)),
+        ]
+        for title, lines in sections:
+            if lines:
+                messages.append({"role": "system", "content": f"{title}:\n" + "\n".join(lines)})
 
     # ONE system message, first. Qwen3.5's chat template raises "System message
     # must be at the beginning", which llama-server returns as a flat HTTP 400;
@@ -924,6 +1114,10 @@ async def _chat_events(request: AgentChatRequest):
 
     for m in request.messages:
         messages.append(_user_entry(m, send_images))
+    # The image generate_from_image would use: the frontend takes it from the
+    # user's last message, as run_workflow does.
+    last_user = next((m for m in reversed(request.messages) if m.role == "user"), None)
+    has_image = bool(last_user and last_user.images)
 
     actions_done: list[ActionDone] = []
     all_thinking:  list[str]       = []
@@ -988,17 +1182,43 @@ async def _chat_events(request: AgentChatRequest):
                         break
                     arguments = _tool_arguments(fn.get("arguments"))
                     yield {"type": "tool_start", "id": tc["id"], "tool": fn["name"], "arguments": arguments}
-                    try:
-                        result_text, payload = await asyncio.wait_for(
-                            execute_tool(fn["name"], arguments, request.context, timeout=request.tool_timeout),
-                            request.tool_timeout,
-                        )
-                    except asyncio.TimeoutError:
-                        # Cancelling the call drops its HTTP request, but a mesh op
-                        # the API already started runs to its end in a worker
-                        # thread; its result is never shown.
-                        stopped = _tool_stop("tool_timeout", fn["name"], request.tool_timeout)
-                        result_text, payload = stopped["message"], None
+                    if fn["name"] in CLIENT_TOOLS:
+                        # The app runs it and answers through /agent/tool-result.
+                        confirm = CLIENT_TOOLS[fn["name"]]
+                        call_id = uuid.uuid4().hex
+                        answer = asyncio.get_running_loop().create_future()
+                        _pending_client_tools[call_id] = answer
+                        try:
+                            yield {
+                                "type": "client_tool", "id": tc["id"], "call_id": call_id,
+                                "tool": fn["name"], "arguments": arguments, "confirm": confirm,
+                            }
+                            # A confirmation waits on the user's click, not on the tool.
+                            limit = CONFIRM_TIMEOUT if confirm else request.tool_timeout
+                            try:
+                                result_text = await asyncio.wait_for(answer, limit)
+                            except asyncio.TimeoutError:
+                                result_text = _NO_ANSWER
+                        finally:
+                            # Also runs when the client leaves: nobody will answer.
+                            _pending_client_tools.pop(call_id, None)
+                            answer.cancel()
+                        payload = None
+                    else:
+                        try:
+                            result_text, payload = await asyncio.wait_for(
+                                execute_tool(
+                                    fn["name"], arguments, request.context,
+                                    timeout=request.tool_timeout, has_image=has_image,
+                                ),
+                                request.tool_timeout,
+                            )
+                        except asyncio.TimeoutError:
+                            # Cancelling the call drops its HTTP request, but a mesh op
+                            # the API already started runs to its end in a worker
+                            # thread; its result is never shown.
+                            stopped = _tool_stop("tool_timeout", fn["name"], request.tool_timeout)
+                            result_text, payload = stopped["message"], None
                     actions_done.append(ActionDone(tool=fn["name"], result=result_text, payload=payload, error=stopped))
                     yield {
                         "type": "tool_done", "id": tc["id"], "tool": fn["name"],
@@ -1024,6 +1244,22 @@ async def _chat_events(request: AgentChatRequest):
         yield _done(stopped["message"], actions_done, all_thinking, error=True, stopped=stopped)
     else:
         yield _done(final, actions_done, all_thinking)
+
+
+class ToolResultRequest(BaseModel):
+    call_id: str
+    result: str
+    error: bool = False
+
+
+@router.post("/tool-result")
+async def agent_tool_result(req: ToolResultRequest):
+    """The app's answer to a client_tool event; the waiting turn resumes with it."""
+    answer = _pending_client_tools.get(req.call_id)
+    if answer is None or answer.done():
+        raise HTTPException(status_code=404, detail="No tool call is waiting for this call_id.")
+    answer.set_result(f"Error: {req.result}" if req.error else req.result)
+    return {"ok": True}
 
 
 @router.post("/chat", response_model=AgentChatResponse)
