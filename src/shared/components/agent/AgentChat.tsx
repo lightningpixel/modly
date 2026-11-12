@@ -8,30 +8,16 @@ import { useWorkflowRunStore } from '@areas/workflows/workflowRunStore'
 import { buildAllWorkflowExtensions } from '@areas/workflows/mockExtensions'
 import { readAgentEvents, toolStopTitle } from '@shared/utils/agentStream'
 import { adviceText, ollamaAdvice } from '@shared/utils/ollamaHealth'
-import OllamaBanner, { useOllamaHealth } from './OllamaBanner'
-import { commitSculpt } from '../sculpt/sculptStore'
+import OllamaBanner, { useOllamaHealth } from '@areas/generate/components/OllamaBanner'
+import { commitSculpt } from '@areas/generate/sculpt/sculptStore'
+import { useAgentConversationStore } from '@shared/stores/agentConversationStore'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 import type { ThinkingMode } from '@shared/stores/agentStore'
 import type { Workflow } from '@shared/types/electron.d'
-import type { AgentAction, AgentActionPayload, ToolStop } from '@shared/utils/agentStream'
-
-interface Message {
-  id: string
-  role: 'user' | 'assistant'
-  content: string
-  thinking?: string
-  imageDataUrls?: string[]
-  actions?: ActionDone[]
-  stopped?: ToolStop | null
-  streaming?: boolean
-}
-
-interface ActionDone extends AgentAction {
-  id?: string
-  running?: boolean
-}
+import type { AgentActionPayload, ToolStop } from '@shared/utils/agentStream'
+import type { ActionDone, AgentMessage as Message } from '@shared/stores/agentConversationStore'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -270,13 +256,18 @@ function WorkflowProgressCard({ name }: { name: string }): JSX.Element {
 
 // ─── Main component ──────────────────────────────────────────────────────────
 
-export default function ChatPanel(): JSX.Element {
+export default function AgentChat(): JSX.Element {
   const { provider, localModel, external, defaultThinking, toolBudget, toolTimeout } = useAgentStore()
   const { models: llmModels } = useLlmModels()
   const isLocal        = provider === 'local'
   const externalConfig = external[provider]
 
-  const [messages, setMessages]               = useState<Message[]>([])
+  // Messages live in the conversation store: they survive page changes and
+  // panel close, and are saved to disk.
+  const messages                              = useAgentConversationStore((s) => s.messages)
+  const setMessages                           = useAgentConversationStore((s) => s.setMessages)
+  const currentId                             = useAgentConversationStore((s) => s.currentId)
+  const setBusy                               = useAgentConversationStore((s) => s.setBusy)
   const [input, setInput]                     = useState('')
   const [isLoading, setIsLoading]             = useState(false)
   const [error, setError]                     = useState<string | null>(null)
@@ -357,6 +348,15 @@ export default function ChatPanel(): JSX.Element {
     callAgent(messagesRef.current, { workflowCompletion: completionCtx })
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fire on run-status transition; error/outputUrl read atomically
   }, [runState.status, pendingWorkflow])
+
+  // The panel locks conversation switching while a turn or its workflow runs.
+  useEffect(() => { setBusy(isLoading || pendingWorkflow !== null) }, [isLoading, pendingWorkflow, setBusy])
+
+  // Another conversation was opened: drop the view state of the previous one.
+  useEffect(() => {
+    setShowAll(false)
+    setError(null)
+  }, [currentId])
 
   useEffect(() => {
     // Instant while streaming: a smooth scroll per token never catches up.
