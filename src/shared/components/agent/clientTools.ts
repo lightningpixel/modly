@@ -87,6 +87,12 @@ export interface ClientToolDeps {
   }
   navigate: (page: Page) => void
   postResult: (body: ToolResultBody) => Promise<void>
+  /**
+   * Tells the server the user clicked Confirm, so it stops waiting on the click
+   * and gives the tool its own timeout. Optional: without it the server keeps
+   * waiting under the confirmation cap.
+   */
+  postConfirmed?: (callId: string) => Promise<void>
   /** How long a download is watched for an early failure before it is reported as started. */
   downloadSettleMs?: number
 }
@@ -316,6 +322,12 @@ export const clientTools: Record<string, ClientTool> = {
     destructive: true,
     describe: (args, deps) => `Uninstall the extension ${extensionLabel(String(args.extension_id ?? '?'), deps)}`,
     check: (args, deps) => {
+      // "ext/node" names one model, but uninstalling removes the whole extension:
+      // the card must not read as if only that model goes.
+      const id = str(args, 'extension_id')
+      if (id?.includes('/')) {
+        return `${quote(id)} names a model; pass the extension id (${quote(id.split('/')[0])}) to uninstall the whole extension.`
+      }
       const found = lookupExtension(args, deps)
       if (typeof found === 'string') return found
       return found.ext.builtin ? `${quote(found.ext.name)} is built into Modly and cannot be uninstalled.` : null
@@ -606,7 +618,8 @@ export async function runClientTool(
       result = fail(problem)
     } else {
       let ok = true
-      if (event.confirm || tool.requiresConfirm) {
+      const asked = event.confirm || tool.requiresConfirm
+      if (asked) {
         try {
           ok = await confirm(description, { tool: event.tool, id: event.id, callId: event.call_id, destructive: tool.destructive })
         } catch {
@@ -614,6 +627,10 @@ export async function runClientTool(
         }
       }
       if (ok) {
+        if (asked && deps.postConfirmed) {
+          // From here the server waits on the tool, not on the click.
+          await deps.postConfirmed(event.call_id).catch(() => {})
+        }
         result = await tool.run(args, deps)
       } else {
         declined = true
@@ -635,6 +652,8 @@ export async function runClientTool(
 // ─── generate_from_image ──────────────────────────────────────────────────────
 
 export interface GenerationDeps {
+  /** True while a generation is uploading or running (the Generate page then disables its upload too). */
+  isGenerating: () => boolean
   api: GenerationApi
   store: GenerationStoreActions
   /** The Generate page's current options (model, remesh, texture, params). */
@@ -643,6 +662,13 @@ export interface GenerationDeps {
   notifyError: (error: string | undefined, modelId: string) => void | Promise<void>
   isCancelled?: () => boolean
   wait?: () => Promise<void>
+}
+
+export const GENERATION_BUSY = 'A generation is already running. Wait for it to finish.'
+
+/** Same condition as the Generate page's upload and options lock. */
+export function isGenerationRunning(job: { status: string } | null | undefined): boolean {
+  return job?.status === 'uploading' || job?.status === 'generating'
 }
 
 /** The first image of the most recent user message that has one. */
@@ -667,6 +693,9 @@ export async function startGenerationFromImage(
   if (payload?.type !== 'generate_from_image') return fail('Not a generate_from_image payload.')
   const base64 = image?.startsWith('data:') ? image.slice(image.indexOf(',') + 1) : image
   if (!base64) return fail('No image is attached to the conversation; attach one and ask again.')
+  // Checked synchronously right before runGeneration claims currentJob, so two
+  // calls cannot both pass it.
+  if (deps.isGenerating()) return fail(GENERATION_BUSY)
 
   const current = deps.options()
   const modelId = payload.model_id || current.modelId
@@ -762,6 +791,14 @@ export function createClientToolDeps(): ClientToolDeps {
       })
       if (!res.ok) throw new Error(`API error ${res.status}`)
     },
+    async postConfirmed(callId) {
+      const res = await fetch(`${app().apiUrl}/agent/tool-confirmed`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ call_id: callId }),
+      })
+      if (!res.ok) throw new Error(`API error ${res.status}`)
+    },
   }
 }
 
@@ -769,6 +806,7 @@ export function createClientToolDeps(): ClientToolDeps {
 export function createGenerationDeps(): GenerationDeps {
   const app = () => useAppStore.getState()
   return {
+    isGenerating: () => isGenerationRunning(app().currentJob),
     api: createGenerationApi(app().apiUrl),
     store: {
       setCurrentJob: (job) => app().setCurrentJob(job),

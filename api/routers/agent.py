@@ -405,12 +405,55 @@ TOOLS += [
     ),
 ]
 
-# Seconds the app has to run a client tool that needs the user's click.
+# Seconds the user has to click Confirm or Cancel on a confirmed client tool.
+# Once they confirm (POST /agent/tool-confirmed), the tool gets tool_timeout.
 CONFIRM_TIMEOUT = 600.0
 _NO_ANSWER = "Error: The app did not answer in time."
+# Client tools are run by the Modly app; /agent/chat has nobody to run them.
+_NEEDS_APP = "Error: This tool needs the Modly app."
 
 # call_id → the turn waiting for the app's answer (see /agent/tool-result).
 _pending_client_tools: dict[str, asyncio.Future] = {}
+# call_id → set when the user clicked Confirm (see /agent/tool-confirmed).
+_confirmed_client_tools: dict[str, asyncio.Event] = {}
+
+# What the non-streaming /agent/chat offers: no client tool, nobody would answer.
+SERVER_TOOLS = [t for t in TOOLS if t["function"]["name"] not in CLIENT_TOOLS]
+
+
+def _not_finished(tool: str, limit: float) -> str:
+    return (
+        f"Error: {tool} was confirmed but did not finish within {limit:g} s. "
+        "It may still be running in the app; check before retrying."
+    )
+
+
+async def _await_client_answer(
+    tool: str, answer: asyncio.Future, confirmed: asyncio.Event, confirm: bool, tool_timeout: float,
+) -> str:
+    """The app's answer to one client tool, or why there is none.
+
+    A confirmed tool waits up to CONFIRM_TIMEOUT for the click (or a direct
+    answer, e.g. a Cancel), then tool_timeout for the run itself.
+    """
+    if confirm:
+        clicked = asyncio.ensure_future(confirmed.wait())
+        try:
+            await asyncio.wait({answer, clicked}, timeout=CONFIRM_TIMEOUT, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            clicked.cancel()
+        if answer.done():
+            return answer.result()
+        if not confirmed.is_set():
+            return _NO_ANSWER
+        try:
+            return await asyncio.wait_for(answer, tool_timeout)
+        except asyncio.TimeoutError:
+            return _not_finished(tool, tool_timeout)
+    try:
+        return await asyncio.wait_for(answer, tool_timeout)
+    except asyncio.TimeoutError:
+        return _NO_ANSWER
 
 
 # Input kinds the agent may pick, mapped to the real Modly source-node types.
@@ -1045,8 +1088,11 @@ async def _claim_slot(model: str, spec: dict):
         raise
 
 
-async def _chat_events(request: AgentChatRequest):
+async def _chat_events(request: AgentChatRequest, client_tools: bool = True):
     """Run the tool loop, yielding its events as they happen.
+
+    client_tools — False when nobody reads the stream to run them (/agent/chat):
+                   they are not offered, and a call to one fails at once.
 
     token / thinking — answer and reasoning text, in pieces
     tool_start / tool_done — around each tool call
@@ -1136,7 +1182,10 @@ async def _chat_events(request: AgentChatRequest):
                         "POST",
                         f"{base_url}/chat/completions",
                         headers=headers,
-                        json={"model": request.model, "messages": messages, "tools": TOOLS, "stream": True, **extra},
+                        json={
+                            "model": request.model, "messages": messages,
+                            "tools": TOOLS if client_tools else SERVER_TOOLS, "stream": True, **extra,
+                        },
                     ),
                     stream=True,
                 )
@@ -1183,26 +1232,29 @@ async def _chat_events(request: AgentChatRequest):
                         break
                     arguments = _tool_arguments(fn.get("arguments"))
                     yield {"type": "tool_start", "id": tc["id"], "tool": fn["name"], "arguments": arguments}
-                    if fn["name"] in CLIENT_TOOLS:
+                    if fn["name"] in CLIENT_TOOLS and not client_tools:
+                        # Not offered here, but a model may still name one.
+                        result_text, payload = _NEEDS_APP, None
+                    elif fn["name"] in CLIENT_TOOLS:
                         # The app runs it and answers through /agent/tool-result.
                         confirm = CLIENT_TOOLS[fn["name"]]
                         call_id = uuid.uuid4().hex
                         answer = asyncio.get_running_loop().create_future()
+                        confirmed = asyncio.Event()
                         _pending_client_tools[call_id] = answer
+                        _confirmed_client_tools[call_id] = confirmed
                         try:
                             yield {
                                 "type": "client_tool", "id": tc["id"], "call_id": call_id,
                                 "tool": fn["name"], "arguments": arguments, "confirm": confirm,
                             }
-                            # A confirmation waits on the user's click, not on the tool.
-                            limit = CONFIRM_TIMEOUT if confirm else request.tool_timeout
-                            try:
-                                result_text = await asyncio.wait_for(answer, limit)
-                            except asyncio.TimeoutError:
-                                result_text = _NO_ANSWER
+                            result_text = await _await_client_answer(
+                                fn["name"], answer, confirmed, confirm, request.tool_timeout,
+                            )
                         finally:
                             # Also runs when the client leaves: nobody will answer.
                             _pending_client_tools.pop(call_id, None)
+                            _confirmed_client_tools.pop(call_id, None)
                             answer.cancel()
                         payload = None
                     else:
@@ -1259,7 +1311,26 @@ async def agent_tool_result(req: ToolResultRequest):
     answer = _pending_client_tools.get(req.call_id)
     if answer is None or answer.done():
         raise HTTPException(status_code=404, detail="No tool call is waiting for this call_id.")
-    answer.set_result(f"Error: {req.result}" if req.error else req.result)
+    # The app's results already start with "Error: "; don't say it twice.
+    result = req.result
+    if req.error and not result.startswith("Error:"):
+        result = f"Error: {result}"
+    answer.set_result(result)
+    return {"ok": True}
+
+
+class ToolConfirmedRequest(BaseModel):
+    call_id: str
+
+
+@router.post("/tool-confirmed")
+async def agent_tool_confirmed(req: ToolConfirmedRequest):
+    """The user clicked Confirm: the turn now waits tool_timeout for the result."""
+    confirmed = _confirmed_client_tools.get(req.call_id)
+    answer = _pending_client_tools.get(req.call_id)
+    if confirmed is None or answer is None or answer.done():
+        raise HTTPException(status_code=404, detail="No tool call is waiting for this call_id.")
+    confirmed.set()
     return {"ok": True}
 
 
@@ -1267,7 +1338,7 @@ async def agent_tool_result(req: ToolResultRequest):
 async def agent_chat(request: AgentChatRequest):
     """The whole turn at once, for callers that don't read a stream."""
     done: dict = {}
-    async for event in _chat_events(request):
+    async for event in _chat_events(request, client_tools=False):
         if event["type"] == "done":
             done = event
     return AgentChatResponse(

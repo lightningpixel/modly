@@ -3,7 +3,7 @@
 
 import { join } from 'path'
 import { randomUUID } from 'crypto'
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'fs/promises'
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'fs/promises'
 
 export interface ConversationSummary {
   id: string
@@ -39,7 +39,26 @@ export function sortSummaries<T extends ConversationSummary>(list: readonly T[])
   return [...list].sort((a, b) => (b.updatedAt - a.updatedAt) || a.id.localeCompare(b.id))
 }
 
-export function createConversationStorage(dir: string) {
+/** Windows antivirus or indexers briefly lock a freshly written file. */
+const TRANSIENT_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES'])
+const RENAME_ATTEMPTS = 3
+const RENAME_RETRY_MS = 50
+/** A temp file this old belongs to no write in flight: a crash left it behind. */
+export const ORPHAN_TMP_AGE_MS = 60_000
+
+export interface ConversationStorageOptions {
+  /** Injectable for tests. */
+  rename?: (from: string, to: string) => Promise<void>
+  retryDelayMs?: number
+  now?: () => number
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+export function createConversationStorage(dir: string, options: ConversationStorageOptions = {}) {
+  const renameFile = options.rename ?? rename
+  const retryDelayMs = options.retryDelayMs ?? RENAME_RETRY_MS
+  const now = options.now ?? Date.now
   const fileFor = (id: string): string => join(dir, `${id}.json`)
 
   async function readConversation(id: string): Promise<Conversation | null> {
@@ -52,6 +71,32 @@ export function createConversationStorage(dir: string) {
     }
   }
 
+  async function renameWithRetry(from: string, to: string): Promise<void> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await renameFile(from, to)
+        return
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException | null)?.code
+        if (attempt >= RENAME_ATTEMPTS || !code || !TRANSIENT_RENAME_CODES.has(code)) throw err
+        await sleep(retryDelayMs * attempt)
+      }
+    }
+  }
+
+  /** Best effort: temp files left by a crash between write and rename. */
+  async function removeOrphanTmpFiles(files: readonly string[]): Promise<void> {
+    for (const file of files) {
+      if (!file.endsWith('.tmp')) continue
+      const path = join(dir, file)
+      try {
+        if (now() - (await stat(path)).mtimeMs >= ORPHAN_TMP_AGE_MS) await rm(path, { force: true })
+      } catch {
+        // Gone already, or locked: the next listing tries again.
+      }
+    }
+  }
+
   return {
     async list(): Promise<ConversationSummary[]> {
       let files: string[]
@@ -60,6 +105,7 @@ export function createConversationStorage(dir: string) {
       } catch {
         return []
       }
+      await removeOrphanTmpFiles(files)
       const summaries: ConversationSummary[] = []
       for (const file of files) {
         if (!file.endsWith('.json')) continue
@@ -79,7 +125,7 @@ export function createConversationStorage(dir: string) {
       const tmp = `${target}.${randomUUID()}.tmp`
       await writeFile(tmp, JSON.stringify(conversation), 'utf-8')
       try {
-        await rename(tmp, target)
+        await renameWithRetry(tmp, target)
       } catch (err) {
         await rm(tmp, { force: true })
         throw err

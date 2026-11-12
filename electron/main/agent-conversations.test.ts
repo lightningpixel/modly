@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, rename, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  ORPHAN_TMP_AGE_MS,
   createConversationStorage,
   isConversation,
   isValidConversationId,
@@ -105,5 +106,66 @@ test('corrupted or mismatched files are skipped', async () => {
     assert.deepEqual((await storage.list()).map((s) => s.id), ['good'])
     assert.equal(await storage.read('broken'), null)
     assert.equal(await storage.read('other'), null)
+  })
+})
+
+const errno = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code })
+
+test('a rename locked for a moment (antivirus, indexer) is retried', async () => {
+  await withDir(async (dir) => {
+    let calls = 0
+    const storage = createConversationStorage(dir, {
+      retryDelayMs: 1,
+      rename: async (from, to) => {
+        calls++
+        if (calls < 3) throw errno(calls === 1 ? 'EPERM' : 'EBUSY')
+        await rename(from, to)
+      },
+    })
+    await storage.save(conv('a', 1, 'Locked'))
+    assert.equal(calls, 3)
+    assert.equal((await storage.read('a'))?.title, 'Locked')
+    assert.deepEqual(await readdir(dir), ['a.json'])
+  })
+})
+
+test('a rename still locked after the retries fails and leaves no temp file', async () => {
+  await withDir(async (dir) => {
+    let calls = 0
+    const storage = createConversationStorage(dir, {
+      retryDelayMs: 1,
+      rename: async () => { calls++; throw errno('EACCES') },
+    })
+    await assert.rejects(storage.save(conv('a', 1)), { code: 'EACCES' })
+    assert.equal(calls, 3)
+    assert.deepEqual(await readdir(dir), [])
+  })
+})
+
+test('other rename errors are not retried', async () => {
+  await withDir(async (dir) => {
+    let calls = 0
+    const storage = createConversationStorage(dir, {
+      retryDelayMs: 1,
+      rename: async () => { calls++; throw errno('ENOSPC') },
+    })
+    await assert.rejects(storage.save(conv('a', 1)), { code: 'ENOSPC' })
+    assert.equal(calls, 1)
+  })
+})
+
+test('list removes orphan temp files, but not ones a write may still own', async () => {
+  await withDir(async (dir) => {
+    const storage = createConversationStorage(dir)
+    await storage.save(conv('a', 1))
+    const old = join(dir, 'a.json.1111.tmp')
+    const fresh = join(dir, 'a.json.2222.tmp')
+    await writeFile(old, '{', 'utf-8')
+    await writeFile(fresh, '{', 'utf-8')
+    const past = (Date.now() - ORPHAN_TMP_AGE_MS - 10_000) / 1000
+    await utimes(old, past, past)
+
+    assert.deepEqual((await storage.list()).map((s) => s.id), ['a'])
+    assert.deepEqual((await readdir(dir)).sort(), ['a.json', 'a.json.2222.tmp'])
   })
 })

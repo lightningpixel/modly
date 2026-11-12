@@ -18,6 +18,10 @@ async def _answer(call_id: str, result: str, error: bool = False) -> dict:
     return await agent.agent_tool_result(agent.ToolResultRequest(call_id=call_id, result=result, error=error))
 
 
+async def _confirmed(call_id: str) -> dict:
+    return await agent.agent_tool_confirmed(agent.ToolConfirmedRequest(call_id=call_id))
+
+
 def _run_turn(scripted: _Scripted, request: agent.AgentChatRequest, on_client_tool) -> list[dict]:
     """Drive a turn, letting `on_client_tool(event)` answer each client tool
     the way the panel would (it may be a coroutine function)."""
@@ -39,6 +43,7 @@ def _run_turn(scripted: _Scripted, request: agent.AgentChatRequest, on_client_to
 class ClientToolBridgeTests(unittest.TestCase):
     def tearDown(self) -> None:
         agent._pending_client_tools.clear()
+        agent._confirmed_client_tools.clear()
 
     def test_client_tool_is_handed_to_the_app_and_its_answer_reaches_the_model(self) -> None:
         scripted = _Scripted(
@@ -106,6 +111,13 @@ class ClientToolBridgeTests(unittest.TestCase):
         self.assertEqual(events[2]["result"], "Error: disk full")
         self.assertEqual(scripted.bodies[1]["messages"][-1]["content"], "Error: disk full")
 
+    def test_an_error_already_prefixed_by_the_app_is_not_prefixed_again(self) -> None:
+        scripted = _Scripted(_client_round("reload_extensions"), _sse({"content": "ok"}))
+        events = _run_turn(scripted, _external(), lambda e: _answer(e["call_id"], "Error: disk full", error=True))
+
+        self.assertEqual(events[2]["result"], "Error: disk full")
+        self.assertEqual(scripted.bodies[1]["messages"][-1]["content"], "Error: disk full")
+
     def test_unknown_or_already_answered_call_is_404(self) -> None:
         with self.assertRaises(HTTPException) as caught:
             asyncio.run(_answer("nope", "x"))
@@ -159,6 +171,63 @@ class ClientToolBridgeTests(unittest.TestCase):
 
         self.assertEqual(events[2]["result"], "Error: The app did not answer in time.")
 
+    def test_after_confirm_the_tool_gets_the_tool_timeout(self) -> None:
+        scripted = _Scripted(_client_round("set_storage_folder", {"kind": "models", "path": "E:/m"}), _sse({"content": "ok"}))
+        seen = []
+
+        async def confirm_then_hang(event):
+            await asyncio.sleep(0.02)
+            seen.append(await _confirmed(event["call_id"]))
+
+        def on_tool(event):
+            asyncio.ensure_future(confirm_then_hang(event))
+
+        with mock.patch.object(agent, "CONFIRM_TIMEOUT", 5.0):
+            events = _run_turn(scripted, _external().model_copy(update={"tool_timeout": 0.05}), on_tool)
+
+        self.assertEqual(seen, [{"ok": True}])
+        result = events[2]["result"]
+        self.assertTrue(result.startswith("Error: set_storage_folder was confirmed but did not finish within 0.05 s"))
+        self.assertIn("may still be running", result)
+        self.assertEqual(agent._pending_client_tools, {})
+        self.assertEqual(agent._confirmed_client_tools, {})
+
+    def test_a_confirmed_tool_answering_within_the_tool_timeout_is_relayed(self) -> None:
+        scripted = _Scripted(_client_round("delete_workflow", {"workflow_id": "w"}), _sse({"content": "ok"}))
+
+        def on_tool(event):
+            async def click_then_run():
+                await asyncio.sleep(0.1)  # longer than tool_timeout: the click is not timed by it
+                await _confirmed(event["call_id"])
+                await asyncio.sleep(0.02)
+                await _answer(event["call_id"], "Deleted.")
+            asyncio.ensure_future(click_then_run())
+
+        with mock.patch.object(agent, "CONFIRM_TIMEOUT", 5.0):
+            _run_turn(scripted, _external().model_copy(update={"tool_timeout": 0.05}), on_tool)
+
+        self.assertEqual(scripted.bodies[1]["messages"][-1]["content"], "Deleted.")
+
+    def test_confirmed_for_an_unknown_or_answered_call_is_404(self) -> None:
+        with self.assertRaises(HTTPException) as caught:
+            asyncio.run(_confirmed("nope"))
+        self.assertEqual(caught.exception.status_code, 404)
+
+        seen = []
+
+        async def answer_then_confirm(event):
+            await _answer(event["call_id"], "The user declined.")
+            try:
+                await _confirmed(event["call_id"])
+            except HTTPException as e:
+                seen.append(e.status_code)
+
+        _run_turn(
+            _Scripted(_client_round("delete_workflow", {"workflow_id": "w"}), _sse({"content": "ok"})),
+            _external(), answer_then_confirm,
+        )
+        self.assertEqual(seen, [404])
+
     def test_client_tools_count_against_the_budget(self) -> None:
         both = _sse(
             _call(0, id="a", function={"name": "reload_extensions", "arguments": "{}"}),
@@ -206,6 +275,33 @@ class ClientToolBridgeTests(unittest.TestCase):
 
         self.assertTrue(future.cancelled())
         self.assertNotIn(event["call_id"], agent._pending_client_tools)
+
+
+class NonStreamingChatTests(unittest.TestCase):
+    def test_chat_does_not_offer_client_tools(self) -> None:
+        scripted = _Scripted(_sse({"content": "hi"}))
+        with mock.patch.object(agent.httpx, "AsyncClient", scripted):
+            response = asyncio.run(agent.agent_chat(_external()))
+
+        self.assertEqual(response.message, "hi")
+        offered = {t["function"]["name"] for t in scripted.bodies[0]["tools"]}
+        self.assertFalse(offered & set(agent.CLIENT_TOOLS))
+        self.assertIn("list_extensions", offered)
+
+    def test_chat_answers_a_client_tool_call_at_once(self) -> None:
+        scripted = _Scripted(_client_round("reload_extensions"), _sse({"content": "Could not."}))
+        with mock.patch.object(agent.httpx, "AsyncClient", scripted):
+            response = asyncio.run(asyncio.wait_for(agent.agent_chat(_external()), 5))
+
+        self.assertEqual(response.actions[0].result, "Error: This tool needs the Modly app.")
+        self.assertEqual(scripted.bodies[1]["messages"][-1]["content"], "Error: This tool needs the Modly app.")
+        self.assertEqual(agent._pending_client_tools, {})
+
+    def test_the_stream_still_offers_client_tools(self) -> None:
+        scripted = _Scripted(_sse({"content": "hi"}))
+        _run_turn(scripted, _external(), None)
+        offered = {t["function"]["name"] for t in scripted.bodies[0]["tools"]}
+        self.assertTrue(set(agent.CLIENT_TOOLS) <= offered)
 
 
 _CLIENT_TOOL_ARGS = {

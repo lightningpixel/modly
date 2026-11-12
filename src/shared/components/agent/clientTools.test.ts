@@ -5,6 +5,7 @@ import {
   clientTools,
   describeClientTool,
   isErrorResult,
+  isGenerationRunning,
   latestUserImage,
   runClientTool,
   startGenerationFromImage,
@@ -158,6 +159,17 @@ test('uninstall_extension uninstalls by id, describes by name and refuses built-
   assert.match(await run('uninstall_extension', { extension_id: 'nope' }, f), /^Error: No installed extension has the id “nope”. Installed extensions: triposr, hunyuan, shared, mesh-ops\./)
   assert.match(await run('uninstall_extension', {}, f), /^Error: extension_id is required/)
   assert.equal(f.calls.length, 1)
+})
+
+test('uninstall_extension refuses a model id, which would remove the whole extension', async () => {
+  const f = fake()
+  const problem = clientTools.uninstall_extension.check({ extension_id: 'hunyuan/shape' }, f.deps)
+  assert.match(problem ?? '', /“hunyuan\/shape” names a model; pass the extension id \(“hunyuan”\)/)
+  let asked = false
+  const outcome = await runClientTool(event('uninstall_extension', { extension_id: 'hunyuan/shape' }, true), f.deps, async () => { asked = true; return true })
+  assert.equal(asked, false)
+  assert.equal(outcome.error, true)
+  assert.deepEqual(f.calls, [])
 })
 
 test('reload_extensions reloads and reports the count and load errors', async () => {
@@ -359,6 +371,32 @@ test('runClientTool asks first when confirm is set, and runs on Confirm', async 
   assert.equal(f.posted[0].call_id, 'call-7')
 })
 
+test('runClientTool tells the server about the Confirm click before running, and not on a decline', async () => {
+  const order: string[] = []
+  const f = fake({
+    postConfirmed: async (callId) => { order.push(`confirmed ${callId}`) },
+    postResult: async (body) => { order.push(`result ${body.call_id}`) },
+  })
+  f.deps.extensions.uninstall = async () => { order.push('uninstall'); return { success: true } }
+  await runClientTool(event('uninstall_extension', { extension_id: 'triposr' }, true), f.deps, async () => true)
+  assert.deepEqual(order, ['confirmed call-7', 'uninstall', 'result call-7'])
+
+  order.length = 0
+  await runClientTool(event('uninstall_extension', { extension_id: 'triposr' }, true), f.deps, async () => false)
+  assert.deepEqual(order, ['result call-7'])
+
+  order.length = 0
+  await runClientTool(event('navigate', { page: 'models' }), f.deps, async () => true)
+  assert.deepEqual(order, ['result call-7'])
+})
+
+test('runClientTool still runs the tool when the confirmed notice fails', async () => {
+  const f = fake({ postConfirmed: async () => { throw new Error('offline') } })
+  const outcome = await runClientTool(event('delete_workflow', { workflow_id: 'wf1' }, true), f.deps, async () => true)
+  assert.deepEqual(f.calls, [['removeWorkflow', 'wf1']])
+  assert.equal(outcome.error, false)
+})
+
 test('runClientTool reports a declined confirmation without running the tool', async () => {
   const f = fake()
   const outcome = await runClientTool(event('delete_workflow', { workflow_id: 'wf1' }, true), f.deps, async () => false)
@@ -413,6 +451,7 @@ function generation(statuses: { status: string; progress?: number; outputUrl?: s
   const calls: unknown[][] = []
   let job: GenerationJob | null = null
   const deps: GenerationDeps = {
+    isGenerating: () => isGenerationRunning(job),
     api: {
       generateFromImage: async (path, options, data) => { calls.push(['submit', path, options, data]); return { jobId: 'j1' } },
       pollJobStatus: async () => ({ progress: 0, ...statuses.shift()! }) as never,
@@ -457,6 +496,22 @@ test('startGenerationFromImage reports a missing image, a wrong payload and a fa
   assert.match(await startGenerationFromImage({ type: 'mesh_update' }, 'QUJD', g.deps), /^Error: Not a generate_from_image payload/)
   assert.equal(await startGenerationFromImage({ type: 'generate_from_image' }, 'QUJD', g.deps), 'Error: The generation failed: CUDA OOM')
   assert.equal(g.job()?.status, 'error')
+})
+
+test('startGenerationFromImage refuses while a generation is running, without touching the current job', async () => {
+  for (const status of ['uploading', 'generating'] as const) {
+    const g = generation([{ status: 'done', outputUrl: '/workspace/o.glb' }])
+    const running = { id: 'busy', imageFile: 'x.png', status, progress: 40, createdAt: 1 } as GenerationJob
+    g.deps.store.setCurrentJob(running)
+    const result = await startGenerationFromImage({ type: 'generate_from_image' }, 'QUJD', g.deps)
+    assert.equal(result, 'Error: A generation is already running. Wait for it to finish.')
+    assert.deepEqual(g.calls, [], status)
+    assert.equal(g.job(), running)
+  }
+  for (const status of ['done', 'error', 'idle'] as const) {
+    assert.equal(isGenerationRunning({ status }), false, status)
+  }
+  assert.equal(isGenerationRunning(null), false)
 })
 
 test('latestUserImage takes the most recent user message with an image', () => {

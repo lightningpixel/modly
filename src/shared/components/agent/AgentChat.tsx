@@ -521,12 +521,15 @@ export default function AgentChat(): JSX.Element {
   // Started after `done`, like workflows: the local LLM frees the GPU first.
   function startGeneration(payload: AgentActionPayload | null | undefined, msgs: Message[]) {
     if (payload?.type !== 'generate_from_image') return
-    setGenerations((n) => n + 1)
-    void startGenerationFromImage(payload, latestUserImage(msgs), createGenerationDeps())
+    const deps = createGenerationDeps()
+    // A refused start (one is already running) is not ours to count.
+    const counted = !deps.isGenerating()
+    if (counted) setGenerations((n) => n + 1)
+    void startGenerationFromImage(payload, latestUserImage(msgs), deps)
       .then((result) => {
         setMessages((prev) => [...prev, { id: `sys-${Date.now()}`, role: 'assistant', content: result }])
       })
-      .finally(() => setGenerations((n) => n - 1))
+      .finally(() => { if (counted) setGenerations((n) => n - 1) })
   }
 
   function startWorkflow(payload: AgentActionPayload | null | undefined, msgs: Message[]) {

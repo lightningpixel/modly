@@ -27,7 +27,7 @@ The agent today lives in the "chat" mode of the Generate page's left panel. It l
 
 | Tool | Does |
 |---|---|
-| `generate_from_image(model_id?, params?)` | Starts a generation from the image attached to the message. The frontend runs it, as with `run_workflow`. |
+| `generate_from_image(model_id?)` | Starts a generation from the image attached to the message. The frontend runs it, as with `run_workflow`. |
 | `list_extensions` | Lists installed extensions (from context). |
 | `get_settings` | Returns the storage paths and a few UI options (from context). |
 

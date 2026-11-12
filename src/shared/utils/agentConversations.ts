@@ -48,6 +48,19 @@ export function upsertSummary(list: readonly ConversationSummary[], summary: Con
 }
 
 /**
+ * Runs async tasks one at a time, in call order. A failed task does not stop
+ * the ones queued after it; its caller still gets the rejection.
+ */
+export function createSerialQueue(): <T>(task: () => Promise<T>) => Promise<T> {
+  let tail: Promise<unknown> = Promise.resolve()
+  return <T>(task: () => Promise<T>): Promise<T> => {
+    const run = tail.then(() => task())
+    tail = run.catch(() => undefined)
+    return run
+  }
+}
+
+/**
  * A conversation saved mid-turn holds a streaming message and running tools.
  * Nothing is streaming once it is loaded again, so settle them.
  */
