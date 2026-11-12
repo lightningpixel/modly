@@ -58,3 +58,25 @@ def format_repair(data: Mapping[str, Any]) -> str:
     if data.get("textures_dropped"):
         lines.append("The textures and UVs were dropped: the repaired mesh is geometry only.")
     return "\n".join(lines)
+
+
+def format_preset(data: Mapping[str, Any]) -> str:
+    """Render a prepare_for_* preset result: each step, then the outcome."""
+    lines = [f"- {step['summary']}" for step in data.get("steps") or [] if step.get("summary")]
+    remaining = data.get("remaining_issues") or []
+    if "watertight" in data:
+        if not data["watertight"]:
+            lines.append("The mesh is NOT watertight yet.")
+        else:
+            lines.append("The mesh is watertight" + ("." if remaining else " and ready to slice."))
+    if remaining:
+        lines.append("Still remaining: " + "; ".join(remaining) + ".")
+    if data.get("dimensions_mm"):
+        lines.append("Size: " + " × ".join(f"{d:.4g}" for d in data["dimensions_mm"]) + " mm.")
+    elif data.get("dimensions"):
+        lines.append("Size: " + " × ".join(f"{d:.4g}" for d in data["dimensions"]) + " m.")
+    faces = data.get("face_count")
+    lines.append(f"New mesh path: {data['path']}" + (f" ({faces:,} faces)." if faces else "."))
+    if data.get("textures_dropped"):
+        lines.append("The textures and UVs were dropped: the repaired mesh is geometry only.")
+    return "\n".join(lines)
