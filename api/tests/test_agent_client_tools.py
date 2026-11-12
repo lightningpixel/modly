@@ -61,7 +61,7 @@ class ClientToolBridgeTests(unittest.TestCase):
             {k: v for k, v in handoff.items() if k != "call_id"},
             {
                 "type": "client_tool", "id": "c1", "tool": "install_extension",
-                "arguments": {"github_url": "https://github.com/a/b"}, "confirm": False,
+                "arguments": {"github_url": "https://github.com/a/b"}, "confirm": True,
             },
         )
         self.assertRegex(handoff["call_id"], r"^[0-9a-f]{32}$")
@@ -233,7 +233,8 @@ class ClientToolDeclarationTests(unittest.TestCase):
         confirmed = {name for name, confirm in agent.CLIENT_TOOLS.items() if confirm}
         self.assertEqual(
             confirmed,
-            {"uninstall_extension", "delete_model_weights", "delete_workflow", "set_storage_folder"},
+            # install_extension runs code downloaded from GitHub: never without a click.
+            {"install_extension", "uninstall_extension", "delete_model_weights", "delete_workflow", "set_storage_folder"},
         )
 
     def test_every_client_tool_has_a_schema(self) -> None:

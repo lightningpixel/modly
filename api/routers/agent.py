@@ -323,7 +323,8 @@ TOOLS += [
 # Tools the app runs itself (Electron IPC, renderer stores), mapped to whether
 # the user must confirm them first. The frontend obeys `confirm`.
 CLIENT_TOOLS: dict[str, bool] = {
-    "install_extension": False,
+    # Installing runs code downloaded from GitHub: the user must see the URL and click.
+    "install_extension": True,
     "uninstall_extension": True,
     "reload_extensions": False,
     "download_model_weights": False,

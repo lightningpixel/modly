@@ -345,6 +345,20 @@ test('runClientTool reports a declined confirmation without running the tool', a
   assert.equal(outcome.declined, true)
 })
 
+test('runClientTool asks for code installs and destructive tools even when the event says no confirm', async () => {
+  for (const [tool, args] of [
+    ['install_extension', { github_url: 'https://github.com/a/b' }],
+    ['delete_workflow', { workflow_id: 'wf1' }],
+  ] as const) {
+    const f = fake()
+    let asked = false
+    const outcome = await runClientTool(event(tool, { ...args }, false), f.deps, async () => { asked = true; return false })
+    assert.equal(asked, true, tool)
+    assert.equal(outcome.declined, true, tool)
+    assert.deepEqual(f.calls, [], tool)
+  }
+})
+
 test('runClientTool does not ask about a call that cannot run, and flags errors', async () => {
   const f = fake()
   let asked = false

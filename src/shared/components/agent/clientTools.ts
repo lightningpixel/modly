@@ -235,6 +235,11 @@ function isInside(child: string, parent: string): boolean {
 export interface ClientTool {
   /** Destructive: the confirm card shows a red Confirm button. */
   destructive: boolean
+  /**
+   * Always asks before running, whatever the server's `confirm` says: true for
+   * destructive tools and for installs (they run code downloaded from GitHub).
+   */
+  requiresConfirm: boolean
   /** The human sentence for the confirm card and the action list. */
   describe: (args: Args, deps?: ClientToolDeps) => string
   /** Why the arguments cannot be run, or null when they can. */
@@ -245,6 +250,8 @@ export interface ClientTool {
 
 interface ToolSpec {
   destructive?: boolean
+  /** Ask even when not destructive (see ClientTool.requiresConfirm). */
+  requiresConfirm?: boolean
   describe: (args: Args, deps?: ClientToolDeps) => string
   check: (args: Args, deps: ClientToolDeps) => string | null
   execute: (args: Args, deps: ClientToolDeps) => Promise<string>
@@ -253,6 +260,7 @@ interface ToolSpec {
 function defineTool(spec: ToolSpec): ClientTool {
   return {
     destructive: spec.destructive ?? false,
+    requiresConfirm: (spec.destructive ?? false) || (spec.requiresConfirm ?? false),
     describe: spec.describe,
     check: (args, deps) => {
       try {
@@ -277,6 +285,7 @@ const checked = <T>(value: T | string): string | null => (typeof value === 'stri
 
 export const clientTools: Record<string, ClientTool> = {
   install_extension: defineTool({
+    requiresConfirm: true,
     describe: (args) => `Install the extension from ${quote(String(args.github_url ?? '?'))}`,
     check: (args) => {
       const url = str(args, 'github_url')
@@ -585,7 +594,7 @@ export async function runClientTool(
       result = fail(problem)
     } else {
       let ok = true
-      if (event.confirm) {
+      if (event.confirm || tool.requiresConfirm) {
         try {
           ok = await confirm(description, { tool: event.tool, id: event.id, callId: event.call_id, destructive: tool.destructive })
         } catch {
