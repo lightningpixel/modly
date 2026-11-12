@@ -8,6 +8,8 @@ import { ColorPicker } from '@shared/components/ui'
 import GenerationHUD from './components/GenerationHUD'
 import Viewer3D from './components/Viewer3D'
 import WorkflowPanel from './components/WorkflowPanel'
+import EditPanel from './components/EditPanel'
+import { meshPathFromUrl } from './meshEditPanel'
 import { getDefaultAssetLibraryService } from './assetLibraryService'
 import { buildOrcaSlicerDeepLink, canOpenInOrcaSlicer } from './orcaSlicerLink'
 import { resolveAssetLibraryOpenTarget, type ProjectedAssetLibraryEntry } from './assetLibraryProjection'
@@ -677,6 +679,7 @@ export default function GeneratePage(): JSX.Element {
   const [librarySortMode, setLibrarySortMode] = useState<AssetLibrarySortMode>('type')
   const [libraryCollapsedSectionKeys, setLibraryCollapsedSectionKeys] = useState<string[]>(() => getDefaultAssetLibraryCollapsedSectionKeys())
   const [gizmoMode, setGizmoMode] = useState<'translate' | 'rotate' | 'scale' | null>(null)
+  const [editPanelOpen, setEditPanelOpen] = useState(false)
   const dragging = useRef(false)
   const [selectedPointLightId, setSelectedPointLightId] = useState<string | null>(null)
   // Populated by Viewer3D — undoes the latest live gizmo transform, if any.
@@ -792,16 +795,6 @@ export default function GeneratePage(): JSX.Element {
     }
   }
 
-  function getOptimizePath(url: string): string {
-    if (url.startsWith('/workspace/')) {
-      return url.slice('/workspace/'.length)
-    }
-    if (url.startsWith('/optimize/serve-file?path=')) {
-      return decodeURIComponent(url.split('path=')[1] ?? '')
-    }
-    return url
-  }
-
   async function handleImportMesh() {
     const filePath = await window.electron.fs.selectMeshFile()
     if (!filePath) return
@@ -893,7 +886,7 @@ export default function GeneratePage(): JSX.Element {
     if (!currentJob?.outputUrl) return
     setSmoothing(true)
     try {
-      const path = getOptimizePath(currentJob.outputUrl)
+      const path = meshPathFromUrl(currentJob.outputUrl)
       const { url } = await smoothMesh(path, iterations)
       applyMeshEdit(url)
       setOpenPanel(null)
@@ -908,7 +901,7 @@ export default function GeneratePage(): JSX.Element {
     if (!currentJob?.outputUrl) return
     setDecimating(true)
     try {
-      const path = getOptimizePath(currentJob.outputUrl)
+      const path = meshPathFromUrl(currentJob.outputUrl)
       const { url } = await optimizeMesh(path, targetFaces)
       applyMeshEdit(url)
       setOpenPanel(null)
@@ -1261,20 +1254,41 @@ export default function GeneratePage(): JSX.Element {
               </ToolButton>
             </>
           )}
+
+          {/* Mesh edit panel: every registry op, runnable without the agent */}
+          <button
+            type="button"
+            onClick={() => setEditPanelOpen((open) => !open)}
+            title="Mesh tools: repair, transform, optimize, inspect"
+            aria-pressed={editPanelOpen}
+            className={`ml-auto flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium border transition-colors
+              ${editPanelOpen
+                ? 'bg-zinc-700 border-zinc-600 text-zinc-200'
+                : 'bg-zinc-800 border-zinc-700/50 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600'
+              }`}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+              <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+            </svg>
+            Edit
+          </button>
         </div>
 
-        {/* Viewer area */}
-        <div className="flex-1 relative overflow-hidden">
-          <Viewer3D
-            lightSettings={lightSettings}
-            gizmoMode={gizmoMode}
-            gizmoUndoRef={gizmoUndoRef}
-            pointLights={pointLights}
-            selectedPointLightId={selectedPointLightId}
-            onSelectPointLight={handleSelectPointLight}
-            onPointLightsChange={setPointLights}
-          />
-          <GenerationHUD />
+        <div className="flex-1 flex overflow-hidden">
+          {/* Viewer area */}
+          <div className="flex-1 relative overflow-hidden">
+            <Viewer3D
+              lightSettings={lightSettings}
+              gizmoMode={gizmoMode}
+              gizmoUndoRef={gizmoUndoRef}
+              pointLights={pointLights}
+              selectedPointLightId={selectedPointLightId}
+              onSelectPointLight={handleSelectPointLight}
+              onPointLightsChange={setPointLights}
+            />
+            <GenerationHUD />
+          </div>
+          {editPanelOpen && <EditPanel onClose={() => setEditPanelOpen(false)} />}
         </div>
       </div>
     </>

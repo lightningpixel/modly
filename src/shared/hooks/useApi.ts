@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { useAppStore, GenerationOptions } from '@shared/stores/appStore'
+import type { MeshOpDescriptor, MeshOpResponse } from '@areas/generate/meshEditPanel'
 
 export function useApi() {
   const apiUrl = useAppStore((s) => s.apiUrl)
@@ -129,5 +130,25 @@ export function useApi() {
     return { url: data.url }
   }
 
-  return { generateFromImage, pollJobStatus, cancelJob, getModelStatus, getAllModelsStatus, downloadModel, optimizeMesh, smoothMesh, importMesh, transformMesh }
+  // Mesh-ops registry: every op the chat agent can run, with its params schema.
+  async function listMeshOps(): Promise<MeshOpDescriptor[]> {
+    const { data } = await client.get<MeshOpDescriptor[]>('/optimize/ops')
+    return data
+  }
+
+  // Runs one registry op. The response carries `url` when a new mesh was
+  // written; analysis ops (inspect_mesh, suggest_fixes) return only a report.
+  async function runMeshOp(
+    opId: string,
+    path: string,
+    params: Record<string, unknown>,
+  ): Promise<MeshOpResponse> {
+    const { data } = await client.post<MeshOpResponse>(`/optimize/op/${encodeURIComponent(opId)}`, {
+      path,
+      params,
+    })
+    return data
+  }
+
+  return { generateFromImage, pollJobStatus, cancelJob, getModelStatus, getAllModelsStatus, downloadModel, optimizeMesh, smoothMesh, importMesh, transformMesh, listMeshOps, runMeshOp }
 }
