@@ -13,6 +13,7 @@ import { meshPathFromUrl } from './meshEditPanel'
 import { commitSculpt, useSculptStore } from './sculpt/sculptStore'
 import { sculptKeyAction } from './sculpt/sculptLogic'
 import { getDefaultAssetLibraryService } from './assetLibraryService'
+import { requestLibraryThumbnails } from '@shared/thumbnails/assetThumbnailService'
 import { buildOrcaSlicerDeepLink, canOpenInOrcaSlicer } from './orcaSlicerLink'
 import { resolveAssetLibraryOpenTarget, type ProjectedAssetLibraryEntry } from './assetLibraryProjection'
 import {
@@ -886,6 +887,7 @@ export default function GeneratePage(): JSX.Element {
         return
       }
       setLibraryEntries(result.entries)
+      void requestLibraryThumbnails(result.entries)
       setLibrarySelectedEntryId((current) => current && result.entries.some((entry) => entry.id === current)
         ? current
         : result.entries.find(isAssetLibraryEntryOpenable)?.id ?? result.entries[0]?.id ?? null)
