@@ -400,7 +400,7 @@ TOOLS += [
         "navigate",
         "Switch the app to another page. Use it ONLY when the user explicitly asks to go to a page; "
         "every other tool works from any page.",
-        {"page": {"type": "string", "enum": ["generate", "workflows", "models", "settings"]}},
+        {"page": {"type": "string", "description": "A page id from the app context's Pages line."}},
         ["page"],
     ),
 ]
@@ -419,6 +419,11 @@ _confirmed_client_tools: dict[str, asyncio.Event] = {}
 
 # What the non-streaming /agent/chat offers: no client tool, nobody would answer.
 SERVER_TOOLS = [t for t in TOOLS if t["function"]["name"] not in CLIENT_TOOLS]
+
+
+def _one_line(text: str, limit: int = 64) -> str:
+    """A context value from the app, on one line and capped."""
+    return " ".join(text.split())[:limit]
 
 
 def _not_finished(tool: str, limit: float) -> str:
@@ -1107,6 +1112,14 @@ async def _chat_events(request: AgentChatRequest, client_tools: bool = True):
         ctx_lines = []
         if request.context.get("page"):
             ctx_lines.append(f"Current page: {request.context['page']}")
+        # From the app's page registry; kept short and on one line all the same.
+        pages = [
+            (_one_line(p["id"]), _one_line(p.get("label") if isinstance(p.get("label"), str) else p["id"]))
+            for p in (request.context.get("pages") or [])[:32]
+            if isinstance(p, dict) and isinstance(p.get("id"), str)
+        ]
+        if pages:
+            ctx_lines.append("Pages: " + ", ".join(f"{pid} ({label})" for pid, label in pages))
         if request.context.get("currentMeshPath"):
             ctx_lines.append(f"Current mesh path: {request.context['currentMeshPath']}")
         if request.context.get("meshTriangles"):

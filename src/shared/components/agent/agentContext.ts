@@ -2,6 +2,7 @@ import type { ModelExtension, ProcessExtension } from '../../types/electron.d'
 import type { Workflow } from '../../types/electron.d'
 import type { UiScale } from '../../stores/appStore'
 import type { Page } from '../../stores/navStore'
+import { PAGES } from '../../pages/pageRegistry'
 import { useAppStore } from '../../stores/appStore'
 import { useExtensionsStore } from '../../stores/extensionsStore'
 import { useWorkflowsStore } from '../../stores/workflowsStore'
@@ -13,6 +14,8 @@ import { buildAllWorkflowExtensions } from '../../../areas/workflows/mockExtensi
 
 export interface AgentContextInputs {
   page: Page
+  /** Every page the app has, for the navigate tool. */
+  pages: readonly { id: string; label: string }[]
   currentMeshUrl?: string | null
   meshTriangles?: number | null
   workflows: Pick<Workflow, 'id' | 'name'>[]
@@ -28,6 +31,7 @@ export interface AgentContextInputs {
 /** Pure assembly of the context from already-read state. */
 export function assembleAgentContext(inputs: AgentContextInputs): Record<string, unknown> {
   const ctx: Record<string, unknown> = { page: inputs.page }
+  ctx.pages = inputs.pages.map((p) => ({ id: p.id, label: p.label }))
   if (inputs.currentMeshUrl) ctx.currentMeshPath = inputs.currentMeshUrl.replace('/workspace/', '')
   if (inputs.meshTriangles)  ctx.meshTriangles   = inputs.meshTriangles
   if (inputs.workflows.length > 0) ctx.workflows = inputs.workflows.map((w) => ({ id: w.id, name: w.name }))
@@ -72,6 +76,7 @@ export async function buildAgentContext(sources: AgentContextSources = defaultSo
   ])
   return assembleAgentContext({
     page: useNavStore.getState().currentPage,
+    pages: PAGES,
     currentMeshUrl: app.currentJob?.outputUrl,
     meshTriangles: app.meshStats?.triangles,
     workflows: useWorkflowsStore.getState().workflows,

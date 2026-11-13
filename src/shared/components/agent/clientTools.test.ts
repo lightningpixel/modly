@@ -335,7 +335,7 @@ test('undo_mesh and redo_mesh step through the history, and say when there is no
 
 test('navigate changes page and validates it', async () => {
   const f = fake()
-  assert.equal(await run('navigate', { page: 'models' }, f), 'Opened the models page.')
+  assert.equal(await run('navigate', { page: 'models' }, f), 'Opened the Extensions page.')
   assert.deepEqual(f.calls, [['navigate', 'models']])
   assert.match(await run('navigate', { page: 'home' }, f), /^Error: page must be one of: generate, workflows, models, settings/)
 })
@@ -355,8 +355,8 @@ const event = (tool: string, args: Record<string, unknown>, confirm = false) => 
 test('runClientTool runs the tool and posts the result with its call_id', async () => {
   const f = fake()
   const outcome = await runClientTool(event('navigate', { page: 'settings' }), f.deps, async () => { throw new Error('not asked') })
-  assert.deepEqual(f.posted, [{ call_id: 'call-7', result: 'Opened the settings page.' }])
-  assert.deepEqual(outcome, { description: 'Go to the settings page', result: 'Opened the settings page.', error: false, declined: false, posted: true })
+  assert.deepEqual(f.posted, [{ call_id: 'call-7', result: 'Opened the Settings page.' }])
+  assert.deepEqual(outcome, { description: 'Go to the Settings page', result: 'Opened the Settings page.', error: false, declined: false, posted: true })
 })
 
 test('runClientTool asks first when confirm is set, and runs on Confirm', async () => {
