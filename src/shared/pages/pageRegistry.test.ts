@@ -17,11 +17,12 @@ test('page ids are unique and every page has a known group, a label and an icon'
   }
 })
 
-test('the four existing pages keep their ids, labels and sidebar order', () => {
+test('the pages keep their ids, labels and sidebar order', () => {
   assert.deepEqual(
     pagesByGroup().map((s) => [s.group, s.pages.map((p) => `${p.id}:${p.label}`)]),
     [
       ['create', ['generate:Generate', 'workflows:Workflows']],
+      ['manage', ['library:Library']],
       ['system', ['models:Extensions', 'settings:Settings']],
     ],
   )

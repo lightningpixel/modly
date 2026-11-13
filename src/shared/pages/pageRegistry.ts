@@ -53,6 +53,19 @@ export const PAGES = [
     wrapperClass: 'flex flex-1 overflow-hidden',
   },
   {
+    id: 'library',
+    label: 'Library',
+    group: 'manage',
+    icon: [
+      ['rect', { x: 3, y: 3, width: 7.5, height: 7.5, rx: 1.5 }],
+      ['rect', { x: 13.5, y: 3, width: 7.5, height: 7.5, rx: 1.5 }],
+      ['rect', { x: 3, y: 13.5, width: 7.5, height: 7.5, rx: 1.5 }],
+      ['rect', { x: 13.5, y: 13.5, width: 7.5, height: 7.5, rx: 1.5 }],
+    ],
+    load: () => import('@areas/library/LibraryPage'),
+    wrapperClass: 'flex flex-1 overflow-hidden',
+  },
+  {
     id: 'models',
     label: 'Extensions',
     group: 'system',
