@@ -1,19 +1,26 @@
 import { create } from 'zustand'
+// Relative and type-only, so the store loads under `node --test`.
+import type { Page } from '../pages/pageRegistry'
 
-export type Page = 'generate' | 'workflows' | 'models' | 'settings'
+export type { Page }
+
+/** What a page is opened on, e.g. `{ extension: 'hunyuan' }` for the Extensions page. */
+export type PageParams = Readonly<Record<string, string>>
 
 interface NavState {
   currentPage: Page
-  extensionToOpen: string | null
-  navigate: (page: Page) => void
+  /** Target of the last navigate() call; the page reads it, then clears it. */
+  params: PageParams | null
+  navigate: (page: Page, params?: PageParams) => void
+  /** Opens the Extensions page on one extension. */
   openExtension: (extensionId: string) => void
-  clearExtensionToOpen: () => void
+  clearParams: () => void
 }
 
-export const useNavStore = create<NavState>((set) => ({
+export const useNavStore = create<NavState>((set, get) => ({
   currentPage: 'generate',
-  extensionToOpen: null,
-  navigate: (page) => set({ currentPage: page }),
-  openExtension: (extensionId) => set({ currentPage: 'models', extensionToOpen: extensionId }),
-  clearExtensionToOpen: () => set({ extensionToOpen: null }),
+  params: null,
+  navigate: (page, params) => set({ currentPage: page, params: params ?? null }),
+  openExtension: (extensionId) => get().navigate('models', { extension: extensionId }),
+  clearParams: () => set({ params: null }),
 }))
