@@ -4,6 +4,9 @@ import type {
   AssetLibraryOpenResult,
   AssetLibraryReadRequest,
   AssetLibraryReadResult,
+  AssetThumbnailSaveRequest,
+  AssetThumbnailSaveResult,
+  AssetThumbnailStatusResult,
 } from '../../src/shared/types/assetLibrary'
 import type {
   Conversation as AgentConversation,
@@ -248,6 +251,10 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         list: (): Promise<AssetLibraryListResult> => ipcRenderer.invoke('workspace:library:list') as Promise<AssetLibraryListResult>,
         read: (request: AssetLibraryReadRequest): Promise<AssetLibraryReadResult> => ipcRenderer.invoke('workspace:library:read', request) as Promise<AssetLibraryReadResult>,
         open: (request: AssetLibraryOpenRequest): Promise<AssetLibraryOpenResult> => ipcRenderer.invoke('workspace:library:open', request) as Promise<AssetLibraryOpenResult>,
+      },
+      thumbnails: {
+        status: (workspacePath: string): Promise<AssetThumbnailStatusResult> => ipcRenderer.invoke('workspace:thumbnails:status', { workspacePath }) as Promise<AssetThumbnailStatusResult>,
+        save: (request: AssetThumbnailSaveRequest): Promise<AssetThumbnailSaveResult> => ipcRenderer.invoke('workspace:thumbnails:save', request) as Promise<AssetThumbnailSaveResult>,
       },
     },
 

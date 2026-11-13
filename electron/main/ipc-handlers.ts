@@ -91,6 +91,8 @@ import {
   validateExtensionDestinationRegistration,
 } from './extension-install-recovery'
 import { registerWorkspaceAssetLibraryIpcHandlers } from './artifact-registry-service'
+import { getThumbnailsDir } from './asset-thumbnail-protocol'
+import { registerAssetThumbnailIpcHandlers, removeThumbnails } from './asset-thumbnail-cache'
 import { updatesSupported } from './updater'
 import { ModelWeightOperations } from './model-weight-operations'
 import { readLocalFileBase64 } from './bounded-file-reader'
@@ -995,6 +997,12 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   registerWorkspaceAssetLibraryIpcHandlers({
     ipcMain,
     getWorkspaceDir: () => getSettings(app.getPath('userData')).workspaceDir,
+    thumbnailsDir: getThumbnailsDir(),
+  })
+  registerAssetThumbnailIpcHandlers({
+    ipcMain,
+    getWorkspaceDir: () => getSettings(app.getPath('userData')).workspaceDir,
+    thumbnailsDir: getThumbnailsDir(),
   })
 
   ipcMain.handle('workspace:listCollections', async () => {
@@ -1035,6 +1043,10 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   ipcMain.handle('workspace:deleteJob', async (_, { collection, filename }: { collection: string; filename: string }) => {
     await rmAsync(workspacePath(collection, filename), { force: true })
     await rmAsync(workspacePath(collection, filename.replace(/\.glb$/, '.meta.json')), { force: true })
+    await removeThumbnails(
+      { workspaceDir: getSettings(app.getPath('userData')).workspaceDir, thumbnailsDir: getThumbnailsDir() },
+      `${collection}/${filename}`,
+    ).catch(() => undefined)
   })
 
   // Directory utilities for settings
