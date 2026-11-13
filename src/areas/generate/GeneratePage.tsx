@@ -13,16 +13,17 @@ import { meshPathFromUrl } from './meshEditPanel'
 import { commitSculpt, useSculptStore } from './sculpt/sculptStore'
 import { sculptKeyAction } from './sculpt/sculptLogic'
 import { getDefaultAssetLibraryService } from './assetLibraryService'
+import { requestLibraryThumbnails } from '@shared/thumbnails/assetThumbnailService'
 import { buildOrcaSlicerDeepLink, canOpenInOrcaSlicer } from './orcaSlicerLink'
-import { resolveAssetLibraryOpenTarget, type ProjectedAssetLibraryEntry } from './assetLibraryProjection'
+import type { ProjectedAssetLibraryEntry } from './assetLibraryProjection'
+import { useNavStore } from '@shared/stores/navStore'
 import {
   ASSET_LIBRARY_SORT_OPTIONS,
-  buildAssetLibraryOpenRequest,
-  createAssetLibraryOpenJob,
   describeAssetLibraryOpenability,
   filterAssetLibraryScopeGroups,
   getDefaultAssetLibraryCollapsedSectionKeys,
   isAssetLibraryEntryOpenable,
+  openAssetLibraryEntry,
   resolveOpenPanelAfterLibrarySelection,
   toggleAssetLibrarySectionKey,
   type AssetLibrarySortMode,
@@ -480,6 +481,7 @@ function AssetLibraryPopover({
   onOpenSelected,
   onRefresh,
   onClose,
+  onOpenLibraryPage,
 }: {
   entries: ProjectedAssetLibraryEntry[]
   selectedEntryId: string | null
@@ -496,6 +498,7 @@ function AssetLibraryPopover({
   onOpenSelected: () => void
   onRefresh: () => void
   onClose: () => void
+  onOpenLibraryPage: () => void
 }) {
   const scopeGroups = filterAssetLibraryScopeGroups(entries, searchQuery, sortMode)
   const visibleEntryIds = new Set(scopeGroups.flatMap((scopeGroup) => scopeGroup.entryGroups.flatMap((group) => group.entries.map((entry) => entry.id))))
@@ -524,11 +527,22 @@ function AssetLibraryPopover({
         <button
           type="button"
           onClick={onClose}
-          className="px-2 py-1 text-[11px] text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 rounded-lg transition-colors"
+          className="shrink-0 px-2 py-1 text-[11px] text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 rounded-lg transition-colors"
         >
           Close library
         </button>
       </div>
+
+      <button
+        type="button"
+        onClick={onOpenLibraryPage}
+        className="self-start inline-flex items-center gap-1 text-[11px] font-medium text-accent-light hover:text-violet-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 rounded"
+      >
+        Open Library
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M5 12h14M13 6l6 6-6 6" />
+        </svg>
+      </button>
 
       <button
         type="button"
@@ -708,6 +722,7 @@ export default function GeneratePage(): JSX.Element {
   const redoSteps = useAppStore((s) => redoDepth(s.meshHistory))
   const { optimizeMesh, smoothMesh, importMesh } = useApi()
   const assetLibraryService = useMemo(() => getDefaultAssetLibraryService(), [])
+  const navigate = useNavStore((s) => s.navigate)
 
   const sculpting = useSculptStore((s) => s.active)
 
@@ -886,6 +901,7 @@ export default function GeneratePage(): JSX.Element {
         return
       }
       setLibraryEntries(result.entries)
+      void requestLibraryThumbnails(result.entries)
       setLibrarySelectedEntryId((current) => current && result.entries.some((entry) => entry.id === current)
         ? current
         : result.entries.find(isAssetLibraryEntryOpenable)?.id ?? result.entries[0]?.id ?? null)
@@ -915,21 +931,15 @@ export default function GeneratePage(): JSX.Element {
     setLibraryOpening(true)
     setLibraryError(null)
     try {
-      const result = await assetLibraryService.open(buildAssetLibraryOpenRequest(selectedEntry))
+      const result = await openAssetLibraryEntry(assetLibraryService, selectedEntry)
       if (!result.success) {
-        setLibraryError(result.error.message)
-        return
-      }
-      const target = resolveAssetLibraryOpenTarget(result.entry)
-      const selection = createAssetLibraryOpenJob(result.entry, target)
-      if (!selection) {
-        setLibraryError(describeAssetLibraryOpenability(result.entry))
+        setLibraryError(result.message)
         return
       }
       setLibraryEntries((currentEntries) => currentEntries.map((entry) => entry.id === result.entry.id ? result.entry : entry))
       setLibrarySelectedEntryId(result.entry.id)
-      setCurrentJob(selection.job)
-      pushMeshUrl(selection.historyUrl)
+      setCurrentJob(result.selection.job)
+      pushMeshUrl(result.selection.historyUrl)
       setOpenPanel((currentPanel) => resolveOpenPanelAfterLibrarySelection(currentPanel))
     } catch (err) {
       setLibraryError(err instanceof Error ? err.message : String(err))
@@ -1125,6 +1135,7 @@ export default function GeneratePage(): JSX.Element {
                 onOpenSelected={() => { void handleOpenSelectedLibraryEntry() }}
                 onRefresh={() => { void loadLibraryEntries() }}
                 onClose={() => setOpenPanel(null)}
+                onOpenLibraryPage={() => navigate('library')}
               />
             )}
           </div>

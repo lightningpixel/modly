@@ -7,6 +7,9 @@ import type {
   AssetLibraryOpenResult,
   AssetLibraryReadRequest,
   AssetLibraryReadResult,
+  AssetThumbnailSaveRequest,
+  AssetThumbnailSaveResult,
+  AssetThumbnailStatusResult,
 } from './assetLibrary'
 import type { Conversation, ConversationSummary } from '../utils/agentConversations'
 
@@ -312,6 +315,10 @@ declare global {
           list: () => Promise<AssetLibraryListResult>
           read: (request: AssetLibraryReadRequest) => Promise<AssetLibraryReadResult>
           open: (request: AssetLibraryOpenRequest) => Promise<AssetLibraryOpenResult>
+        }
+        thumbnails: {
+          status: (workspacePath: string) => Promise<AssetThumbnailStatusResult>
+          save: (request: AssetThumbnailSaveRequest) => Promise<AssetThumbnailSaveResult>
         }
       }
       setup: {
