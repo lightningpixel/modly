@@ -98,6 +98,22 @@ test('a version that failed to render is not retried until the file changes', as
   assert.equal(renders.length, 2)
 })
 
+test('reports each thumbnail once per processed request, and nothing for failures', async () => {
+  const { deps } = fakeDeps({ cached: new Set(['Workflows/cached.glb']) })
+  const ready: Array<[string, string]> = []
+  const queue = createAssetThumbnailQueue({ ...deps, onReady: (path, url) => { ready.push([path, url]) } })
+  await Promise.all([queue.ensure('Workflows/a.glb'), queue.ensure('Workflows/a.glb'), queue.ensure('Workflows/cached.glb')])
+  assert.deepEqual(ready, [
+    ['Workflows/a.glb', 'modly-thumb://thumbnails/Workflows/a.glb'],
+    ['Workflows/cached.glb', 'modly-thumb://thumbnails/Workflows/cached.glb'],
+  ])
+
+  const failing = fakeDeps({ renderFails: true })
+  const silent: string[] = []
+  await createAssetThumbnailQueue({ ...failing.deps, onReady: (path) => { silent.push(path) } }).ensure('Workflows/broken.glb')
+  assert.deepEqual(silent, [])
+})
+
 test('a stale save is retried on the next request', async () => {
   let stale = true
   const { deps, renders } = fakeDeps({

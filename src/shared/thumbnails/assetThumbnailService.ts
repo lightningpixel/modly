@@ -7,6 +7,7 @@ import {
   workspacePathFromMeshUrl,
   type AssetThumbnailQueue,
 } from './assetThumbnailQueue'
+import { useAssetThumbnailStore } from './assetThumbnailStore'
 
 // Pause between renders so a large backfill never monopolises the UI thread.
 const RENDER_SPACING_MS = 100
@@ -28,6 +29,7 @@ function getQueue(): AssetThumbnailQueue {
       return renderMeshThumbnail(meshUrlForWorkspacePath(useAppStore.getState().apiUrl, workspacePath))
     },
     onIdle: () => { void renderModule?.then((module) => module.releaseThumbnailRenderer()) },
+    onReady: (workspacePath, thumbnailUrl) => useAssetThumbnailStore.getState().setThumbnailUrl(workspacePath, thumbnailUrl),
   })
   return queue
 }

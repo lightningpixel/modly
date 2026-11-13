@@ -12,6 +12,8 @@ export interface AssetThumbnailQueueDeps {
   render: (workspacePath: string) => Promise<Uint8Array>
   /** Called whenever the queue drains, e.g. to release the offscreen GL context. */
   onIdle?: () => void
+  /** Called once per processed request that ends with a thumbnail, so open views can show it. */
+  onReady?: (workspacePath: string, thumbnailUrl: string) => void
 }
 
 /** `/workspace/<path>` mesh URLs (what generation, import and edits push) → workspace path, for .glb/.gltf only. */
@@ -71,6 +73,10 @@ export function createAssetThumbnailQueue(deps: AssetThumbnailQueueDeps) {
     if (existing) return existing
     const job = tail
       .then(() => run(workspacePath))
+      .then((thumbnailUrl) => {
+        if (thumbnailUrl) deps.onReady?.(workspacePath, thumbnailUrl)
+        return thumbnailUrl
+      })
       .catch(() => null)
       .finally(() => {
         inFlight.delete(workspacePath)
