@@ -1,6 +1,7 @@
 import type { GenerationJob } from '../../shared/stores/appStore'
 import type { AssetLibraryOpenRequest } from '../../shared/types/assetLibrary'
 import { resolveAssetLibraryOpenTarget, type AssetLibraryOpenTarget, type ProjectedAssetLibraryEntry } from './assetLibraryProjection'
+import type { ProjectedAssetLibraryOpenResult } from './assetLibraryService'
 
 export type GenerateOpenPanel = 'export' | 'decimate' | 'smooth' | 'import' | 'library' | 'light' | null
 export type AssetLibrarySortMode = 'type' | 'name' | 'date'
@@ -24,7 +25,7 @@ export interface AssetLibraryOpenSelection {
   job: GenerationJob
 }
 
-const ASSET_LIBRARY_CAPABILITY_SECTIONS = [
+export const ASSET_LIBRARY_CAPABILITY_SECTIONS = [
   { capability: 'mesh', label: 'Mesh' },
   { capability: 'rigged-mesh', label: 'Rigged mesh' },
   { capability: 'animation-motion', label: 'Animations/motions' },
@@ -33,7 +34,7 @@ const ASSET_LIBRARY_CAPABILITY_SECTIONS = [
   { capability: 'scene-manifest', label: 'Scene manifests' },
 ] as const satisfies ReadonlyArray<{ capability: NonNullable<ProjectedAssetLibraryEntry['capability']>, label: string }>
 
-const ASSET_LIBRARY_SOURCE_SCOPE_SECTIONS = [
+export const ASSET_LIBRARY_SOURCE_SCOPE_SECTIONS = [
   { sourceScope: 'workflows', label: 'Workflows' },
   { sourceScope: 'exports', label: 'Exports' },
 ] as const satisfies ReadonlyArray<{ sourceScope: ProjectedAssetLibraryEntry['sourceScope'], label: string }>
@@ -164,11 +165,33 @@ export function createAssetLibraryOpenJob(
   }
 }
 
+export type AssetLibraryOpenOutcome =
+  | { success: true, entry: ProjectedAssetLibraryEntry, selection: AssetLibraryOpenSelection }
+  | { success: false, message: string }
+
+/**
+ * Opens a library entry for the Generate viewer: checks it is openable, asks
+ * the main process to open it, and builds the viewer job. The caller applies
+ * `selection` (setCurrentJob + pushMeshUrl), from Generate or another page.
+ */
+export async function openAssetLibraryEntry(
+  service: { open: (request: AssetLibraryOpenRequest) => Promise<ProjectedAssetLibraryOpenResult> },
+  entry: ProjectedAssetLibraryEntry,
+  now = Date.now(),
+): Promise<AssetLibraryOpenOutcome> {
+  if (!isAssetLibraryEntryOpenable(entry)) return { success: false, message: describeAssetLibraryOpenability(entry) }
+  const result = await service.open(buildAssetLibraryOpenRequest(entry))
+  if (!result.success) return { success: false, message: result.error.message }
+  const selection = createAssetLibraryOpenJob(result.entry, resolveAssetLibraryOpenTarget(result.entry), now)
+  if (!selection) return { success: false, message: describeAssetLibraryOpenability(result.entry) }
+  return { success: true, entry: result.entry, selection }
+}
+
 export function resolveOpenPanelAfterLibrarySelection(currentPanel: GenerateOpenPanel): GenerateOpenPanel {
   return currentPanel === 'library' ? 'library' : currentPanel
 }
 
-function sortAssetLibraryEntries(
+export function sortAssetLibraryEntries(
   entries: ProjectedAssetLibraryEntry[],
   sortMode: AssetLibrarySortMode,
 ): ProjectedAssetLibraryEntry[] {
