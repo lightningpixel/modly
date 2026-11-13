@@ -20,8 +20,16 @@ async def lifespan(app: FastAPI):
     # Startup: initialize the registry (instantiates all adapters)
     from services.generator_registry import generator_registry
     generator_registry.initialize()
+    # Persisted run history at the workspace root; read per call so a relocated
+    # workspace is followed. Loading marks runs a previous backend left running as
+    # interrupted.
+    import services.generator_registry as registry
+    from services.run_history import RUN_HISTORY_FILENAME, run_history
+    run_history.start(lambda: registry.WORKSPACE_DIR / RUN_HISTORY_FILENAME)
     yield
-    # Shutdown: unload all models and stop the local LLM server
+    # Shutdown: runs still in flight will never finish
+    run_history.stop()
+    # Unload all models and stop the local LLM server
     generator_registry.unload_all()
     from services.llm_server import llama_pool
     llama_pool.unload_all(force=True)

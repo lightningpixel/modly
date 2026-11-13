@@ -1,6 +1,7 @@
 import hashlib
 import os
 import tempfile
+import time
 import uuid
 from contextlib import contextmanager
 
@@ -26,6 +27,8 @@ from services.mesh_ops import (
 )
 from services.mesh_ops.glb_patch import GlbPatchError, VertexPatch, patch_glb_file
 from services.mesh_ops.transforms import apply_transforms, transform_file
+from schemas.runs import RunRecord
+from services.run_history import run_history, workspace_relative
 
 router = APIRouter(tags=["optimize"])
 
@@ -131,8 +134,43 @@ def _run_operation(
     preserve_visuals: bool = False,
 ) -> MeshOpResult:
     context = _operation_context(output_path, preserve_visuals)
-    with _mesh_op_http_errors():
-        return mesh_ops_registry.run(operation_id, input_path, params, context)
+    started_at = time.time()
+    try:
+        with _mesh_op_http_errors():
+            result = mesh_ops_registry.run(operation_id, input_path, params, context)
+    except HTTPException as exc:
+        _record_mesh_op(operation_id, input_path, params, started_at, error=str(exc.detail))
+        raise
+    # Analysis ops (inspect_mesh, suggest_fixes) only report: the viewer calls them on
+    # every selection, and they would crowd real runs out of the capped history.
+    if result.file_path is not None:
+        _record_mesh_op(operation_id, input_path, params, started_at, output=result.file_path)
+    return result
+
+
+def _record_mesh_op(
+    operation_id: str,
+    input_path: Path,
+    params: dict[str, object],
+    started_at: float,
+    output: Path | None = None,
+    error: str | None = None,
+) -> None:
+    """Persist a synchronous mesh op in run history (services.run_history)."""
+    workspace = registry.WORKSPACE_DIR
+    run_history.save(RunRecord(
+        id=str(uuid.uuid4()),
+        kind="mesh_op",
+        op_id=operation_id,
+        status="error" if error is not None else "done",
+        inputs={"mesh": workspace_relative(input_path, workspace)},
+        params=dict(params),
+        error=error,
+        output_path=workspace_relative(output, workspace) if output is not None else None,
+        created_at=started_at,
+        started_at=started_at,
+        ended_at=time.time(),
+    ))
 
 
 def _operation_response(result: MeshOpResult) -> dict[str, object]:

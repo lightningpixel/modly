@@ -1,9 +1,10 @@
 import json
 import threading
+import time
 import uuid
-from typing import Optional
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel
+from typing import Any, Optional
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile
+from pydantic import BaseModel, Field
 
 from routers.generation import (
     VALID_REMESH_MODES,
@@ -12,10 +13,13 @@ from routers.generation import (
     _purge_old_jobs,
     _run_generation,
     cancel_job,
+    record_job_filed,
     sanitize_collection,
 )
 from schemas.generation import JobStatus
+from schemas.runs import RunRecord, RunRecordPage, RunStatusValue, RunStep, RunKind
 from services.generator_registry import generator_registry
+from services.run_history import run_history
 
 router = APIRouter(tags=["workflow-runs"])
 
@@ -28,6 +32,55 @@ class WorkflowRunStatus(BaseModel):
     output_url: Optional[str] = None
     error: Optional[str] = None
     scene_candidate: Optional[dict] = None
+
+
+class WorkflowRunRecordIn(BaseModel):
+    """A workflow run's record as the renderer, which executes workflows, reports it."""
+    workflow_id: Optional[str] = None
+    workflow_name: Optional[str] = None
+    status: RunStatusValue
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    params: dict[str, Any] = Field(default_factory=dict)
+    steps: list[RunStep] = Field(default_factory=list)
+    error: Optional[str] = None
+    output_path: Optional[str] = None
+    created_at: Optional[float] = None
+    started_at: Optional[float] = None
+    ended_at: Optional[float] = None
+
+
+MAX_PAGE = 200
+
+
+@router.get("", response_model=RunRecordPage)
+async def list_runs(
+    status: Optional[list[RunStatusValue]] = Query(None),
+    kind: Optional[list[RunKind]] = Query(None),
+    limit: int = Query(50, ge=1, le=MAX_PAGE),
+    offset: int = Query(0, ge=0),
+):
+    """Persisted run history, newest first. ``status``/``kind`` may repeat to match any."""
+    runs, total = run_history.list(statuses=status, kinds=kind, limit=limit, offset=offset)
+    return RunRecordPage(runs=runs, total=total, limit=limit, offset=offset)
+
+
+@router.put("/{run_id}", response_model=RunRecord)
+async def put_workflow_run_record(run_id: str, body: WorkflowRunRecordIn):
+    """Insert or replace the history record of a renderer-driven workflow run."""
+    if not run_id or len(run_id) > 200:
+        raise HTTPException(400, "Invalid run id")
+    existing = run_history.get(run_id)
+    if existing is not None and existing.kind != "workflow":
+        raise HTTPException(409, f"Run {run_id} is not a workflow run")
+    record = RunRecord(
+        id=run_id,
+        kind="workflow",
+        created_at=body.created_at
+        or (existing.created_at if existing is not None else time.time()),
+        **body.model_dump(exclude={"created_at"}),
+    )
+    run_history.save(record)
+    return record
 
 
 @router.post("/from-image")
@@ -93,6 +146,7 @@ async def create_run_from_image(
 
     _jobs[job_id] = JobStatus(job_id=job_id, status="pending", progress=0)
     _cancel_events[job_id] = threading.Event()
+    record_job_filed(job_id, model_id, {"image": image.filename}, full_params, collection)
 
     background_tasks.add_task(
         _run_generation, job_id, image_bytes, full_params, collection, output_kind, model_id
@@ -105,7 +159,22 @@ async def create_run_from_image(
 async def get_run(run_id: str):
     job = _jobs.get(run_id)
     if not job:
-        raise HTTPException(404, f"Run {run_id} not found")
+        # Purged from the live table (or from before a restart): answer from history.
+        record = run_history.get(run_id)
+        if record is None:
+            raise HTTPException(404, f"Run {run_id} not found")
+        output_url = f"/workspace/{record.output_path}" if (
+            record.output_path and record.status == "done"
+            and not record.output_path.startswith("/") and ":" not in record.output_path
+        ) else None
+        return WorkflowRunStatus(
+            run_id=record.id,
+            status=record.status,
+            progress=100 if record.status == "done" else 0,
+            output_url=output_url,
+            error=record.error,
+            scene_candidate={"workspace_path": record.output_path} if output_url else None,
+        )
 
     scene_candidate = None
     if job.status == "done" and job.output_url:
