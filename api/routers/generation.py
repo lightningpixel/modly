@@ -17,6 +17,7 @@ import re as _re
 import services.generator_registry as registry
 from services.generator_registry import generator_registry
 from schemas.generation import GenerateFromArtifactRequest, JobStatus
+from services.run_history import run_history
 from services.artifact_input import (
     RESERVED_ARTIFACT_PARAMS,
     TypedArtifactInput,
@@ -54,6 +55,30 @@ def _purge_old_jobs() -> None:
         _cancel_events.pop(jid, None)
         _job_generators.pop(jid, None)
         _completed_at.pop(jid, None)
+
+
+def record_job_filed(
+    job_id: str,
+    model_id: str,
+    inputs: dict,
+    params: dict,
+    collection: str,
+) -> None:
+    """File the persisted history record of a generation job (see services.run_history)."""
+    run_history.begin(
+        job_id, "generation", model_id=model_id, inputs=inputs,
+        params={**params, "collection": collection},
+    )
+
+
+def _record_job_end(job_id: str) -> None:
+    """Copy a job's final state into its history record once its worker returned."""
+    job = _jobs.get(job_id)
+    if job is None or job.status not in ("done", "error", "cancelled"):
+        run_history.finish(job_id, "error", error="Generation ended without a final status")
+        return
+    output_path = job.output_url.removeprefix("/workspace/") if job.output_url else None
+    run_history.finish(job_id, job.status, error=job.error, output_path=output_path)
 
 
 def sanitize_collection(collection: str) -> str:
@@ -146,6 +171,8 @@ async def generate_from_image(
     _jobs[job_id] = job
     _cancel_events[job_id] = threading.Event()
 
+    record_job_filed(job_id, model_id, {"image": image.filename}, full_params, collection)
+
     background_tasks.add_task(
         _run_generation, job_id, image_bytes, full_params, collection, output_kind, model_id
     )
@@ -172,9 +199,12 @@ async def generate_from_artifact(
         raise HTTPException(400, str(exc)) from exc
 
     params = {k: v for k, v in request.params.items() if k not in RESERVED_ARTIFACT_PARAMS}
-    params["scene_manifest_path"] = str(artifact.path)
     collection = sanitize_collection(request.collection)
     job_id = str(uuid.uuid4())
+    record_job_filed(
+        job_id, request.model_id, {request.input_kind: request.input_path}, params, collection
+    )
+    params["scene_manifest_path"] = str(artifact.path)
     _purge_old_jobs()
     _jobs[job_id] = JobStatus(job_id=job_id, status="pending", progress=0)
     _cancel_events[job_id] = threading.Event()
@@ -207,6 +237,7 @@ async def cancel_job(job_id: str):
         _cancel_events[job_id].set()
     job.status = "cancelled"
     _completed_at[job_id] = time.monotonic()
+    run_history.finish(job_id, "cancelled")
     # Kill only the subprocess bound to this job. A queued cancellation must not
     # terminate whichever earlier job currently owns the active generator, and an
     # unpinned job runs beside the pinned worker, so it can share its generator:
@@ -274,6 +305,8 @@ async def _run_generation(
             job.status = "cancelled"
             _completed_at[job_id] = time.monotonic()
         raise
+    finally:
+        _record_job_end(job_id)
 
 
 def _run_generation_impl(
@@ -289,6 +322,7 @@ def _run_generation_impl(
     job = _jobs[job_id]
     job.status = "running"
     job.step = None
+    run_history.mark_running(job_id)
 
     def progress_cb(pct: int, step: str = "") -> None:
         # Monotonic: the loading phase walks the bar up on a background thread and
@@ -298,6 +332,7 @@ def _run_generation_impl(
             job.progress = pct
         if step:
             job.step = step
+            run_history.step(job_id, step)
 
     try:
         # Refuse a selected weight variant that is not installed before loading

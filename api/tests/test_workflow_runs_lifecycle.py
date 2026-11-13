@@ -18,6 +18,8 @@ from schemas.generation import JobStatus
 class _FakeUpload:
     """Minimal UploadFile stand-in: an image content-type and readable bytes."""
 
+    filename = "input.png"
+
     def __init__(self, content_type: str = "image/png", data: bytes = b"\x89PNG\r\n") -> None:
         self.content_type = content_type
         self._data = data
