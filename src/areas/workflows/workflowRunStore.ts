@@ -9,6 +9,12 @@ import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
 import { isBranchStarter, isSceneOutput, resolveDataSource, reachesSceneOutput, nearestUpstreamWaits } from './nodeBehaviors'
 import { assignSlotFilePaths } from './slotInputs'
 import type { SlotInputType } from './slotInputs'
+import {
+  endRecordStep, finishWorkflowRunRecord, isTerminalRunStatus, newWorkflowRunRecord,
+  reopenWorkflowRunRecord, runOutputPath, startRecordStep,
+} from './workflowRunRecord'
+import type { WorkflowRunRecord } from './workflowRunRecord'
+import type { RunStatus } from '@shared/types/runs'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -41,6 +47,44 @@ const _pauseRequested = { current: false }
 // Live node params — the UI pushes edits here so a looping/paused run re-reads the
 // latest values when a body node starts (instead of the snapshot from run start).
 const _liveParams  = { current: new Map<string, Record<string, unknown>>() }
+
+// ─── Run history ──────────────────────────────────────────────────────────────
+// The run's persisted record (GET /workflow-runs lists it). Every change is PUT to
+// the backend; the PUTs are chained so a slow early write can never land after —
+// and overwrite — the final status.
+
+const _record = { current: null as WorkflowRunRecord | null }
+let _recordWrites: Promise<void> = Promise.resolve()
+
+function nowSeconds(): number {
+  return Date.now() / 1000
+}
+
+function updateRecord(fn: (record: WorkflowRunRecord) => WorkflowRunRecord): void {
+  if (!_record.current) return
+  const record = fn(_record.current)
+  _record.current = record
+  const { id, ...body } = record
+  const apiUrl = useAppStore.getState().apiUrl
+  _recordWrites = _recordWrites
+    .then(() => axios.put(`${apiUrl}/workflow-runs/${encodeURIComponent(id)}`, body))
+    .then(() => undefined, (err) => { console.warn('[workflows] Could not save run history:', err) })
+}
+
+function finishRecord(status: RunStatus, outcome?: { error?: string; outputPath?: string }): void {
+  if (!_record.current || isTerminalRunStatus(_record.current.status)) return
+  updateRecord((r) => finishWorkflowRunRecord(r, status, nowSeconds(), outcome))
+}
+
+function recordStepStart(node: WFNode, allExtensions: WorkflowExtension[]): void {
+  const name = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)?.name
+    ?? node.data.extensionId ?? node.type
+  updateRecord((r) => startRecordStep(r, name, node.id, nowSeconds()))
+}
+
+function recordStepEnd(status: RunStatus): void {
+  updateRecord((r) => endRecordStep(r, status, nowSeconds()))
+}
 
 function flushResume(): void {
   const fn = _resume.current
@@ -644,6 +688,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
       },
     }))
     useAppStore.getState().updateCurrentJob({ status: 'done', progress: 100, outputUrl })
+    finishRecord('done', { outputPath: runOutputPath(outputUrl, outputPath) })
     void showCompletionNotification('Workflow run complete')
   }
 
@@ -666,6 +711,16 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
       const appState = useAppStore.getState()
       const apiUrl   = appState.apiUrl
 
+      // A previous run still parked on its Wait branches is abandoned by this one.
+      finishRecord('cancelled')
+      _record.current = newWorkflowRunRecord(
+        crypto.randomUUID(),
+        workflow,
+        overrideImageData ? { image: '(attached image)' } : appState.selectedImagePath ? { image: appState.selectedImagePath } : {},
+        nowSeconds(),
+      )
+      updateRecord((r) => r)
+
       const { preExecExtNodes, branches, waitIds, parentWait, ordered } = identifyBranches(workflow)
       const branchSteps = waitIds.reduce((acc, w) => acc + (branches.get(w)?.length ?? 0), 0)
 
@@ -680,6 +735,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
         const dir = (w.data.params?.dir as string | undefined)?.trim()
         const fail = (msg: string, step: string): void => {
           set((s) => ({ runState: { ...s.runState, status: 'error', error: msg, blockStep: step }, activeNodeId: null }))
+          finishRecord('error', { error: msg })
         }
         if (!dir) { fail('For Each: pick a folder first', 'No folder selected'); return }
         try {
@@ -951,7 +1007,9 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
             activeNodeId: node.id,
             runState: { ...s.runState, blockIndex: stepsDone, blockProgress: 0, blockStep: 'Starting…' },
           }))
+          recordStepStart(node, allExtensions)
           await executeExtensionNode(node, ctx, setRunState)
+          recordStepEnd('done')
           stepsDone++
 
           const jump = await handleLoopEnd(i)
@@ -972,6 +1030,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
       } catch (err) {
         if (!_cancel.current) {
           set((s) => ({ runState: { ...s.runState, status: 'error', error: String(err) }, activeNodeId: null }))
+          finishRecord('error', { error: String(err) })
           useAppStore.getState().updateCurrentJob({ status: 'error', error: String(err) })
           void showRunErrorNotification({ title: 'Workflow run failed', name: workflow.name, error: err })
         }
@@ -1000,6 +1059,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
       const descendants = descendantWaits(waitId, ctx)
 
       _cancel.current = false
+      updateRecord(reopenWorkflowRunRecord)
 
       // Reset outputs for this branch's nodes so Retry re-executes cleanly.
       for (const node of branch) ctx.nodeOutputs.delete(node.id)
@@ -1040,6 +1100,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
         if (allFinished && !anyError) {
           finalize(ctx, newWaitStates)
         } else {
+          if (allFinished) finishRecord('error', { error: err ?? get().runState.error })
           set((s) => ({
             activeNodeId:    null,
             runningBranchId: null,
@@ -1062,15 +1123,19 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
             activeNodeId: node.id,
             runState: { ...s.runState, blockIndex: i, blockProgress: 0, blockStep: 'Starting…' },
           }))
+          recordStepStart(node, ctx.allExtensions)
           await executeExtensionNode(node, ctx, setRunState)
+          recordStepEnd('done')
         }
         finishBranch('done')
       } catch (err) {
+        if (!_cancel.current) recordStepEnd('error')
         finishBranch('error', String(err))
       }
     },
 
     cancel() {
+      finishRecord('cancelled')
       _cancel.current = true
       _pauseRequested.current = false
       flushResume()   // unblock a manual While pause so the run can tear down
@@ -1085,6 +1150,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
     },
 
     reset() {
+      finishRecord('cancelled')
       _ctx.current = null
       set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null, nodeImageOutputs: {}, waitStates: {}, runningBranchId: null, whileProgress: {}, pausedGroup: [] })
     },
