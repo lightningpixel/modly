@@ -21,6 +21,7 @@ export interface InstallManifest {
     id?: string
     input?: unknown
     inputs?: unknown
+    input_labels?: unknown
     output?: unknown
     hf_repo?: unknown
     model_sources?: unknown
@@ -41,6 +42,54 @@ export interface ExtensionReloadPayload {
   reloaded: true
   models: string[]
   errors: Record<string, string>
+}
+
+export interface NormalizedNodeInputs {
+  /** One type name per input slot, or undefined for a single-input node. */
+  inputs?: string[]
+  /** Display label per slot: explicit `input_labels`, else the objects' labels. */
+  inputLabels?: string[]
+  /** Set only when at least one slot is optional; true means required. */
+  inputsRequired?: boolean[]
+}
+
+/**
+ * A manifest may declare `inputs` as type names (`["image", "text"]`) or as
+ * slot objects (`[{ "type": "image", "label": "Front", "required": false }]`).
+ * Everything downstream compares slots against type names, so objects are
+ * reduced to their type here and their label/required carried separately.
+ */
+export function normalizeNodeInputs(node: { id?: unknown; inputs?: unknown; input_labels?: unknown }): NormalizedNodeInputs {
+  const explicitLabels = Array.isArray(node.input_labels) ? node.input_labels as string[] : undefined
+  if (!Array.isArray(node.inputs)) return { inputLabels: explicitLabels }
+
+  const inputs: string[] = []
+  const labels: (string | undefined)[] = []
+  const required: boolean[] = []
+  node.inputs.forEach((entry: unknown, i: number) => {
+    if (typeof entry === 'string') {
+      inputs.push(entry)
+      labels.push(undefined)
+      required.push(true)
+      return
+    }
+    const slot = entry as { type?: unknown; label?: unknown; name?: unknown; required?: unknown } | null
+    if (!slot || typeof slot !== 'object' || typeof slot.type !== 'string') {
+      throw new Error(`manifest.json: ${String(node.id ?? 'node')} inputs[${i}] must be a type name or an object with a "type"`)
+    }
+    inputs.push(slot.type)
+    labels.push(typeof slot.label === 'string' ? slot.label : typeof slot.name === 'string' ? slot.name : undefined)
+    required.push(slot.required !== false)
+  })
+
+  const derivedLabels = labels.some((label) => label !== undefined)
+    ? labels.map((label, i) => label ?? inputs[i])
+    : undefined
+  return {
+    inputs,
+    inputLabels: explicitLabels ?? derivedLabels,
+    inputsRequired: required.every(Boolean) ? undefined : required,
+  }
 }
 
 export function assertSupportedSceneNodeShape(
@@ -100,7 +149,7 @@ export function validateInstallManifest(
     validateModelNodeIds(manifest.nodes ?? [])
   }
   for (const node of Array.isArray(manifest.nodes) ? manifest.nodes : []) {
-    const declaredInputs = Array.isArray(node.inputs) ? node.inputs : [node.input ?? 'image']
+    const declaredInputs = normalizeNodeInputs(node).inputs ?? [node.input ?? 'image']
     const output = node.output ?? 'mesh'
     assertSupportedSceneNodeShape(isProcess ? 'process' : 'model', node, declaredInputs, output)
     const usesSharedWeights = weightGroups !== undefined || node.weight_groups !== undefined

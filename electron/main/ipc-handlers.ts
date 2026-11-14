@@ -74,6 +74,7 @@ import {
   validateExistingExtensionReplacement,
   validateInstallManifest,
   assertSupportedSceneNodeShape,
+  normalizeNodeInputs,
 } from './extension-install-utils'
 import {
   beginExtensionRegistrationTransaction,
@@ -1225,7 +1226,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       id:                string
       name?:             string
       input?:            string
-      inputs?:           string[]
+      inputs?:           unknown[]   // type names, or { type, label?, required? } slot objects
       input_labels?:     string[]
       output?:           string
       params_schema?:    unknown[]
@@ -1263,7 +1264,8 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       validateModelNodeIds(parsed.nodes ?? [])
     }
     const nodes = (parsed.nodes ?? []).map(n => {
-      const declaredInputs = Array.isArray(n.inputs) ? n.inputs : [n.input ?? 'image']
+      const slots = normalizeNodeInputs(n)
+      const declaredInputs = slots.inputs ?? [n.input ?? 'image']
       const output = n.output ?? 'mesh'
       assertSupportedSceneNodeShape(parsed.type === 'process' ? 'process' : 'model', n, declaredInputs, output)
       const usesManagedWeights = weightGroups !== undefined
@@ -1295,8 +1297,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         id:             nodeId,
         name:           n.name ?? n.id,
         input:          n.input  ?? 'image' as const,
-        inputs:         n.inputs,
-        inputLabels:    n.input_labels,
+        inputs:         slots.inputs,
+        inputLabels:    slots.inputLabels,
+        inputsRequired: slots.inputsRequired,
         output:         n.output ?? 'mesh'  as const,
         paramsSchema:   n.params_schema ?? parsed.params_schema ?? [],
         paramDefaults:  { ...(parsed.param_defaults ?? {}), ...(n.param_defaults ?? {}) },

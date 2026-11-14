@@ -13,6 +13,7 @@ export interface WorkflowExtension {
   input:           'image' | 'text' | 'mesh' | 'audio' | 'scene'
   inputs?:         ('image' | 'text' | 'mesh' | 'audio' | 'scene')[]   // multi-input; overrides input when set
   inputLabels?:    string[]                                  // display labels per input slot
+  inputsRequired?: boolean[]                                 // per slot; absent means all required
   output:          'image' | 'text' | 'mesh' | 'audio' | 'scene'
   params:          ParamSchema[]
   builtin:         boolean
@@ -52,6 +53,7 @@ export function buildAllWorkflowExtensions(
         input:           node.input,
         inputs:          node.inputs,
         inputLabels:     node.inputLabels,
+        inputsRequired:  node.inputsRequired,
         output:          node.output,
         params:          applyParamDefaults(node.paramsSchema as ParamSchema[], node.paramDefaults),
         builtin:         ext.builtin,
@@ -74,6 +76,7 @@ export function buildAllWorkflowExtensions(
         input:           node.input,
         inputs:          node.inputs,
         inputLabels:     node.inputLabels,
+        inputsRequired:  node.inputsRequired,
         output:          node.output,
         params:          applyParamDefaults(node.paramsSchema as ParamSchema[], node.paramDefaults),
         builtin:         ext.builtin,

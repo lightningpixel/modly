@@ -21,6 +21,7 @@ export interface ExtensionNode {
   input:            'image' | 'text' | 'mesh' | 'audio' | 'scene'
   inputs?:          ('image' | 'text' | 'mesh' | 'audio' | 'scene')[]   // multi-input nodes; overrides input when set
   inputLabels?:     string[]   // display labels per input slot (e.g. positive/negative)
+  inputsRequired?:  boolean[]  // per input slot; absent means every slot is required
   output:           'image' | 'text' | 'mesh' | 'audio' | 'scene'
   paramsSchema:     ParamSchema[]
   paramDefaults?:   Record<string, number | string>
