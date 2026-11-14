@@ -14,6 +14,7 @@ import { useWaitButton } from '@areas/workflows/useWaitButton'
 import { buildAllWorkflowExtensions, getWorkflowExtension } from '@areas/workflows/mockExtensions'
 import { validateWorkflowPreflight } from '@areas/workflows/preflight'
 import { mimeFromPath } from '@areas/workflows/nodes/imageUtils'
+import { SUPPORTED_IMAGE_TYPES, useImageHandoff } from '@shared/utils/imageInput'
 import type { WorkflowExtension } from '@areas/workflows/mockExtensions'
 import type { Workflow, WFNode, WFEdge, ParamSchema } from '@shared/types/electron.d'
 import { PICKER_LABELS, openParamPicker, resolvePickerIntent } from '@shared/utils/paramPicker'
@@ -27,8 +28,6 @@ const TYPE_COLOR: Record<string, string> = {
   mesh:  '#a78bfa',
   text:  '#fbbf24',
 }
-
-const SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'])
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -155,6 +154,12 @@ function WorkflowDropdown({ workflows, value, onChange }: {
 
 type PatchFn = (nodeId: string, patch: Record<string, unknown>) => void
 
+/** The image node params for a file on disk: its path and an inline preview. */
+async function readImageParams(path: string): Promise<{ filePath: string, preview: string }> {
+  const base64 = await window.electron.fs.readFileBase64(path)
+  return { filePath: path, preview: `data:${mimeFromPath(path)};base64,${base64}` }
+}
+
 function ImageParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: FlowNode[]; onPatch: PatchFn }) {
   const node     = nodes.find((n) => n.id === nodeId)
   const data     = node?.data as { params: Record<string, unknown> } | undefined
@@ -166,10 +171,9 @@ function ImageParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: Flow
     const request = ++loadRequest.current
     if (!path) return
     try {
-      const base64 = await window.electron.fs.readFileBase64(path)
+      const image = await readImageParams(path)
       if (request !== loadRequest.current) return
-      const src = `data:${mimeFromPath(path)};base64,${base64}`
-      onPatch(nodeId, { params: { ...(data?.params ?? {}), filePath: path, preview: src } })
+      onPatch(nodeId, { params: { ...(data?.params ?? {}), ...image } })
     } catch {
       if (request === loadRequest.current) showToast('Unable to load the selected image')
     }
@@ -518,6 +522,23 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
     (n.type === 'imageNode' || n.type === 'textNode' || n.type === 'meshNode' || n.type === 'extensionNode' || n.type === 'waitNode')
     && (n.data as { showInGenerate?: boolean }).showInGenerate === true,
   )
+
+  // An image handed over by another page (Home) goes into the first image input
+  // shown here, exactly as if it had been browsed in this panel.
+  const pendingImage = useImageHandoff((s) => s.pendingPath)
+  useEffect(() => {
+    const path = useImageHandoff.getState().take()
+    if (!path) return
+    const target = paramNodes.find((n) => n.type === 'imageNode')
+    if (!target) {
+      showToast('This workflow has no image input. Pick a workflow with one.')
+      return
+    }
+    readImageParams(path)
+      .then((image) => patchNode(target.id, { params: { ...(target.data.params ?? {}), ...image } }))
+      .catch(() => showToast('Unable to load the selected image'))
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs when an image is handed over; nodes are read at that point
+  }, [pendingImage])
 
   const handleGenerate = useCallback(() => {
     if (firstPreflightIssue) {

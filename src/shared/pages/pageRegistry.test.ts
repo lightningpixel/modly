@@ -21,6 +21,7 @@ test('the pages keep their ids, labels and sidebar order', () => {
   assert.deepEqual(
     pagesByGroup().map((s) => [s.group, s.pages.map((p) => `${p.id}:${p.label}`)]),
     [
+      ['home', ['home:Home']],
       ['create', ['generate:Generate', 'workflows:Workflows']],
       ['manage', ['library:Library']],
       ['system', ['models:Extensions', 'settings:Settings']],

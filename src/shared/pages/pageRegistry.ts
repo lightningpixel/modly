@@ -31,6 +31,17 @@ export interface PageDefinition {
 
 export const PAGES = [
   {
+    id: 'home',
+    label: 'Home',
+    group: 'home',
+    icon: [
+      ['path', { d: 'M3 10.5 12 3l9 7.5' }],
+      ['path', { d: 'M5 9v10.5a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V9' }],
+    ],
+    load: () => import('@areas/home/HomePage'),
+    wrapperClass: 'flex-1 overflow-y-auto',
+  },
+  {
     id: 'generate',
     label: 'Generate',
     group: 'create',

@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 // Relative and type-only, so the store loads under `node --test`.
 import type { Page } from '../pages/pageRegistry'
+import { readStartPage } from '../pages/startPage'
 
 export type { Page }
 
@@ -18,7 +19,7 @@ interface NavState {
 }
 
 export const useNavStore = create<NavState>((set, get) => ({
-  currentPage: 'generate',
+  currentPage: readStartPage(),
   params: null,
   navigate: (page, params) => set({ currentPage: page, params: params ?? null }),
   openExtension: (extensionId) => get().navigate('models', { extension: extensionId }),
