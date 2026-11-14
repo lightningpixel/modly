@@ -47,6 +47,7 @@ import {
   validateStorageLocation, type StorageKind,
 } from './storage-directory-guard'
 import { checkSetupNeeded, markSetupDone, runFullSetup, getVenvPythonExe, ensureSslPatch } from './python-setup'
+import { extensionChildEnv } from './child-env'
 import { logger } from './logger'
 import { getProcessRunner, getPythonProcessRunner, getExtPythonExe, terminateProcessRunner, terminateAllProcessRunners } from './process-runner'
 import { getBuiltinExtensionsDir } from './builtin-sync'
@@ -144,7 +145,7 @@ function runExtensionSetup(
     const proc = spawn(pythonExe, ['-c', launcher, setupPy, args], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env:   {
-        ...process.env,
+        ...extensionChildEnv(process.env),
         PIP_CACHE_DIR:         pipCacheDir,
         MODLY_TORCH_FLAVOR:    torchFlavor,
         MODLY_TORCH_INDEX_URL: gpu.torchIndexUrl ?? '',
