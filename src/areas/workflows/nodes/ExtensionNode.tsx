@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useLayoutEffect, useState } from 'react'
 import { Handle, Position, useReactFlow } from '@xyflow/react'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
+import { useNavStore } from '@shared/stores/navStore'
 import { buildAllWorkflowExtensions } from '../mockExtensions'
 import type { ParamSchema } from '../mockExtensions'
 import type { WFNodeData } from '@shared/types/electron.d'
 import { PICKER_LABELS, openParamPicker, resolvePickerIntent } from '@shared/utils/paramPicker'
-import { PickerIcon } from '@shared/components/ui'
+import { FloatInput, IntInput, PickerIcon } from '@shared/components/ui'
+import { isMissingWeightVariant, withWeightVariantAvailability } from '@shared/utils/weightVariants'
 import { useWorkflowRunStore } from '../workflowRunStore'
 import BaseNode from './BaseNode'
 
@@ -16,6 +18,7 @@ const HANDLE_COLOR: Record<string, string> = {
   image: '#38bdf8',
   mesh:  '#a78bfa',
   text:  '#fbbf24',
+  scene: '#f472b6',
 }
 
 const TAG_CLS: Record<string, string> = {
@@ -23,6 +26,7 @@ const TAG_CLS: Record<string, string> = {
   image: 'border-sky-500/30 bg-sky-500/10 text-sky-400',
   mesh:  'border-violet-500/30 bg-violet-500/10 text-violet-400',
   text:  'border-amber-500/30 bg-amber-500/10 text-amber-400',
+  scene: 'border-pink-500/30 bg-pink-500/10 text-pink-400',
 }
 
 // ─── Param control ────────────────────────────────────────────────────────────
@@ -31,55 +35,6 @@ const TAG_CLS: Record<string, string> = {
 // these fields, so click-drag text selection (or opening a <select>) moves the
 // node instead.
 const inputCls = 'nodrag w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1 text-[11px] text-zinc-200 focus:outline-none focus:border-accent/60'
-
-function IntInput({ value, onChange, className }: { value: number; onChange: (v: number) => void; className: string }) {
-  const [text, setText] = useState(String(value))
-  const prevValue = useRef(value)
-  if (prevValue.current !== value && parseInt(text, 10) !== value) {
-    prevValue.current = value
-    setText(String(value))
-  }
-  return (
-    <input
-      type="text"
-      inputMode="numeric"
-      value={text}
-      onChange={(e) => {
-        const raw = e.target.value
-        if (raw !== '' && raw !== '-' && !/^-?\d+$/.test(raw)) return
-        setText(raw)
-        const n = parseInt(raw, 10)
-        if (!isNaN(n)) { prevValue.current = n; onChange(n) }
-      }}
-      className={className}
-    />
-  )
-}
-
-function FloatInput({ value, onChange, className }: { value: number; onChange: (v: number) => void; className: string }) {
-  const [text, setText] = useState(String(value))
-  // Sync when external value changes (e.g. reset)
-  const prevValue = useRef(value)
-  if (prevValue.current !== value && parseFloat(text.replace(',', '.')) !== value) {
-    prevValue.current = value
-    setText(String(value))
-  }
-  return (
-    <input
-      type="text"
-      inputMode="decimal"
-      value={text}
-      onChange={(e) => {
-        const raw = e.target.value.replace(',', '.')
-        if (raw !== '' && raw !== '-' && raw !== '.' && !/^-?\d*\.?\d*$/.test(raw)) return
-        setText(e.target.value)
-        const num = parseFloat(raw)
-        if (!isNaN(num)) { prevValue.current = num; onChange(num) }
-      }}
-      className={className}
-    />
-  )
-}
 
 /** Dropdown of the files inside the folder held by another param (dir_from). */
 function FileSelectControl({ param, value, dirValue, onChange }: {
@@ -151,7 +106,8 @@ function ParamControl({ param, value, onChange, resolvedParams }: {
     )
   }
   if (param.type === 'float') {
-    return <FloatInput value={value as number} onChange={(v) => onChange(v)} className={inputCls} />
+    return <FloatInput value={value as number} onChange={(v) => onChange(v)} className={inputCls}
+      min={param.min} max={param.max} step={param.step} label={param.label} />
   }
   // int
   return <IntInput value={value as number} onChange={(v) => onChange(v)} className={inputCls} />
@@ -167,8 +123,10 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
   const [handleTops, setHandleTops] = useState<string[]>([])
 
   const { modelExtensions, processExtensions } = useExtensionsStore()
+  const installedVariants = useExtensionsStore((s) => (data.extensionId ? s.installedWeightVariants[data.extensionId] : undefined))
   const allExtensions = buildAllWorkflowExtensions(modelExtensions, processExtensions)
   const ext = allExtensions.find((e) => e.id === data.extensionId)
+  const openExtension = useNavStore((s) => s.openExtension)
 
   const inputs      = ext?.inputs  // defined → multi-input mode
   const isMulti     = inputs && inputs.length > 1
@@ -313,7 +271,21 @@ export default function ExtensionNode({ id, data, selected }: { id: string; data
                 <div key={param.id} className="flex items-center gap-2">
                   <label className="text-[10px] text-zinc-500 w-24 shrink-0 leading-tight">{param.label}</label>
                   <div className="flex-1">
-                    <ParamControl param={param} value={val} onChange={(v) => patchParam(param.id, v)} resolvedParams={resolvedParams} />
+                    <ParamControl
+                      param={withWeightVariantAvailability(param, ext?.weightVariants, installedVariants)}
+                      value={val}
+                      onChange={(v) => patchParam(param.id, v)}
+                      resolvedParams={resolvedParams}
+                    />
+                    {/* Offer the install instead of leaving the graph on selection. */}
+                    {ext && isMissingWeightVariant(param.id, val, ext.weightVariants, installedVariants) && (
+                      <button
+                        onClick={() => openExtension(ext.extensionId)}
+                        className="nodrag mt-1 text-[10px] text-amber-400 hover:text-amber-300 hover:underline"
+                      >
+                        Not installed — install it
+                      </button>
+                    )}
                   </div>
                 </div>
               )

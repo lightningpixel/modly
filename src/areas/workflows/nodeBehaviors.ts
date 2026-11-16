@@ -23,9 +23,10 @@ export interface NodeBehavior {
 }
 
 const BEHAVIORS: Record<string, NodeBehavior> = {
-  waitNode:      { passthrough: true, branchStarter: true },
-  outputNode:    { sceneOutput: true, branchConsumer: true },
-  extensionNode: { branchConsumer: true },
+  waitNode:         { passthrough: true, branchStarter: true },
+  outputNode:       { sceneOutput: true, branchConsumer: true },
+  extensionNode:    { branchConsumer: true },
+  imagePreviewNode: { passthrough: true },
 }
 
 export const isPassthrough    = (type: string | undefined): boolean => !!type && !!BEHAVIORS[type]?.passthrough

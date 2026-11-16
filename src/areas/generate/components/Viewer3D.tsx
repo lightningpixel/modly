@@ -16,8 +16,10 @@ import SplatViewer, { type SplatViewerHandle } from './SplatViewer'
 import { useGeneration } from '@shared/hooks/useGeneration'
 import { useAppStore } from '@shared/stores/appStore'
 import { ViewerToolbar, type ViewMode } from './ViewerToolbar'
-import type { LightSettings } from '@shared/stores/appStore'
+import type { LightSettings, PointLight } from '@shared/stores/appStore'
 import { DEFAULT_LIGHT_SETTINGS } from '@shared/stores/appStore'
+import SculptLayer from '../sculpt/SculptLayer'
+import { useSculptStore } from '../sculpt/sculptStore'
 
 export type GizmoMode = 'translate' | 'rotate' | 'scale'
 
@@ -62,6 +64,60 @@ function createCheckerTexture(): THREE.CanvasTexture {
   const tex = new THREE.CanvasTexture(canvas)
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping
   return tex
+}
+
+const SELECTION_OUTLINE_COLOR = '#8b5cf6'
+
+function makeLightBulbTexture(color: string, isSelected: boolean): THREE.CanvasTexture {
+  const size = 64
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = size
+  const ctx = canvas.getContext('2d')!
+
+  const cx = size / 2
+  const cy = size / 2
+
+  // Draws the bulb glyph (rays + circle + base). `pad` grows every part by a
+  // few pixels — used to lay down an oversized violet silhouette behind the
+  // normal-sized icon, so the outline hugs the actual glyph shape instead of
+  // being a plain circle around it.
+  const drawGlyph = (fillColor: string, pad: number) => {
+    ctx.strokeStyle = fillColor
+    ctx.lineWidth = 2 + pad * 2
+    ctx.lineCap = 'round'
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2 - Math.PI / 2
+      const r1 = 20 - pad
+      const r2 = 27 + pad
+      ctx.beginPath()
+      ctx.moveTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1)
+      ctx.lineTo(cx + Math.cos(a) * r2, cy + Math.sin(a) * r2)
+      ctx.stroke()
+    }
+
+    ctx.beginPath()
+    ctx.arc(cx, cy - 1, 12 + pad, 0, Math.PI * 2)
+    ctx.fillStyle = fillColor
+    ctx.fill()
+    if (pad === 0) {
+      ctx.strokeStyle = '#ffffff'
+      ctx.lineWidth = 1.5
+      ctx.stroke()
+    }
+
+    ctx.fillStyle = fillColor
+    ctx.fillRect(cx - 4 - pad, cy + 11 - pad, 8 + pad * 2, 8 + pad * 2)
+    if (pad === 0) {
+      ctx.strokeStyle = '#ffffff'
+      ctx.lineWidth = 1
+      ctx.strokeRect(cx - 4, cy + 11, 8, 8)
+    }
+  }
+
+  if (isSelected) drawGlyph(SELECTION_OUTLINE_COLOR, 2.5)
+  drawGlyph(color, 0)
+
+  return new THREE.CanvasTexture(canvas)
 }
 
 // ---------------------------------------------------------------------------
@@ -136,23 +192,32 @@ function ModelLoadError(): JSX.Element {
 
 interface MeshModelProps {
   url: string
+  /** Workspace URL of the file (currentJob.outputUrl): what sculpt commits patch. */
+  outputUrl: string
   jobId: string
   viewMode: ViewMode
   selected: boolean
+  /** Sculpt mode: clicks paint instead of selecting. */
+  sculpting: boolean
   onStats: (stats: { vertices: number; triangles: number }) => void
   onSelect: () => void
   onObject: (obj: THREE.Object3D | null) => void
 }
 
-function MeshModel({ url, jobId, viewMode, selected, onStats, onSelect, onObject }: MeshModelProps): JSX.Element {
-  const extension = url.split('?')[0]?.split('.').pop()?.toLowerCase()
-  const common = { url, jobId, viewMode, selected, onStats, onSelect, onObject }
-  return extension === 'obj' ? <ObjMeshModel {...common} /> : <GltfMeshModel {...common} />
+function MeshModel(props: MeshModelProps): JSX.Element {
+  const extension = props.url.split('?')[0]?.split('.').pop()?.toLowerCase()
+  return extension === 'obj' ? <ObjMeshModel {...props} /> : <GltfMeshModel {...props} />
 }
 
 function GltfMeshModel(props: MeshModelProps): JSX.Element {
-  const { scene } = useGLTF(props.url)
-  return <SceneMeshModel {...props} scene={scene} loaderType="gltf" />
+  const { scene, parser } = useGLTF(props.url)
+  return (
+    <>
+      <SceneMeshModel {...props} scene={scene} loaderType="gltf" />
+      {/* Keyed by URL: a new mesh file starts a new sculpt session. */}
+      <SculptLayer key={props.url} scene={scene} parser={parser} outputUrl={props.outputUrl} />
+    </>
+  )
 }
 
 function ObjMeshModel(props: MeshModelProps): JSX.Element {
@@ -164,6 +229,7 @@ function SceneMeshModel({
   url,
   viewMode,
   selected,
+  sculpting,
   onStats,
   onSelect,
   onObject,
@@ -297,7 +363,7 @@ function SceneMeshModel({
     <Select enabled={selected}>
       <primitive
         object={scene}
-        onClick={(e: { stopPropagation: () => void }) => { e.stopPropagation(); onSelect() }}
+        onClick={(e: { stopPropagation: () => void }) => { e.stopPropagation(); if (!sculpting) onSelect() }}
       />
     </Select>
   )
@@ -785,6 +851,59 @@ function ScaleGizmo({ object, onDragStart, onDragEnd }: { object: THREE.Object3D
 }
 
 // ---------------------------------------------------------------------------
+// PointLightMarker — renders a point light + billboard icon + optional gizmo
+// ---------------------------------------------------------------------------
+
+function PointLightMarker({
+  light,
+  isSelected,
+  gizmoMode,
+  onSelect,
+  onPositionChange,
+}: {
+  light: PointLight
+  isSelected: boolean
+  gizmoMode: GizmoMode | null
+  onSelect: () => void
+  onPositionChange: (pos: [number, number, number]) => void
+}) {
+  const [group, setGroup] = useState<THREE.Group | null>(null)
+  const iconTexture = useMemo(() => makeLightBulbTexture(light.color, isSelected), [light.color, isSelected])
+
+  return (
+    <>
+      <group ref={setGroup} position={light.position}>
+        <pointLight color={light.color} intensity={light.intensity} distance={8} decay={2} />
+        <sprite
+          scale={[0.3, 0.3, 1]}
+          onClick={(e) => { e.stopPropagation(); onSelect() }}
+        >
+          <spriteMaterial map={iconTexture} toneMapped={false} depthTest={false} />
+        </sprite>
+      </group>
+      {group && isSelected && gizmoMode === 'translate' && (
+        <TranslateGizmo
+          object={group}
+          onDragEnd={() => onPositionChange([group.position.x, group.position.y, group.position.z])}
+        />
+      )}
+      {group && isSelected && gizmoMode === 'rotate' && (
+        <RotateGizmo
+          object={group}
+          onDragEnd={() => onPositionChange([group.position.x, group.position.y, group.position.z])}
+        />
+      )}
+      {group && isSelected && gizmoMode === 'scale' && (
+        <ScaleGizmo
+          object={group}
+          onDragEnd={() => onPositionChange([group.position.x, group.position.y, group.position.z])}
+        />
+      )}
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // EmptyState
 // ---------------------------------------------------------------------------
 
@@ -805,7 +924,23 @@ function EmptyState(): JSX.Element {
 
 type TransformSnapshot = { p: THREE.Vector3; q: THREE.Quaternion; s: THREE.Vector3 }
 
-export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmoMode = null, gizmoUndoRef }: { lightSettings?: LightSettings; gizmoMode?: GizmoMode | null; gizmoUndoRef?: MutableRefObject<(() => boolean) | null> }): JSX.Element {
+export default function Viewer3D({
+  lightSettings = DEFAULT_LIGHT_SETTINGS,
+  gizmoMode = null,
+  gizmoUndoRef,
+  pointLights = [],
+  selectedPointLightId = null,
+  onSelectPointLight,
+  onPointLightsChange,
+}: {
+  lightSettings?: LightSettings
+  gizmoMode?: GizmoMode | null
+  gizmoUndoRef?: MutableRefObject<(() => boolean) | null>
+  pointLights?: PointLight[]
+  selectedPointLightId?: string | null
+  onSelectPointLight?: (id: string | null) => void
+  onPointLightsChange?: (lights: PointLight[]) => void
+}): JSX.Element {
   const { currentJob } = useGeneration()
   const apiUrl = useAppStore((s) => s.apiUrl)
 
@@ -821,6 +956,10 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
   const splatRef = useRef<SplatViewerHandle | null>(null)
 
   const [meshObject, setMeshObject] = useState<THREE.Object3D | null>(null)
+
+  const sculpting = useSculptStore((s) => s.active)
+  const sculptStatus = useSculptStore((s) => s.status)
+  const sculptError = useSculptStore((s) => s.error)
 
   // Local gizmo-transform history (live TRS), undoable with Ctrl+Z. A snapshot
   // is taken when a drag starts and committed on release only if it changed.
@@ -846,10 +985,16 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
   // Reset view state when model changes
   useEffect(() => {
     setSelected(false)
-    setViewMode('solid')
+    // A sculpt commit swaps in the patched file: keep the sculptor's view mode.
+    if (!useSculptStore.getState().active) setViewMode('solid')
     setStoreMeshStats(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reset only when the model changes; setters are stable
   }, [modelUrl])
+
+  // Sculpt mode owns the left button: no selection, so no transform gizmo.
+  useEffect(() => {
+    if (sculpting) setSelected(false)
+  }, [sculpting, setSelected])
 
   // Clear the shared selection when the viewer unmounts — the store would
   // otherwise keep it set and flash a stale selection on the next mount.
@@ -860,7 +1005,7 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
     const handler = (e: KeyboardEvent) => {
       if (e.key !== 'Delete') return
       if (document.activeElement instanceof HTMLInputElement) return
-      if (!selected) return
+      if (!selected || useSculptStore.getState().active) return
       setCurrentJob(null)
       setSelected(false)
     }
@@ -868,6 +1013,18 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
     return () => window.removeEventListener('keydown', handler)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- setSelected is a stable store setter
   }, [selected, setCurrentJob])
+
+  // Deselect both mesh and point light when clicking empty space
+  const handlePointerMissed = useCallback(() => {
+    setSelected(false)
+    onSelectPointLight?.(null)
+  }, [setSelected, onSelectPointLight])
+
+  // Select mesh and deselect any selected point light
+  const handleMeshSelect = useCallback(() => {
+    setSelected(true)
+    onSelectPointLight?.(null)
+  }, [setSelected, onSelectPointLight])
 
   const handleScreenshot = () => {
     const dataUrl = isSplat
@@ -963,7 +1120,7 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
         {/* Mesh path → original Canvas, unchanged */}
         {!isSplat && (
         <Canvas
-          onPointerMissed={() => setSelected(false)}
+          onPointerMissed={handlePointerMissed}
           camera={{ position: [0, 1.5, 4], fov: 45 }}
           dpr={[1, 2]}
           gl={{
@@ -991,24 +1148,43 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
                 <directionalLight position={[-4, 2, -4]} color={lightSettings.fillColor} intensity={lightSettings.fillIntensity} />
                 <MeshModel
                   url={modelUrl}
+                  outputUrl={outputUrl}
                   jobId={currentJob.id}
                   viewMode={viewMode}
                   selected={selected}
+                  sculpting={sculpting}
                   onStats={setStoreMeshStats}
-                  onSelect={() => setSelected(true)}
+                  onSelect={handleMeshSelect}
                   onObject={setMeshObject}
                 />
               </Suspense>
             </Selection>
           ) : null}
 
-          {selected && meshObject && gizmoMode === 'translate' && (
+          {/* Point light markers */}
+          {onPointLightsChange && pointLights.map((pl) => (
+            <PointLightMarker
+              key={pl.id}
+              light={pl}
+              isSelected={pl.id === selectedPointLightId}
+              gizmoMode={gizmoMode}
+              onSelect={() => {
+                setSelected(false)
+                onSelectPointLight?.(pl.id)
+              }}
+              onPositionChange={(pos) => {
+                onPointLightsChange!(pointLights.map((p) => p.id === pl.id ? { ...p, position: pos } : p))
+              }}
+            />
+          ))}
+
+          {!sculpting && selected && meshObject && gizmoMode === 'translate' && (
             <TranslateGizmo object={meshObject} onDragStart={handleGizmoDragStart} onDragEnd={handleGizmoDragEnd} />
           )}
-          {selected && meshObject && gizmoMode === 'rotate' && (
+          {!sculpting && selected && meshObject && gizmoMode === 'rotate' && (
             <RotateGizmo object={meshObject} onDragStart={handleGizmoDragStart} onDragEnd={handleGizmoDragEnd} />
           )}
-          {selected && meshObject && gizmoMode === 'scale' && (
+          {!sculpting && selected && meshObject && gizmoMode === 'scale' && (
             <ScaleGizmo object={meshObject} onDragStart={handleGizmoDragStart} onDragEnd={handleGizmoDragEnd} />
           )}
 
@@ -1052,11 +1228,31 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
           </div>
         )}
 
+        {/* Sculpt status: preparing / saving / last error */}
+        {sculpting && (sculptStatus !== 'idle' || sculptError) && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 pointer-events-none">
+            {sculptStatus !== 'idle' ? (
+              <p role="status" className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-900/90 border border-zinc-700/60 text-xs text-zinc-200">
+                <svg className="animate-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                </svg>
+                {sculptStatus === 'preparing' ? 'Preparing mesh…' : 'Saving sculpt…'}
+              </p>
+            ) : (
+              <p role="alert" className="max-w-md px-3 py-1.5 rounded-lg bg-red-950/90 border border-red-500/40 text-xs text-red-200">
+                {sculptError}
+              </p>
+            )}
+          </div>
+        )}
+
         {/* Bottom-right hint */}
         {modelUrl && (
           <div className="absolute bottom-4 right-4 pointer-events-none">
             <p className="text-xs text-zinc-600">
-              {selected
+              {sculpting
+                ? <>Drag on the mesh to sculpt &bull; drag outside to orbit &bull; <span className="text-zinc-500">Esc</span> to finish</>
+                : selected
                 ? <>Click mesh to select &bull; <span className="text-zinc-500">Delete</span> to remove</>
                 : 'Drag to rotate \u2022 Scroll to zoom'
               }

@@ -1,0 +1,169 @@
+[
+  {
+    "id": "qwen3.5-4b",
+    "name": "Qwen 3.5 4B",
+    "description": "Newest small Qwen. Tops independent tool-calling tests for its size and stays fast on modest GPUs.",
+    "hf_repo": "unsloth/Qwen3.5-4B-GGUF",
+    "hf_filename": "Qwen3.5-4B-Q4_K_M.gguf",
+    "size_bytes": 2740937888,
+    "quant": "Q4_K_M",
+    "ctx": 16384,
+    "vram_estimate_mb": 4600,
+    "ngl_suggestion": 99,
+    "tags": [
+      "fast",
+      "4b"
+    ],
+    "sampling": {
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "top_k": 20,
+      "presence_penalty": 1.5
+    }
+  },
+  {
+    "id": "qwen3.5-9b",
+    "name": "Qwen 3.5 9B",
+    "description": "Best balance of reliability and speed on an 8 GB+ GPU. Noticeably steadier than 4B over long conversations.",
+    "hf_repo": "unsloth/Qwen3.5-9B-GGUF",
+    "hf_filename": "Qwen3.5-9B-Q4_K_M.gguf",
+    "size_bytes": 5680522464,
+    "quant": "Q4_K_M",
+    "ctx": 16384,
+    "vram_estimate_mb": 7600,
+    "ngl_suggestion": 99,
+    "tags": [
+      "balanced",
+      "9b"
+    ],
+    "sampling": {
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "top_k": 20,
+      "presence_penalty": 1.5
+    }
+  },
+  {
+    "id": "qwen3-4b",
+    "name": "Qwen 3 4B Instruct",
+    "description": "Latest Qwen generation. Fast, excellent tool-calling for its size — the recommended starting point.",
+    "hf_repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+    "hf_filename": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+    "size_bytes": 2497281120,
+    "quant": "Q4_K_M",
+    "ctx": 16384,
+    "vram_estimate_mb": 4200,
+    "ngl_suggestion": 99,
+    "tags": [
+      "fast",
+      "4b",
+      "default"
+    ]
+  },
+  {
+    "id": "qwen3-8b",
+    "name": "Qwen 3 8B",
+    "description": "Great quality/speed balance with hybrid thinking. Fits in 8 GB VRAM.",
+    "hf_repo": "unsloth/Qwen3-8B-GGUF",
+    "hf_filename": "Qwen3-8B-Q4_K_M.gguf",
+    "size_bytes": 5027784512,
+    "quant": "Q4_K_M",
+    "ctx": 16384,
+    "vram_estimate_mb": 7000,
+    "ngl_suggestion": 99,
+    "tags": [
+      "balanced",
+      "8b",
+      "thinking"
+    ]
+  },
+  {
+    "id": "qwen3-14b",
+    "name": "Qwen 3 14B",
+    "description": "High quality with hybrid thinking (reasons before answering when useful). Needs ~11 GB VRAM.",
+    "hf_repo": "unsloth/Qwen3-14B-GGUF",
+    "hf_filename": "Qwen3-14B-Q4_K_M.gguf",
+    "size_bytes": 9001753984,
+    "quant": "Q4_K_M",
+    "ctx": 16384,
+    "vram_estimate_mb": 11000,
+    "ngl_suggestion": 99,
+    "tags": [
+      "quality",
+      "14b",
+      "thinking"
+    ]
+  },
+  {
+    "id": "gpt-oss-20b",
+    "name": "GPT-OSS 20B (OpenAI)",
+    "description": "OpenAI's open-weight MoE (3.6B active params — fast for its size). Top-tier tool calling and reasoning. Best with 16 GB VRAM.",
+    "hf_repo": "ggml-org/gpt-oss-20b-GGUF",
+    "hf_filename": "gpt-oss-20b-MXFP4.gguf",
+    "size_bytes": 12109566624,
+    "quant": "MXFP4",
+    "ctx": 16384,
+    "vram_estimate_mb": 13500,
+    "ngl_suggestion": 99,
+    "tags": [
+      "quality",
+      "20b",
+      "thinking",
+      "moe"
+    ]
+  },
+  {
+    "id": "qwen3-vl-4b",
+    "name": "Qwen 3 VL 4B (vision, light)",
+    "description": "Small vision model — sees attached images while fitting in ~5 GB VRAM. Pick this over the 8B on smaller GPUs.",
+    "hf_repo": "unsloth/Qwen3-VL-4B-Instruct-GGUF",
+    "hf_filename": "Qwen3-VL-4B-Instruct-Q4_K_M.gguf",
+    "hf_mmproj_filename": "mmproj-F16.gguf",
+    "mmproj_size_bytes": 836180640,
+    "size_bytes": 2497282336,
+    "quant": "Q4_K_M",
+    "ctx": 16384,
+    "vram_estimate_mb": 4600,
+    "ngl_suggestion": 99,
+    "tags": [
+      "vision",
+      "4b",
+      "fast"
+    ]
+  },
+  {
+    "id": "qwen3-vl-8b",
+    "name": "Qwen 3 VL 8B (vision)",
+    "description": "Sees images — the agent can look at attached pictures before picking a workflow. Needs ~8 GB VRAM.",
+    "hf_repo": "unsloth/Qwen3-VL-8B-Instruct-GGUF",
+    "hf_filename": "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+    "hf_mmproj_filename": "mmproj-F16.gguf",
+    "mmproj_size_bytes": 1159030336,
+    "size_bytes": 5027785568,
+    "quant": "Q4_K_M",
+    "ctx": 16384,
+    "vram_estimate_mb": 7800,
+    "ngl_suggestion": 99,
+    "tags": [
+      "vision",
+      "8b"
+    ]
+  },
+  {
+    "id": "cadquery-coder-7b",
+    "name": "CadQuery Coder 7B (CAD-specialized)",
+    "description": "Qwen2.5-Coder-7B fine-tuned on CadQuery generation — best pick for the Text to CAD node. Community model, CC-BY-NC-SA license.",
+    "hf_repo": "yuvit-batra/qwen2.5-coder-7b-cadquery-gguf",
+    "hf_filename": "qwen2.5-coder-7b-cadquery-Q4_K_M.gguf",
+    "size_bytes": 4680000000,
+    "quant": "Q4_K_M",
+    "ctx": 16384,
+    "vram_estimate_mb": 6200,
+    "ngl_suggestion": 99,
+    "tags": [
+      "code",
+      "cad",
+      "7b"
+    ]
+  }
+]

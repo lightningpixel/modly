@@ -1,22 +1,30 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import type { ReactNode } from 'react'
 import { useAppStore, DEFAULT_LIGHT_SETTINGS } from '@shared/stores/appStore'
-import type { GenerationJob, LightSettings } from '@shared/stores/appStore'
+import type { LightSettings, PointLight } from '@shared/stores/appStore'
+import { showImportedMesh } from '@shared/utils/meshJob'
+import { redoDepth, undoDepth } from '@shared/stores/meshHistory'
 import { useApi } from '@shared/hooks/useApi'
 import { ColorPicker } from '@shared/components/ui'
 import GenerationHUD from './components/GenerationHUD'
 import Viewer3D from './components/Viewer3D'
 import WorkflowPanel from './components/WorkflowPanel'
+import EditPanel from './components/EditPanel'
+import { meshPathFromUrl } from './meshEditPanel'
+import { commitSculpt, useSculptStore } from './sculpt/sculptStore'
+import { sculptKeyAction } from './sculpt/sculptLogic'
 import { getDefaultAssetLibraryService } from './assetLibraryService'
-import { resolveAssetLibraryOpenTarget, type ProjectedAssetLibraryEntry } from './assetLibraryProjection'
+import { requestLibraryThumbnails } from '@shared/thumbnails/assetThumbnailService'
+import { buildOrcaSlicerDeepLink, canOpenInOrcaSlicer } from './orcaSlicerLink'
+import type { ProjectedAssetLibraryEntry } from './assetLibraryProjection'
+import { useNavStore } from '@shared/stores/navStore'
 import {
   ASSET_LIBRARY_SORT_OPTIONS,
-  buildAssetLibraryOpenRequest,
-  createAssetLibraryOpenJob,
   describeAssetLibraryOpenability,
   filterAssetLibraryScopeGroups,
   getDefaultAssetLibraryCollapsedSectionKeys,
   isAssetLibraryEntryOpenable,
+  openAssetLibraryEntry,
   resolveOpenPanelAfterLibrarySelection,
   toggleAssetLibrarySectionKey,
   type AssetLibrarySortMode,
@@ -26,6 +34,18 @@ import {
 const MIN_WIDTH = 220
 const MAX_WIDTH = 520
 const DEFAULT_WIDTH = 320
+
+const MAX_POINT_LIGHTS = 6
+
+function createPointLight(): PointLight {
+  const angle = Math.random() * Math.PI * 2
+  return {
+    id: crypto.randomUUID(),
+    position: [Math.cos(angle) * 1.5, 0.5, Math.sin(angle) * 1.5],
+    color: '#ffffff',
+    intensity: 1,
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Export dropdown
@@ -41,9 +61,13 @@ const EXPORT_FORMATS = [
 function ExportDropdown({
   onExport,
   onClose,
+  onOpenInSlicer,
+  canOpenInSlicer,
 }: {
   onExport: (f: 'glb' | 'obj' | 'stl' | 'ply') => void
   onClose: () => void
+  onOpenInSlicer: () => void
+  canOpenInSlicer: boolean
 }) {
   return (
     <div className="absolute top-full left-0 mt-1 z-50 bg-zinc-900 border border-zinc-700/60 rounded-xl p-1 flex flex-col gap-0.5 min-w-[150px] shadow-xl">
@@ -57,6 +81,23 @@ function ExportDropdown({
           <span className="text-[10px] text-zinc-500">{desc}</span>
         </button>
       ))}
+      {canOpenInSlicer && (
+        <>
+          <div className="my-1 h-px bg-zinc-700/60" />
+          <button
+            onClick={() => { onOpenInSlicer(); onClose() }}
+            title="Convert to STL and open in OrcaSlicer"
+            className="px-3 py-2 text-left hover:bg-zinc-800 rounded-lg transition-colors flex items-center gap-2.5"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" className="text-zinc-400 shrink-0">
+              <path d="M15 3h6v6" />
+              <path d="M10 14 21 3" />
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+            </svg>
+            <span className="text-xs text-zinc-200 whitespace-nowrap">Open in OrcaSlicer</span>
+          </button>
+        </>
+      )}
     </div>
   )
 }
@@ -179,10 +220,18 @@ function LightPopover({
   settings,
   onChange,
   onClose,
+  pointLights,
+  onPointLightsChange,
+  selectedPointLightId,
+  onSelectPointLight,
 }: {
   settings: LightSettings
   onChange: (s: LightSettings) => void
   onClose: () => void
+  pointLights: PointLight[]
+  onPointLightsChange: (lights: PointLight[]) => void
+  selectedPointLightId: string | null
+  onSelectPointLight: (id: string | null) => void
 }) {
   function lightRow(
     label: string,
@@ -251,6 +300,64 @@ function LightPopover({
       {lightRow('Fill', 'fillColor', 'fillIntensity', 2)}
       {plainRow('Ambient', 'ambientIntensity', 1.5)}
       {plainRow('Environment', 'envIntensity', 2)}
+
+      {/* ── Point lights ── */}
+      <div className="border-t border-zinc-800 pt-2 mt-1 flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Point lights</p>
+          {pointLights.length < MAX_POINT_LIGHTS && (
+            <button
+              onClick={() => onPointLightsChange([...pointLights, createPointLight()])}
+              className="flex items-center gap-1 py-0.5 px-1.5 rounded text-[10px] text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+              </svg>
+              Add
+            </button>
+          )}
+        </div>
+
+        {pointLights.length === 0 && (
+          <p className="text-[10px] text-zinc-600 italic">No point lights yet.</p>
+        )}
+
+        {pointLights.map((pl) => (
+          <div
+            key={pl.id}
+            onClick={() => onSelectPointLight(pl.id)}
+            className={`flex flex-col gap-1.5 p-2 rounded-lg bg-zinc-800/40 border cursor-pointer transition-colors ${
+              pl.id === selectedPointLightId
+                ? 'border-violet-500'
+                : 'border-zinc-700/40 hover:border-zinc-600'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <ColorPicker
+                value={pl.color}
+                onChange={(c) => onPointLightsChange(pointLights.map((p) => p.id === pl.id ? { ...p, color: c } : p))}
+              />
+              <span className="text-[10px] text-zinc-400 flex-1">Point</span>
+              <span className="text-[10px] text-zinc-500 font-mono">{pl.intensity.toFixed(1)}</span>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onPointLightsChange(pointLights.filter((p) => p.id !== pl.id))
+                }}
+                className="p-0.5 rounded text-zinc-600 hover:text-red-400 transition-colors"
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+              </button>
+            </div>
+            <input type="range" min={0} max={16} step={0.1} value={pl.intensity}
+              onChange={(e) => onPointLightsChange(pointLights.map((p) => p.id === pl.id ? { ...p, intensity: parseFloat(e.target.value) } : p))}
+              className="w-full h-1.5 accent-violet-500 cursor-pointer" />
+          </div>
+        ))}
+      </div>
+
       <button
         onClick={onClose}
         className="mt-1 px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 rounded-lg transition-colors"
@@ -375,6 +482,7 @@ function AssetLibraryPopover({
   onOpenSelected,
   onRefresh,
   onClose,
+  onOpenLibraryPage,
 }: {
   entries: ProjectedAssetLibraryEntry[]
   selectedEntryId: string | null
@@ -391,6 +499,7 @@ function AssetLibraryPopover({
   onOpenSelected: () => void
   onRefresh: () => void
   onClose: () => void
+  onOpenLibraryPage: () => void
 }) {
   const scopeGroups = filterAssetLibraryScopeGroups(entries, searchQuery, sortMode)
   const visibleEntryIds = new Set(scopeGroups.flatMap((scopeGroup) => scopeGroup.entryGroups.flatMap((group) => group.entries.map((entry) => entry.id))))
@@ -419,11 +528,22 @@ function AssetLibraryPopover({
         <button
           type="button"
           onClick={onClose}
-          className="px-2 py-1 text-[11px] text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 rounded-lg transition-colors"
+          className="shrink-0 px-2 py-1 text-[11px] text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 rounded-lg transition-colors"
         >
           Close library
         </button>
       </div>
+
+      <button
+        type="button"
+        onClick={onOpenLibraryPage}
+        className="self-start inline-flex items-center gap-1 text-[11px] font-medium text-accent-light hover:text-violet-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 rounded"
+      >
+        Open Library
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M5 12h14M13 6l6 6-6 6" />
+        </svg>
+      </button>
 
       <button
         type="button"
@@ -576,55 +696,116 @@ export default function GeneratePage(): JSX.Element {
   const [librarySortMode, setLibrarySortMode] = useState<AssetLibrarySortMode>('type')
   const [libraryCollapsedSectionKeys, setLibraryCollapsedSectionKeys] = useState<string[]>(() => getDefaultAssetLibraryCollapsedSectionKeys())
   const [gizmoMode, setGizmoMode] = useState<'translate' | 'rotate' | 'scale' | null>(null)
+  const [editPanelOpen, setEditPanelOpen] = useState(false)
   const dragging = useRef(false)
+  const [selectedPointLightId, setSelectedPointLightId] = useState<string | null>(null)
   // Populated by Viewer3D — undoes the latest live gizmo transform, if any.
   const gizmoUndoRef = useRef<(() => boolean) | null>(null)
 
   const lightSettings = useAppStore((s) => s.lightSettings)
   const setLightSettings = useAppStore((s) => s.setLightSettings)
+  const pointLights = useAppStore((s) => s.pointLights)
+  const setPointLights = useAppStore((s) => s.setPointLights)
   const isGenerating = useAppStore((s) =>
     s.currentJob?.status === 'uploading' || s.currentJob?.status === 'generating'
   )
   const currentJob = useAppStore((s) => s.currentJob)
   const apiUrl = useAppStore((s) => s.apiUrl)
   const showError = useAppStore((s) => s.showError)
-  const updateCurrentJob = useAppStore((s) => s.updateCurrentJob)
   const setCurrentJob = useAppStore((s) => s.setCurrentJob)
   const meshStats = useAppStore((s) => s.meshStats)
   const meshSelected = useAppStore((s) => s.meshSelected)
   const pushMeshUrl = useAppStore((s) => s.pushMeshUrl)
   const undoMesh = useAppStore((s) => s.undoMesh)
   const redoMesh = useAppStore((s) => s.redoMesh)
-  const canUndo = useAppStore((s) => s.historyIndex > 0)
-  const canRedo = useAppStore((s) => s.historyIndex < s.meshHistory.length - 1)
+  const applyMeshEdit = useAppStore((s) => s.applyMeshEdit)
+  const undoSteps = useAppStore((s) => undoDepth(s.meshHistory))
+  const redoSteps = useAppStore((s) => redoDepth(s.meshHistory))
   const { optimizeMesh, smoothMesh, importMesh } = useApi()
   const assetLibraryService = useMemo(() => getDefaultAssetLibraryService(), [])
+  const navigate = useNavStore((s) => s.navigate)
+
+  const sculpting = useSculptStore((s) => s.active)
+
+  // Global mesh undo/redo. Pending sculpt strokes are saved first, so undo
+  // steps back over them as one edit (in sculpt mode Ctrl+Z is the stroke undo).
+  const undoMeshEdit = useCallback(async () => { if (await commitSculpt()) undoMesh() }, [undoMesh])
+  const redoMeshEdit = useCallback(async () => { if (await commitSculpt()) redoMesh() }, [redoMesh])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!e.ctrlKey && !e.metaKey) return
-      if (e.key === 'z') { e.preventDefault(); if (gizmoUndoRef.current?.()) return; undoMesh() }
-      if (e.key === 'y') { e.preventDefault(); redoMesh() }
+      if (useSculptStore.getState().active) return // sculpt shortcuts below
+      if (e.key === 'z') { e.preventDefault(); if (gizmoUndoRef.current?.()) return; void undoMeshEdit() }
+      if (e.key === 'y') { e.preventDefault(); void redoMeshEdit() }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [undoMesh, redoMesh])
+  }, [undoMeshEdit, redoMeshEdit])
+
+  // Sculpt-mode shortcuts (see sculptKeyAction). Ignored while typing.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const sculpt = useSculptStore.getState()
+      if (!sculpt.active) return
+      const el = document.activeElement as HTMLElement | null
+      if (el && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable)) return
+      const action = sculptKeyAction(e)
+      if (!action) return
+      e.preventDefault()
+      switch (action.type) {
+        case 'undo': sculpt.undo(); break
+        case 'redo': sculpt.redo(); break
+        case 'exit': void sculpt.exit(); break
+        case 'radius': sculpt.stepRadius(action.direction); break
+        case 'brush': sculpt.setBrush(action.kind); break
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
+
+  // Sculpting replaces the transform tools.
+  useEffect(() => {
+    if (sculpting) setGizmoMode(null)
+  }, [sculpting])
+
+  // Leaving the page leaves sculpt mode; the viewer saves pending strokes as it unmounts.
+  useEffect(() => () => useSculptStore.setState({ active: false }), [])
+
+  const closeEditPanel = useCallback(async () => {
+    if (await useSculptStore.getState().exit()) setEditPanelOpen(false)
+  }, [])
 
   const hasModel = currentJob?.status === 'done' && !!currentJob.outputUrl
+  const showOpenInSlicer = hasModel && canOpenInOrcaSlicer(currentJob?.outputUrl)
 
-  // Drop the active transform tool when the mesh is deselected, so it doesn't
+  // Selecting a point light (from the 3D marker or the light panel list) —
+  // also drops the active gizmo tool so it doesn't silently carry over from
+  // whatever was selected before. Switching selection directly (mesh →
+  // point light, or point light → point light) never passes through a
+  // fully-deselected state, so an effect keyed on the selection alone can't
+  // catch this; clearing it here, at the one place all of those paths go
+  // through, does.
+  const handleSelectPointLight = useCallback((id: string | null) => {
+    setSelectedPointLightId(id)
+    setGizmoMode(null)
+  }, [])
+
+  // Drop the active transform tool when nothing is selected, so it doesn't
   // silently re-activate on the next selection.
   useEffect(() => {
-    if (!meshSelected) setGizmoMode(null)
-  }, [meshSelected])
+    if (!meshSelected && !selectedPointLightId) setGizmoMode(null)
+  }, [meshSelected, selectedPointLightId])
 
   // Gizmo hotkeys: W move, R rotate, S scale, Esc exits. Ignored while typing.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const el = document.activeElement as HTMLElement | null
       if (el && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable)) return
+      if (useSculptStore.getState().active) return // W/R/S/Esc belong to sculpt mode
       if (e.key === 'Escape') { setGizmoMode((m) => (m ? null : m)); return }
-      if (!hasModel || !meshSelected) return
+      if (!meshSelected && !selectedPointLightId) return
       const k = e.key.toLowerCase()
       if (k === 'w') setGizmoMode('translate')
       else if (k === 'r') setGizmoMode('rotate')
@@ -632,7 +813,7 @@ export default function GeneratePage(): JSX.Element {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [hasModel, meshSelected])
+  }, [hasModel, meshSelected, selectedPointLightId])
 
   useEffect(() => {
     if (openPanel !== 'library' || libraryLoaded || libraryLoading) return
@@ -646,48 +827,53 @@ export default function GeneratePage(): JSX.Element {
     setTimeout(() => setUnloadStatus('idle'), 2000)
   }
 
-  function handleExport(format: 'glb' | 'obj' | 'stl' | 'ply') {
-    if (!currentJob?.outputUrl) return
+  /** Saves pending sculpt strokes, then returns the mesh URL to read (or null). */
+  async function committedMeshUrl(): Promise<string | null> {
+    if (!(await commitSculpt())) return null
+    return useAppStore.getState().currentJob?.outputUrl ?? null
+  }
+
+  async function handleExport(format: 'glb' | 'obj' | 'stl' | 'ply') {
+    const outputUrl = await committedMeshUrl()
+    if (!outputUrl) return
     const stem = `modly-${Date.now()}`
     const link = document.createElement('a')
     if (format === 'glb') {
-      link.href = `${apiUrl}${currentJob.outputUrl}`
+      link.href = `${apiUrl}${outputUrl}`
     } else {
-      const path = encodeURIComponent(currentJob.outputUrl.replace('/workspace/', ''))
+      const path = encodeURIComponent(outputUrl.replace('/workspace/', ''))
       link.href = `${apiUrl}/optimize/export?path=${path}&format=${format}`
     }
     link.download = `${stem}.${format}`
     link.click()
   }
 
-  function getOptimizePath(url: string): string {
-    if (url.startsWith('/workspace/')) {
-      return url.slice('/workspace/'.length)
+  async function handleOpenInOrcaSlicer() {
+    const outputUrl = await committedMeshUrl()
+    if (!outputUrl) return
+    try {
+      const link = buildOrcaSlicerDeepLink(apiUrl, outputUrl)
+      const result = await window.electron.slicer.open(link)
+      if (!result.success) {
+        // Deliberately not "make sure it is installed": the main process cannot
+        // tell a missing OrcaSlicer from a working one (see slicer:open).
+        showError(result.error ?? 'Could not open OrcaSlicer.')
+      }
+    } catch (err) {
+      showError(err instanceof Error ? err.message : 'Could not open OrcaSlicer.')
     }
-    if (url.startsWith('/optimize/serve-file?path=')) {
-      return decodeURIComponent(url.split('path=')[1] ?? '')
-    }
-    return url
   }
 
   async function handleImportMesh() {
+    // Save the strokes before the model is replaced (else they'd be dropped).
+    if (!(await commitSculpt())) return
     const filePath = await window.electron.fs.selectMeshFile()
     if (!filePath) return
     setOpenPanel(null)
     setImporting(true)
     try {
       const { url } = await importMesh(filePath)
-      const job: GenerationJob = {
-        id: `import-${Date.now()}`,
-        imageFile: '',
-        status: 'done',
-        progress: 100,
-        outputUrl: url,
-        originalOutputUrl: url,
-        createdAt: Date.now(),
-      }
-      setCurrentJob(job)
-      pushMeshUrl(url)
+      showImportedMesh(url)
     } finally {
       setImporting(false)
     }
@@ -706,6 +892,7 @@ export default function GeneratePage(): JSX.Element {
         return
       }
       setLibraryEntries(result.entries)
+      void requestLibraryThumbnails(result.entries)
       setLibrarySelectedEntryId((current) => current && result.entries.some((entry) => entry.id === current)
         ? current
         : result.entries.find(isAssetLibraryEntryOpenable)?.id ?? result.entries[0]?.id ?? null)
@@ -730,25 +917,20 @@ export default function GeneratePage(): JSX.Element {
       setLibraryError(describeAssetLibraryOpenability(selectedEntry))
       return
     }
+    if (!(await commitSculpt())) return
 
     setLibraryOpening(true)
     setLibraryError(null)
     try {
-      const result = await assetLibraryService.open(buildAssetLibraryOpenRequest(selectedEntry))
+      const result = await openAssetLibraryEntry(assetLibraryService, selectedEntry)
       if (!result.success) {
-        setLibraryError(result.error.message)
-        return
-      }
-      const target = resolveAssetLibraryOpenTarget(result.entry)
-      const selection = createAssetLibraryOpenJob(result.entry, target)
-      if (!selection) {
-        setLibraryError(describeAssetLibraryOpenability(result.entry))
+        setLibraryError(result.message)
         return
       }
       setLibraryEntries((currentEntries) => currentEntries.map((entry) => entry.id === result.entry.id ? result.entry : entry))
       setLibrarySelectedEntryId(result.entry.id)
-      setCurrentJob(selection.job)
-      pushMeshUrl(selection.historyUrl)
+      setCurrentJob(result.selection.job)
+      pushMeshUrl(result.selection.historyUrl)
       setOpenPanel((currentPanel) => resolveOpenPanelAfterLibrarySelection(currentPanel))
     } catch (err) {
       setLibraryError(err instanceof Error ? err.message : String(err))
@@ -758,13 +940,13 @@ export default function GeneratePage(): JSX.Element {
   }
 
   async function handleSmooth(iterations: number) {
-    if (!currentJob?.outputUrl) return
     setSmoothing(true)
     try {
-      const path = getOptimizePath(currentJob.outputUrl)
+      const outputUrl = await committedMeshUrl()
+      if (!outputUrl) return
+      const path = meshPathFromUrl(outputUrl)
       const { url } = await smoothMesh(path, iterations)
-      updateCurrentJob({ outputUrl: url })
-      pushMeshUrl(url)
+      applyMeshEdit(url)
       setOpenPanel(null)
     } catch (err) {
       showError(err instanceof Error ? err.message : String(err))
@@ -774,13 +956,13 @@ export default function GeneratePage(): JSX.Element {
   }
 
   async function handleDecimate(targetFaces: number) {
-    if (!currentJob?.outputUrl) return
     setDecimating(true)
     try {
-      const path = getOptimizePath(currentJob.outputUrl)
+      const outputUrl = await committedMeshUrl()
+      if (!outputUrl) return
+      const path = meshPathFromUrl(outputUrl)
       const { url } = await optimizeMesh(path, targetFaces)
-      updateCurrentJob({ outputUrl: url })
-      pushMeshUrl(url)
+      applyMeshEdit(url)
       setOpenPanel(null)
     } catch (err) {
       showError(err instanceof Error ? err.message : String(err))
@@ -839,21 +1021,26 @@ export default function GeneratePage(): JSX.Element {
 
           {/* Undo / Redo */}
           <button
-            onClick={undoMesh}
-            disabled={!canUndo}
-            title="Undo (Ctrl+Z)"
-            className="flex items-center justify-center w-7 h-7 rounded-lg text-[11px] font-medium bg-zinc-800 border border-zinc-700/50 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+            onClick={() => { void undoMeshEdit() }}
+            disabled={undoSteps === 0}
+            title={undoSteps > 0 ? `Undo (Ctrl+Z) — ${undoSteps} step${undoSteps > 1 ? 's' : ''}` : 'Undo (Ctrl+Z)'}
+            className="relative flex items-center justify-center w-7 h-7 rounded-lg text-[11px] font-medium bg-zinc-800 border border-zinc-700/50 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition-colors disabled:opacity-30 disabled:pointer-events-none"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
               <path d="M3 7v6h6" />
               <path d="M3 13a9 9 0 1 0 2.28-5.93" />
             </svg>
+            {undoSteps > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-0.5 rounded-full bg-zinc-700 text-zinc-200 text-[9px] leading-[14px] text-center">
+                {undoSteps}
+              </span>
+            )}
           </button>
           <button
-            onClick={redoMesh}
-            disabled={!canRedo}
-            title="Redo (Ctrl+Y)"
-            className="flex items-center justify-center w-7 h-7 rounded-lg text-[11px] font-medium bg-zinc-800 border border-zinc-700/50 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+            onClick={() => { void redoMeshEdit() }}
+            disabled={redoSteps === 0}
+            title={redoSteps > 0 ? `Redo (Ctrl+Y) — ${redoSteps} step${redoSteps > 1 ? 's' : ''}` : 'Redo (Ctrl+Y)'}
+            className="relative flex items-center justify-center w-7 h-7 rounded-lg text-[11px] font-medium bg-zinc-800 border border-zinc-700/50 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition-colors disabled:opacity-30 disabled:pointer-events-none"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
               <path d="M21 7v6h-6" />
@@ -939,6 +1126,7 @@ export default function GeneratePage(): JSX.Element {
                 onOpenSelected={() => { void handleOpenSelectedLibraryEntry() }}
                 onRefresh={() => { void loadLibraryEntries() }}
                 onClose={() => setOpenPanel(null)}
+                onOpenLibraryPage={() => navigate('library')}
               />
             )}
           </div>
@@ -971,6 +1159,8 @@ export default function GeneratePage(): JSX.Element {
                   <ExportDropdown
                     onExport={handleExport as (f: 'glb' | 'obj' | 'stl' | 'ply') => void}
                     onClose={() => setOpenPanel(null)}
+                    onOpenInSlicer={() => { void handleOpenInOrcaSlicer() }}
+                    canOpenInSlicer={showOpenInSlicer}
                   />
                 )}
               </div>
@@ -1073,6 +1263,10 @@ export default function GeneratePage(): JSX.Element {
                 settings={lightSettings}
                 onChange={setLightSettings}
                 onClose={() => setOpenPanel(null)}
+                pointLights={pointLights}
+                onPointLightsChange={setPointLights}
+                selectedPointLightId={selectedPointLightId}
+                onSelectPointLight={handleSelectPointLight}
               />
             )}
           </div>
@@ -1080,7 +1274,10 @@ export default function GeneratePage(): JSX.Element {
 
         {/* Tools bar — always visible; transform tools appear once a mesh is selected */}
         <div className="flex items-center gap-2 px-3 h-10 border-b border-zinc-800 bg-surface-400 shrink-0">
-          {hasModel && meshSelected && (
+          {sculpting && (
+            <span className="text-[11px] text-violet-300">Sculpt mode — brushes in the Edit panel</span>
+          )}
+          {!sculpting && (meshSelected || selectedPointLightId) && (
             <>
               <ToolButton
                 label="Move"
@@ -1120,12 +1317,41 @@ export default function GeneratePage(): JSX.Element {
               </ToolButton>
             </>
           )}
+
+          {/* Mesh edit panel: every registry op, runnable without the agent */}
+          <button
+            type="button"
+            onClick={() => { if (editPanelOpen) void closeEditPanel(); else setEditPanelOpen(true) }}
+            title="Mesh tools: sculpt, repair, transform, optimize, inspect"
+            aria-pressed={editPanelOpen}
+            className={`ml-auto flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium border transition-colors
+              ${editPanelOpen
+                ? 'bg-zinc-700 border-zinc-600 text-zinc-200'
+                : 'bg-zinc-800 border-zinc-700/50 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600'
+              }`}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+              <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+            </svg>
+            Edit
+          </button>
         </div>
 
-        {/* Viewer area */}
-        <div className="flex-1 relative overflow-hidden">
-          <Viewer3D lightSettings={lightSettings} gizmoMode={gizmoMode} gizmoUndoRef={gizmoUndoRef} />
-          <GenerationHUD />
+        <div className="flex-1 flex overflow-hidden">
+          {/* Viewer area */}
+          <div className="flex-1 relative overflow-hidden">
+            <Viewer3D
+              lightSettings={lightSettings}
+              gizmoMode={gizmoMode}
+              gizmoUndoRef={gizmoUndoRef}
+              pointLights={pointLights}
+              selectedPointLightId={selectedPointLightId}
+              onSelectPointLight={handleSelectPointLight}
+              onPointLightsChange={setPointLights}
+            />
+            <GenerationHUD />
+          </div>
+          {editPanelOpen && <EditPanel onClose={() => { void closeEditPanel() }} />}
         </div>
       </div>
     </>

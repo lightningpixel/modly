@@ -15,17 +15,41 @@ Configuration in Claude Desktop (~/.config/claude/claude_desktop_config.json):
     }
   }
 
-Requires Modly's FastAPI backend to be running on http://localhost:8765.
+Requires Modly to be running. Its API is found through MODLY_API_URL, else the
+port the app writes to <userData>/api-port, else http://127.0.0.1:8765.
 """
 
 import asyncio
+import json
 import mimetypes
+import os
+import sys
+from pathlib import Path
+
 import httpx
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-API_BASE = "http://localhost:8765"
+def _modly_user_data() -> Path:
+    """Electron's userData folder for Modly, where the app writes api-port."""
+    if sys.platform == "win32":
+        return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Modly"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Modly"
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "Modly"
+
+
+def resolve_api_url() -> str:
+    """MODLY_API_URL, else the port the running app wrote to api-port, else 8765."""
+    env = os.environ.get("MODLY_API_URL")
+    if env:
+        return env.rstrip("/")
+    try:
+        port = int((_modly_user_data() / "api-port").read_text().strip())
+        return f"http://127.0.0.1:{port}"
+    except (OSError, ValueError):
+        return "http://127.0.0.1:8765"
 
 server = Server("modly")
 
@@ -81,6 +105,86 @@ async def list_tools() -> list[Tool]:
                     "job_id": {"type": "string", "description": "Job ID returned by modly_generate_from_image."},
                 },
                 "required": ["job_id"],
+            },
+        ),
+        Tool(
+            name="modly_inspect_mesh",
+            description=(
+                "Diagnose a mesh without modifying it: watertight, manifold, holes, "
+                "self-intersections, parts, dimensions, volume, UVs/normals, printability."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to the mesh (e.g. 'Default/mesh.glb').",
+                    },
+                },
+                "required": ["path"],
+            },
+        ),
+        Tool(
+            name="modly_suggest_fixes",
+            description="Inspect a mesh and list the operations (with params) that would fix its problems.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to the mesh (e.g. 'Default/mesh.glb').",
+                    },
+                },
+                "required": ["path"],
+            },
+        ),
+        Tool(
+            name="modly_repair_mesh",
+            description=(
+                "Repair a mesh automatically (holes, non-manifold edges, degenerate faces, "
+                "flipped normals) until it is closed and manifold. Writes a new, untextured mesh."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to the mesh (e.g. 'Default/mesh.glb').",
+                    },
+                    "fill_holes": {
+                        "type": "boolean",
+                        "description": "Close holes (default true).",
+                    },
+                },
+                "required": ["path"],
+            },
+        ),
+        Tool(
+            name="modly_arrange_mesh",
+            description=(
+                "Reposition a mesh in one call: auto_orient (lay flat), normalize_scale "
+                "(resize), recenter (centre on origin), drop_to_ground (rest on ground). "
+                "Steps always run in that order. Writes a new mesh file."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to the mesh (e.g. 'Default/mesh.glb').",
+                    },
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["auto_orient", "normalize_scale", "recenter", "drop_to_ground"],
+                        },
+                    },
+                    "size": {"type": "number", "description": "normalize_scale: target size in `unit`."},
+                    "unit": {"type": "string", "enum": ["m", "cm", "mm"]},
+                    "dimension": {"type": "string", "enum": ["longest", "x", "y", "z"]},
+                },
+                "required": ["path", "steps"],
             },
         ),
         Tool(
@@ -148,12 +252,13 @@ async def list_tools() -> list[Tool]:
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    api_url = resolve_api_url()  # per call: the app may restart on another port
+    async with httpx.AsyncClient(base_url=api_url, timeout=60.0) as client:
         try:
             result = await _dispatch(client, name, arguments)
         except httpx.ConnectError:
             result = (
-                "Cannot connect to Modly API at http://localhost:8765. "
+                f"Cannot connect to Modly API at {api_url}. "
                 "Make sure Modly is running."
             )
         except httpx.HTTPStatusError as e:
@@ -166,7 +271,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
 async def _dispatch(client: httpx.AsyncClient, name: str, args: dict) -> str:
     if name == "modly_list_models":
-        r = await client.get(f"{API_BASE}/model/all")
+        r = await client.get("/model/all")
         r.raise_for_status()
         models = [m for m in r.json() if m.get("downloaded")]
         if not models:
@@ -174,7 +279,7 @@ async def _dispatch(client: httpx.AsyncClient, name: str, args: dict) -> str:
         return "\n".join(f"- {m['id']}: {m.get('name', m['id'])}" for m in models)
 
     elif name == "modly_switch_model":
-        r = await client.post(f"{API_BASE}/model/switch", params={"model_id": args["model_id"]})
+        r = await client.post("/model/switch", params={"model_id": args["model_id"]})
         r.raise_for_status()
         return f"Switched active model to: {args['model_id']}"
 
@@ -192,7 +297,7 @@ async def _dispatch(client: httpx.AsyncClient, name: str, args: dict) -> str:
             form_data["model_id"] = args["model_id"]
 
         r = await client.post(
-            f"{API_BASE}/generate/from-image",
+            "/generate/from-image",
             files={"image": (filename, img_bytes, mime)},
             data=form_data,
             timeout=30.0,
@@ -205,7 +310,7 @@ async def _dispatch(client: httpx.AsyncClient, name: str, args: dict) -> str:
         )
 
     elif name == "modly_get_generation_status":
-        r = await client.get(f"{API_BASE}/generate/status/{args['job_id']}")
+        r = await client.get(f"/generate/status/{args['job_id']}")
         r.raise_for_status()
         s = r.json()
         parts = [f"Status: {s['status']}", f"Progress: {s.get('progress', 0)}%"]
@@ -217,9 +322,37 @@ async def _dispatch(client: httpx.AsyncClient, name: str, args: dict) -> str:
             parts.append(f"Error: {s['error']}")
         return " | ".join(parts)
 
+    elif name in ("modly_inspect_mesh", "modly_suggest_fixes"):
+        op = name.removeprefix("modly_")
+        r = await client.post(f"/optimize/op/{op}", json={"path": args["path"]})
+        r.raise_for_status()
+        return json.dumps(r.json(), indent=2)
+
+    elif name == "modly_repair_mesh":
+        params = {} if args.get("fill_holes") is None else {"fill_holes": bool(args["fill_holes"])}
+        r = await client.post(
+            "/optimize/op/repair_mesh",
+            json={"path": args["path"], "params": params},
+        )
+        r.raise_for_status()
+        return json.dumps(r.json(), indent=2)
+
+    elif name == "modly_arrange_mesh":
+        scale = {k: args[k] for k in ("size", "unit", "dimension") if args.get(k) is not None}
+        r = await client.post(
+            "/optimize/arrange",
+            json={
+                "path": args["path"],
+                "steps": args.get("steps") or [],
+                "params": {"normalize_scale": scale} if scale else {},
+            },
+        )
+        r.raise_for_status()
+        return json.dumps(r.json(), indent=2)
+
     elif name == "modly_decimate_mesh":
         r = await client.post(
-            f"{API_BASE}/optimize/mesh",
+            "/optimize/mesh",
             json={"path": args["path"], "target_faces": args["target_faces"]},
         )
         r.raise_for_status()
@@ -228,7 +361,7 @@ async def _dispatch(client: httpx.AsyncClient, name: str, args: dict) -> str:
 
     elif name == "modly_smooth_mesh":
         r = await client.post(
-            f"{API_BASE}/optimize/smooth",
+            "/optimize/smooth",
             json={"path": args["path"], "iterations": args["iterations"]},
         )
         r.raise_for_status()
@@ -236,18 +369,18 @@ async def _dispatch(client: httpx.AsyncClient, name: str, args: dict) -> str:
         return f"Smoothed mesh ({args['iterations']} iterations). New file: {data.get('url', '')}"
 
     elif name == "modly_import_mesh":
-        r = await client.post(f"{API_BASE}/optimize/import-by-path", json={"path": args["path"]})
+        r = await client.post("/optimize/import-by-path", json={"path": args["path"]})
         r.raise_for_status()
         data = r.json()
         return f"Mesh imported. URL: {data.get('url', '')}"
 
     elif name == "modly_unload_models":
-        r = await client.post(f"{API_BASE}/model/unload-all")
+        r = await client.post("/model/unload-all")
         r.raise_for_status()
         return "All 3D generation models unloaded from VRAM."
 
     elif name == "modly_get_settings":
-        r = await client.get(f"{API_BASE}/settings/paths")
+        r = await client.get("/settings/paths")
         r.raise_for_status()
         data = r.json()
         return f"Models directory: {data.get('models_dir')}\nWorkspace directory: {data.get('workspace_dir')}"

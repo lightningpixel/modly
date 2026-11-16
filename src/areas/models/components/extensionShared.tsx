@@ -12,6 +12,7 @@ export interface DownloadInfo {
   totalBytes?: number
   stalledSeconds?: number
   paused?: boolean
+  variantId?: string   // set when the download targets one weight variant of the node
 }
 
 export type DownloadMap = Record<string, DownloadInfo>
@@ -22,6 +23,10 @@ export type NodeUiState =
   | { kind: 'downloading'; dl: DownloadInfo }
   | { kind: 'installed' }
 
+export function nodeHasManagedWeights(node: ExtensionNode): boolean {
+  return Boolean(node.hfRepo || node.hasModelSources || node.weightGroups?.length)
+}
+
 export function getNodeState(
   extId: string,
   node: ExtensionNode,
@@ -29,7 +34,7 @@ export function getNodeState(
   downloading: DownloadMap,
 ): NodeUiState {
   const fullId = `${extId}/${node.id}`
-  if (!node.hfRepo) return { kind: 'ready' }
+  if (!nodeHasManagedWeights(node)) return { kind: 'ready' }
   const dl = downloading[fullId]
   if (dl) return { kind: 'downloading', dl }
   if (installedIds.includes(fullId)) return { kind: 'installed' }

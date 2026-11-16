@@ -8,9 +8,18 @@ from pathlib import Path
 from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request as FastAPIRequest
 from fastapi.responses import StreamingResponse
-from services.generator_registry import generator_registry, MODELS_DIR
+from services.generator_registry import generator_registry
+import services.generator_registry as registry_module
+from services.extension_process import ExtensionProcess
+from services.model_sources import (
+    normalize_model_sources,
+    resolve_download_path,
+    resolve_source_destination_at_root,
+    resolve_weight_storage_root,
+    validate_source_file_plan,
+)
 
 router = APIRouter(tags=["model"])
 
@@ -52,20 +61,20 @@ def _check_download_control(control: dict[str, threading.Event]) -> None:
 @router.get("/status")
 async def model_status():
     """Status of the active model."""
-    return generator_registry.active_status()
+    return await asyncio.to_thread(generator_registry.active_status)
 
 
 @router.get("/all")
 async def all_models_status():
     """Status of all known models (downloaded, loaded, required VRAM)."""
-    return generator_registry.all_status()
+    return await asyncio.to_thread(generator_registry.all_status)
 
 
 @router.get("/params")
 async def model_params(model_id: Optional[str] = None):
     """Parameter schema of the active model (or a specified model)."""
     try:
-        return generator_registry.params_schema(model_id)
+        return await asyncio.to_thread(generator_registry.params_schema, model_id)
     except KeyError:
         raise HTTPException(404, f"Unknown model ID: {model_id}")
 
@@ -74,7 +83,7 @@ async def model_params(model_id: Optional[str] = None):
 async def switch_model(model_id: str):
     """Switch the active model."""
     try:
-        generator_registry.switch_model(model_id)
+        await asyncio.to_thread(generator_registry.switch_model, model_id)
         return {"active": model_id}
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -83,7 +92,11 @@ async def switch_model(model_id: str):
 @router.post("/unload-all")
 async def unload_all_models():
     """Unloads all models from memory to free VRAM/RAM."""
-    generator_registry.unload_all()
+    # Off the event loop: unloading waits for any in-progress model load.
+    await asyncio.to_thread(generator_registry.unload_all)
+    # The local LLMs hold VRAM too; "Free memory" left them resident.
+    from services.llm_server import llama_pool
+    await asyncio.to_thread(llama_pool.unload_all)
     # Force Python to release memory back to the OS
     import gc
     gc.collect()
@@ -97,15 +110,24 @@ async def unload_all_models():
     return {"unloaded": True}
 
 
-@router.post("/unload/{model_id}")
+@router.post("/unload/{model_id:path}")
 async def unload_model(model_id: str):
     """Unloads a model from memory so its files can be safely deleted."""
     try:
         gen = generator_registry.get_generator(model_id)
+    except ValueError as exc:
+        if model_id in generator_registry._generators:
+            raise HTTPException(409, str(exc)) from exc
+        return {"unloaded": True}  # No runtime registered for these files.
+    # unload() on ExtensionProcess deliberately swallows IPC errors; deletion
+    # needs a confirmed process exit so no worker can retain file handles.
+    if isinstance(gen, ExtensionProcess):
+        gen.stop()
+    else:
         gen.unload()
-        return {"unloaded": True}
-    except ValueError:
-        return {"unloaded": True}  # already not loaded, that's fine
+        if gen.is_loaded():
+            raise HTTPException(409, "Model is still loaded; weights were preserved")
+    return {"unloaded": True}
 
 
 @router.post("/hf-download/pause")
@@ -122,13 +144,167 @@ async def cancel_hf_download(model_id: str):
     return {"cancelled": True}
 
 
+@router.post("/hf-download-sources")
+async def hf_download_sources(request: FastAPIRequest, model_id: str):
+    """Download sources into one validated node or extension-shared target."""
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("Request body must be an object")
+        raw_sources = body.get("sources")
+        if raw_sources is None:
+            raise ValueError("sources are required")
+        sources = normalize_model_sources({"model_sources": raw_sources})
+        model_root = resolve_weight_storage_root(registry_module.MODELS_DIR, model_id)
+        destinations = {
+            source["id"]: resolve_source_destination_at_root(
+                model_root, source["destination"]
+            )
+            for source in sources
+        }
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    authorization = request.headers.get("authorization", "")
+    hf_token = (
+        authorization[7:].strip()
+        if authorization.lower().startswith("bearer ")
+        else os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        or os.environ.get("HF_TOKEN")
+        or None
+    )
+    control = _new_download_control(model_id)
+
+    async def stream():
+        loop = asyncio.get_running_loop()
+
+        def _fmt(data: dict) -> str:
+            return f"data: {json.dumps(data)}\n\n"
+
+        try:
+            yield _fmt({"percent": 0, "status": "Listing repository files..."})
+            files_by_source: dict[str, list[str]] = {}
+
+            for source in sources:
+                _check_download_control(control)
+
+                def _list_files(current=source):
+                    from huggingface_hub import list_repo_files
+                    listed = list_repo_files(
+                        current["repo_id"],
+                        revision=current.get("revision"),
+                        token=hf_token,
+                    )
+                    include = current.get("include_prefixes", [])
+                    skip = current.get("skip_prefixes", [])
+                    return [
+                        filename for filename in listed
+                        if (not include or any(filename.startswith(prefix) for prefix in include))
+                        if not any(filename.startswith(prefix) for prefix in skip)
+                    ]
+
+                files = await loop.run_in_executor(None, _list_files)
+                if not files:
+                    raise RuntimeError(
+                        f'No files found in Hugging Face repo: {source["repo_id"]}'
+                    )
+                destination = destinations[source["id"]]
+                for filename in files:
+                    resolve_download_path(destination, filename)
+                files_by_source[source["id"]] = files
+
+            validate_source_file_plan(sources, files_by_source)
+            planned_files = [
+                (source, filename)
+                for source in sources
+                for filename in files_by_source[source["id"]]
+            ]
+            total = len(planned_files)
+            yield _fmt({"percent": 1, "status": f"Downloading {total} files..."})
+
+            from huggingface_hub import hf_hub_url
+
+            for index, (source, filename) in enumerate(planned_files):
+                _check_download_control(control)
+                display_file = f'{source["id"]}/{filename}'
+                base_percent = 1 + round(index / total * 94)
+                yield _fmt({
+                    "percent": base_percent,
+                    "file": display_file,
+                    "fileIndex": index + 1,
+                    "totalFiles": total,
+                    "status": f"Starting {display_file}",
+                    "bytesDownloaded": 0,
+                    "stalledSeconds": 0,
+                })
+
+                queue: asyncio.Queue[dict] = asyncio.Queue()
+
+                def _progress(message: dict) -> None:
+                    message["file"] = display_file
+                    loop.call_soon_threadsafe(queue.put_nowait, message)
+
+                url = hf_hub_url(
+                    repo_id=source["repo_id"],
+                    filename=filename,
+                    revision=source.get("revision"),
+                )
+                future = loop.run_in_executor(
+                    None,
+                    lambda: _download_file_streamed(
+                        url=url,
+                        filename=filename,
+                        dest_dir=str(destinations[source["id"]]),
+                        file_index=index + 1,
+                        total_files=total,
+                        base_percent=base_percent,
+                        progress_cb=_progress,
+                        control=control,
+                        token=hf_token,
+                    ),
+                )
+                while not future.done():
+                    try:
+                        message = await asyncio.wait_for(queue.get(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    yield _fmt(message)
+
+                final_size = await future
+                _check_download_control(control)
+                yield _fmt({
+                    "percent": 1 + round((index + 1) / total * 94),
+                    "file": display_file,
+                    "fileIndex": index + 1,
+                    "totalFiles": total,
+                    "status": "Downloaded",
+                    "bytesDownloaded": final_size,
+                    "stalledSeconds": 0,
+                })
+
+            yield _fmt({"percent": 100, "status": "done"})
+        except DownloadPaused:
+            yield _fmt({"paused": True, "status": "paused"})
+        except DownloadCancelled:
+            for part in model_root.rglob("*.part"):
+                part.unlink(missing_ok=True)
+            yield _fmt({"cancelled": True, "status": "cancelled"})
+        except Exception as exc:
+            yield _fmt({"error": str(exc)})
+        finally:
+            if _download_controls.get(model_id) is control:
+                _download_controls.pop(model_id, None)
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
 @router.get("/hf-download")
 async def hf_download(
     repo_id: str,
     model_id: str,
     skip_prefixes: Optional[str] = None,
     include_prefixes: Optional[str] = None,
-    token: Optional[str] = None,
+    x_hf_token: Optional[str] = Header(default=None),
 ):
     """
     Streams a HuggingFace Hub model download via SSE.
@@ -137,14 +313,19 @@ async def hf_download(
 
     skip_prefixes:    JSON-encoded list of path prefixes to exclude.
     include_prefixes: JSON-encoded list of path prefixes to include (whitelist).
-    token:            HuggingFace access token for gated repos (from Electron settings).
-    All three fall back to the extension's manifest / environment when not supplied.
+    X-HF-Token:       HuggingFace access token for gated repos (from Electron settings).
+                      A HEADER, not a query param: uvicorn logs the full request
+                      line to stdout, python-bridge.ts pipes that into runtime.log,
+                      and `log:readAll` hands that file to the user for bug
+                      reports — the token used to travel all the way there.
+    All fall back to the extension's manifest / environment when not supplied.
 
     SSE format: data: {"percent": 0-100, "file": "...", "status": "..."}
     """
+    token = x_hf_token
     import json as _json
     import os
-    dest_dir  = str(MODELS_DIR / model_id)
+    dest_dir  = str(registry_module.MODELS_DIR / model_id)
     # Prefer skip_prefixes passed directly from the client (authoritative, no registry dep)
     if skip_prefixes:
         try:
@@ -295,7 +476,12 @@ def _download_file_streamed(
     final_path.parent.mkdir(parents=True, exist_ok=True)
 
     if final_path.exists():
-        return final_path.stat().st_size
+        if not final_path.is_file():
+            raise RuntimeError(f"Download target is not a regular file: {filename}")
+        existing_size = final_path.stat().st_size
+        if existing_size > 0:
+            return existing_size
+        final_path.unlink()
 
     # Explicit token (from caller) > env vars > none
     hf_token = (

@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useExtensionsStore } from '@shared/stores/extensionsStore'
-import type { AnyExtension, ModelExtension } from '@shared/types/electron.d'
-import { formatModelName } from './utils'
+import { useNavStore } from '@shared/stores/navStore'
+import type { AnyExtension, ModelExtension, SharedWeightGroupState } from '@shared/types/electron.d'
+import { deleteModelsThenUninstallExtension, formatModelName, installModelAndRefresh, installModelQueue } from './utils'
 import { ExtensionCard } from './components/ExtensionCard'
 import type { ExtensionNode } from './components/ExtensionCard'
 import { ExtensionDrawer } from './components/ExtensionDrawer'
-import { ICONS } from './components/extensionShared'
+import { ICONS, nodeHasManagedWeights, type DownloadMap } from './components/extensionShared'
 
 // ─── Filters & sorts ──────────────────────────────────────────────────────────
 
@@ -48,18 +49,10 @@ export default function ModelsPage(): JSX.Element {
   )
 
   // Model weight state (needed for node install status + uninstall cleanup)
-  const [installedVariantIds, setInstalledVariantIds] = useState<string[]>([])
-  const [downloading, setDownloading] = useState<Record<string, {
-    percent: number
-    file?: string
-    fileIndex?: number
-    totalFiles?: number
-    status?: string
-    bytesDownloaded?: number
-    totalBytes?: number
-    stalledSeconds?: number
-    paused?: boolean
-  }>>({})
+  const [installedNodeIds, setInstalledNodeIds] = useState<string[]>([])
+  const [localDataIds, setLocalDataIds] = useState<string[]>([])
+  const [sharedGroupStates, setSharedGroupStates] = useState<Record<string, SharedWeightGroupState[]>>({})
+  const [downloading, setDownloading] = useState<DownloadMap>({})
 
   // Uninstall modal state
   const [uninstallTarget, setUninstallTarget] = useState<string | null>(null)
@@ -74,25 +67,49 @@ export default function ModelsPage(): JSX.Element {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
 
+  // Another page asked to open an extension (e.g. a weight variant picked but not installed)
+  const extensionToOpen = useNavStore((s) => s.params?.extension ?? null)
+  const clearParams     = useNavStore((s) => s.clearParams)
+  useEffect(() => {
+    if (!extensionToOpen) return
+    setSelectedId(extensionToOpen)
+    clearParams()
+  }, [extensionToOpen, clearParams])
+
   // GitHub extension install form
   const [showGHForm, setShowGHForm] = useState(false)
   const [ghUrl,      setGhUrl]      = useState('')
   const [ghErr,      setGhErr]      = useState<string | null>(null)
 
+  const installedRefreshRevision = useRef(0)
+  const installQueues = useRef(new Set<string>())
+
   // ── Init ──────────────────────────────────────────────────────────────────
 
   // Check each model node individually via filesystem IPC — reliable regardless of API state
   async function refreshInstalledIds(exts: ModelExtension[]) {
+    const revision = ++installedRefreshRevision.current
     const ids: string[] = []
+    const localIds: string[] = []
+    const sharedStates: Record<string, SharedWeightGroupState[]> = {}
     for (const ext of exts) {
+      sharedStates[ext.id] = await window.electron.model.sharedGroups(ext.id)
       for (const node of ext.nodes) {
-        if (!node.hfRepo) continue
+        if (!nodeHasManagedWeights(node)) continue
         const fullId = `${ext.id}/${node.id}`
-        const ok = await window.electron.model.isDownloaded(fullId, node.downloadCheck)
+        const [ok, hasLocalData] = await Promise.all([
+          window.electron.model.isDownloaded(fullId),
+          window.electron.model.hasLocalData(fullId),
+        ])
         if (ok) ids.push(fullId)
+        if (hasLocalData) localIds.push(fullId)
       }
     }
-    setInstalledVariantIds(ids)
+    if (revision !== installedRefreshRevision.current) return
+    setInstalledNodeIds(ids)
+    setLocalDataIds(localIds)
+    setSharedGroupStates(sharedStates)
+    await useExtensionsStore.getState().refreshInstalledWeightVariants()
   }
 
   useEffect(() => {
@@ -108,7 +125,10 @@ export default function ModelsPage(): JSX.Element {
       }
       refreshInstalledIds(exts)
     })
-    window.electron.model.onProgress(({ modelId: id, percent, file, fileIndex, totalFiles, status, bytesDownloaded, totalBytes, stalledSeconds, paused, cancelled }) => {
+    window.electron.model.onWeightsChanged(() => {
+      void refreshInstalledIds(useExtensionsStore.getState().modelExtensions)
+    })
+    window.electron.model.onProgress(({ modelId: id, variantId, percent, file, fileIndex, totalFiles, status, bytesDownloaded, totalBytes, stalledSeconds, paused, cancelled }) => {
       if (cancelled) {
         setDownloading((prev) => { const n = { ...prev }; delete n[id]; return n })
         return
@@ -127,6 +147,7 @@ export default function ModelsPage(): JSX.Element {
             totalBytes: totalBytes ?? current?.totalBytes,
             stalledSeconds: stalledSeconds ?? current?.stalledSeconds,
             paused,
+            variantId: variantId ?? current?.variantId,
           },
         }
       })
@@ -137,7 +158,10 @@ export default function ModelsPage(): JSX.Element {
         })
       }
     })
-    return () => window.electron.model.offProgress()
+    return () => {
+      window.electron.model.offProgress()
+      window.electron.model.offWeightsChanged()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- register the progress listener once on mount
   }, [])
 
@@ -160,24 +184,39 @@ export default function ModelsPage(): JSX.Element {
 
   // ── Node install / download controls ──────────────────────────────────────
 
-  function handleInstallNode(node: ExtensionNode, fullId: string) {
-    if (!node.hfRepo) return
-    setDownloading((prev) => ({ ...prev, [fullId]: { ...(prev[fullId] ?? { percent: 0 }), paused: false, status: 'Starting…' } }))
-    window.electron.model.download(node.hfRepo!, fullId, node.hfSkipPrefixes, node.hfIncludePrefixes).then((result: { success: boolean; paused?: boolean; cancelled?: boolean }) => {
+  async function handleInstallNode(node: ExtensionNode, fullId: string, variantId?: string) {
+    if (!nodeHasManagedWeights(node)) return { success: true }
+    setDownloading((prev) => ({ ...prev, [fullId]: { ...(prev[fullId] ?? { percent: 0 }), variantId, paused: false, status: 'Starting…' } }))
+    try {
+      const result = await installModelAndRefresh(
+        () => window.electron.model.download(fullId, variantId),
+        () => refreshInstalledIds(useExtensionsStore.getState().modelExtensions),
+      )
       if (!result.success && !result.paused && !result.cancelled) {
-        setGhErr('Download failed')
-        setDownloading((prev) => { const n = { ...prev }; delete n[fullId]; return n })
+        setGhErr(result.error ?? 'Download failed')
       }
-    })
+      if (!result.paused) setDownloading((prev) => { const next = { ...prev }; delete next[fullId]; return next })
+      return result
+    } catch (err) {
+      const error = String(err)
+      setGhErr(error)
+      setDownloading((prev) => { const next = { ...prev }; delete next[fullId]; return next })
+      return { success: false, error }
+    }
   }
 
-  function handleInstallAll(ext: AnyExtension) {
-    if (ext.type !== 'model') return
-    for (const node of ext.nodes) {
-      if (!node.hfRepo) continue
-      const fullId = `${ext.id}/${node.id}`
-      if (installedVariantIds.includes(fullId) || downloading[fullId]) continue
-      handleInstallNode(node, fullId)
+  async function handleInstallAll(ext: AnyExtension) {
+    if (ext.type !== 'model' || installQueues.current.has(ext.id)) return
+    installQueues.current.add(ext.id)
+    try {
+      const nodes = new Map(ext.nodes.filter(nodeHasManagedWeights).map((node) => [`${ext.id}/${node.id}`, node]))
+      await installModelQueue(
+        nodes.keys(),
+        (id) => window.electron.model.isDownloaded(id),
+        (id) => handleInstallNode(nodes.get(id)!, id),
+      )
+    } finally {
+      installQueues.current.delete(ext.id)
     }
   }
 
@@ -188,12 +227,26 @@ export default function ModelsPage(): JSX.Element {
 
   async function handleCancelDownload(fullId: string) {
     setDownloading((prev) => { const n = { ...prev }; delete n[fullId]; return n })
-    await window.electron.model.cancelDownload(fullId)
+    const result = await window.electron.model.cancelDownload(fullId)
+    if (!result.success) setGhErr(result.error ?? 'Could not cancel download')
+    await refreshInstalledIds(useExtensionsStore.getState().modelExtensions)
   }
 
   async function handleUninstallNode(fullId: string) {
     await window.electron.model.delete(fullId)
     refreshInstalledIds(useExtensionsStore.getState().modelExtensions)
+  }
+
+  async function handleDeleteSharedGroup(extensionId: string, groupId: string) {
+    const result = await window.electron.model.deleteSharedGroup(extensionId, groupId)
+    await refreshInstalledIds(useExtensionsStore.getState().modelExtensions)
+    return result
+  }
+
+  async function handleDeleteWeightVariant(fullId: string, variantId: string) {
+    const result = await window.electron.model.deleteWeightVariant(fullId, variantId)
+    await refreshInstalledIds(useExtensionsStore.getState().modelExtensions)
+    return result
   }
 
   // ── GitHub extension install ───────────────────────────────────────────────
@@ -228,8 +281,11 @@ export default function ModelsPage(): JSX.Element {
   function openUninstallModal(extId: string) {
     const ext = allExtensions.find((e) => e.id === extId)
     if (ext?.type === 'model') {
-      const installedModels = ext.nodes.filter((n) => installedVariantIds.includes(`${extId}/${n.id}`))
-      setModelsToDelete(new Set(installedModels.map((n) => `${extId}/${n.id}`)))
+      const localModels = ext.nodes.filter((n) => localDataIds.includes(`${extId}/${n.id}`))
+      const hasSharedLocalData = (sharedGroupStates[extId] ?? []).some((group) => group.hasLocalData)
+      setModelsToDelete(ext.weightGroups?.length && (localModels.length > 0 || hasSharedLocalData)
+        ? new Set([`${extId}/*`])
+        : new Set(localModels.map((n) => `${extId}/${n.id}`)))
     } else {
       setModelsToDelete(new Set())
     }
@@ -237,10 +293,14 @@ export default function ModelsPage(): JSX.Element {
   }
 
   async function handleUninstallExtension(extId: string) {
-    for (const modelId of modelsToDelete) {
-      await window.electron.model.delete(modelId)
-    }
-    const result = await uninstallExt(extId)
+    const result = await deleteModelsThenUninstallExtension(
+      extId,
+      modelsToDelete,
+      (modelId) => modelId === `${extId}/*`
+        ? window.electron.model.deleteExtensionWeights(extId)
+        : window.electron.model.delete(modelId),
+      uninstallExt,
+    )
     if (!result.success) {
       // Keep the dialog open so the failure is visible (locked folder, etc.)
       setUninstallError(result.error ?? 'Could not delete the extension folder.')
@@ -311,7 +371,7 @@ export default function ModelsPage(): JSX.Element {
   }
 
   const cardHandlers = {
-    installedIds: installedVariantIds,
+    installedIds: installedNodeIds,
     downloading,
     disabled: isBusy,
     onInstall: handleInstallNode,
@@ -536,9 +596,13 @@ export default function ModelsPage(): JSX.Element {
               </div>
             )}
 
-            <p className="text-[10px] text-zinc-600">
-              The repo must contain a <span className="font-mono text-zinc-500">manifest.json</span> and a <span className="font-mono text-zinc-500">generator.py</span> at its root.
-            </p>
+            {/* Only a hint before installing: shown under an unrelated error
+                (e.g. a failed setup.py) it reads as the cause (#280). */}
+            {!ghErr && (
+              <p className="text-[10px] text-zinc-600">
+                The repo must contain a <span className="font-mono text-zinc-500">manifest.json</span> and a <span className="font-mono text-zinc-500">generator.py</span> at its root.
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -616,8 +680,10 @@ export default function ModelsPage(): JSX.Element {
       {selectedExt && (
         <ExtensionDrawer
           ext={selectedExt}
-          installedIds={installedVariantIds}
+          installedIds={installedNodeIds}
+          localDataIds={localDataIds}
           downloading={downloading}
+          sharedGroups={sharedGroupStates[selectedExt.id] ?? []}
           loadError={extLoadError(selectedExt)}
           disabled={isBusy}
           onInstall={handleInstallNode}
@@ -625,6 +691,8 @@ export default function ModelsPage(): JSX.Element {
           onPauseDownload={handlePauseDownload}
           onCancelDownload={handleCancelDownload}
           onUninstallNode={handleUninstallNode}
+          onDeleteSharedGroup={handleDeleteSharedGroup}
+          onDeleteWeightVariant={handleDeleteWeightVariant}
           onUninstall={(extId) => openUninstallModal(extId)}
           onRepaired={() => reloadExtensions()}
           onSynced={() => reloadExtensions()}
@@ -636,8 +704,12 @@ export default function ModelsPage(): JSX.Element {
       {uninstallTarget && (() => {
         const ext = allExtensions.find((e) => e.id === uninstallTarget)
         const installedModels = ext?.type === 'model'
-          ? ext.nodes.filter((n) => installedVariantIds.includes(`${uninstallTarget}/${n.id}`))
+          ? ext.nodes.filter((n) => localDataIds.includes(`${uninstallTarget}/${n.id}`))
           : []
+        const sharedExtensionHasData = ext?.type === 'model' && Boolean(ext.weightGroups?.length) && (
+          installedModels.length > 0
+          || (sharedGroupStates[uninstallTarget] ?? []).some((group) => group.hasLocalData)
+        )
 
         return createPortal(
           <div
@@ -666,7 +738,30 @@ export default function ModelsPage(): JSX.Element {
                   </div>
                 </div>
 
-                {installedModels.length > 0 && (
+                {sharedExtensionHasData ? (
+                  <div className="flex flex-col gap-2 px-1">
+                    <p className="text-[11px] font-medium text-zinc-400">
+                      Also delete downloaded model weights:
+                    </p>
+                    <label className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-zinc-800/60 border border-zinc-700/40 cursor-pointer hover:border-zinc-600/60 transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={modelsToDelete.has(`${uninstallTarget}/*`)}
+                        onChange={() => {
+                          setModelsToDelete((prev) => {
+                            const next = new Set(prev)
+                            const id = `${uninstallTarget}/*`
+                            if (next.has(id)) next.delete(id)
+                            else next.add(id)
+                            return next
+                          })
+                        }}
+                        className="accent-accent w-3.5 h-3.5 rounded"
+                      />
+                      <span className="text-xs text-zinc-200">All shared and node-specific weights</span>
+                    </label>
+                  </div>
+                ) : installedModels.length > 0 && (
                   <div className="flex flex-col gap-2 px-1">
                     <p className="text-[11px] font-medium text-zinc-400">
                       Also delete downloaded model weights:

@@ -1,3 +1,4 @@
+import asyncio
 import os
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -28,9 +29,11 @@ async def get_paths():
 
 @router.post("/paths")
 async def update_paths(body: PathsUpdate):
-    reg_module.generator_registry.update_paths(
-        models_dir    = Path(body.models_dir)    if body.models_dir    else None,
-        workspace_dir = Path(body.workspace_dir) if body.workspace_dir else None,
+    # Off the event loop: changing paths waits for any in-progress model load.
+    await asyncio.to_thread(
+        reg_module.generator_registry.update_paths,
+        Path(body.models_dir)    if body.models_dir    else None,
+        Path(body.workspace_dir) if body.workspace_dir else None,
     )
     return {
         "models_dir":    str(reg_module.MODELS_DIR),

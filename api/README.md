@@ -29,6 +29,7 @@ uvicorn main:app --host 127.0.0.1 --port 8765 --reload
 | GET | `/model/status` | Model download / load status |
 | GET | `/model/download` | SSE stream of download progress |
 | POST | `/generate/from-image` | Start image-to-3D job |
+| POST | `/generate/from-artifact` | Start a typed-artifact model job (`scene` only) |
 | GET | `/generate/status/{job_id}` | Poll job status |
 
 ## Model

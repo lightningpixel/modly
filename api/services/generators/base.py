@@ -78,6 +78,7 @@ class BaseGenerator(ABC):
     # Metadata — override in each subclass
     # ------------------------------------------------------------------ #
     MODEL_ID:     str = ""
+    MODEL_NODE_ID: str = ""
     DISPLAY_NAME: str = ""
     VRAM_GB:      int = 0   # Minimum recommended VRAM (in GB)
 
@@ -90,6 +91,9 @@ class BaseGenerator(ABC):
         self.hf_skip_prefixes: list = []
         self.download_check:   str  = ""   # relative path to check in model_dir
         self._params_schema:   list = []   # params declared in the manifest
+        # Host-resolved extension-scoped shared weight roots, keyed by group id.
+        # Model identity and the private model_dir remain unchanged.
+        self.shared_model_dirs: dict[str, Path] = {}
 
     # ------------------------------------------------------------------ #
     # Model lifecycle
@@ -143,7 +147,6 @@ class BaseGenerator(ABC):
     # Inference
     # ------------------------------------------------------------------ #
 
-    @abstractmethod
     def generate(
         self,
         image_bytes: bytes,
@@ -157,7 +160,27 @@ class BaseGenerator(ABC):
         progress_cb(percent: int, step_label: str)
         cancel_event: set this to interrupt generation between steps.
         """
-        ...
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement legacy image generation"
+        )
+
+    def generate_artifact(
+        self,
+        input_kind: str,
+        artifact_path: Path,
+        params: dict,
+        progress_cb: Optional[Callable[[int, str], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Path:
+        """Generate from a validated typed artifact.
+
+        Typed-artifact extensions must implement this explicitly. Falling back
+        to ``generate`` would pass a filesystem ``Path`` to the legacy
+        image-bytes ABI and fail far from the actual contract violation.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement {input_kind} artifact generation"
+        )
 
     def _check_cancelled(self, cancel_event: Optional[threading.Event]) -> None:
         """Raises GenerationCancelled if cancel_event is set."""

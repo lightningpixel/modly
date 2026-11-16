@@ -12,13 +12,22 @@ export function Section({ title, subtitle, children }: { title: string; subtitle
   )
 }
 
-export function Card({ title, description, children }: { title?: string; description?: string; children: React.ReactNode }): JSX.Element {
+export function Card({ title, description, aside, children }: {
+  title?: string
+  description?: React.ReactNode
+  /** Rendered at the right of the header (status badge, …). */
+  aside?: React.ReactNode
+  children: React.ReactNode
+}): JSX.Element {
   return (
     <div className="rounded-xl bg-surface-300 border border-zinc-800 overflow-hidden">
-      {(title || description) && (
-        <div className="px-4 py-3 border-b border-zinc-800/80">
-          {title && <p className="text-xs font-semibold text-zinc-200">{title}</p>}
-          {description && <p className="text-[11px] text-zinc-500 mt-0.5">{description}</p>}
+      {(title || description || aside) && (
+        <div className="px-4 py-3 border-b border-zinc-800/80 flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            {title && <p className="text-xs font-semibold text-zinc-200">{title}</p>}
+            {description && <p className="text-[11px] text-zinc-500 mt-0.5">{description}</p>}
+          </div>
+          {aside && <div className="shrink-0">{aside}</div>}
         </div>
       )}
       <div className="divide-y divide-zinc-800/60">

@@ -1,27 +1,34 @@
 import hashlib
 import os
-import re
-import shutil
 import tempfile
+import time
 import uuid
-
-try:
-    import pymeshlab as _pymeshlab
-    _PYMESHLAB_AVAILABLE = True
-except ImportError:
-    _pymeshlab = None
-    _PYMESHLAB_AVAILABLE = False
+from contextlib import contextmanager
 
 import numpy as np
 import trimesh
-import trimesh.visual
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, Response
 from pathlib import Path
 from urllib.parse import quote
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from services.generator_registry import WORKSPACE_DIR
+from services import imported_sources
+# Import the module (not the name) so WORKSPACE_DIR is read at call time: the
+# settings endpoint rebinds it when the user moves the workspace.
+import services.generator_registry as registry
+from services.mesh_ops import (
+    MeshOpContext,
+    MeshOpExecutionError,
+    MeshOpNotFoundError,
+    MeshOpResult,
+    MeshOpUnavailableError,
+    mesh_ops_registry,
+)
+from services.mesh_ops.glb_patch import GlbPatchError, VertexPatch, patch_glb_file
+from services.mesh_ops.transforms import apply_transforms, transform_file
+from schemas.runs import RunRecord
+from services.run_history import run_history, workspace_relative
 
 router = APIRouter(tags=["optimize"])
 
@@ -36,14 +43,32 @@ class SmoothRequest(BaseModel):
     iterations: int
 
 
+class MeshOpRequest(BaseModel):
+    path: str
+    params: dict[str, object] = Field(default_factory=dict)
+
+
 class TransformRequest(BaseModel):
     path: str                    # format: "{collection}/{filename}"
     matrix: list[list[float]]    # row-major 4x4 world transform
 
 
-def _require_pymeshlab():
-    if not _PYMESHLAB_AVAILABLE:
-        raise HTTPException(503, "pymeshlab is unavailable on this system (DLL blocked by Windows Application Control policy)")
+class ArrangeRequest(BaseModel):
+    path: str                    # format: "{collection}/{filename}"
+    steps: list[str]             # transform op ids, applied in canonical order
+    params: dict[str, dict[str, object]] = Field(default_factory=dict)  # per step id
+
+
+class VertexPatchBody(BaseModel):
+    mesh: int                    # index into gltf.meshes
+    primitive: int               # index into meshes[mesh].primitives
+    positions: str               # base64 little-endian float32, vertexCount * 3
+    normals: str | None = None   # same format, optional
+
+
+class PatchVerticesRequest(BaseModel):
+    path: str                    # format: "{collection}/{filename}.glb"
+    patches: list[VertexPatchBody]
 
 
 def _resolve_input_path(raw_path: str) -> Path:
@@ -54,150 +79,177 @@ def _resolve_input_path(raw_path: str) -> Path:
             raise HTTPException(404, f"File not found: {raw_path}")
         return resolved
 
-    resolved = (WORKSPACE_DIR / raw_path).resolve()
-    if not str(resolved).startswith(str(WORKSPACE_DIR.resolve())):
+    resolved = (registry.WORKSPACE_DIR / raw_path).resolve()
+    if not registry.is_within_workspace(resolved):
         raise HTTPException(400, "Invalid path")
     if not resolved.exists():
         raise HTTPException(404, f"File not found: {raw_path}")
     return resolved
 
 
+def _operation_output_path(input_path: Path, output_name: str) -> Path:
+    workspace = registry.WORKSPACE_DIR.resolve()
+    resolved_input = input_path.resolve()
+    output_dir = (
+        input_path.parent
+        if resolved_input == workspace or workspace in resolved_input.parents
+        else registry.WORKSPACE_DIR / "Workflows"
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir / output_name
+
+
+def _operation_context(
+    output_path: Path | None = None,
+    preserve_visuals: bool = False,
+) -> MeshOpContext:
+    return MeshOpContext(
+        workspace_dir=registry.WORKSPACE_DIR,
+        temp_dir=Path(tempfile.gettempdir()),
+        output_path=output_path,
+        preserve_visuals=preserve_visuals,
+    )
+
+
+@contextmanager
+def _mesh_op_http_errors(unknown_status: int = 404):
+    """Translate mesh-op failures into HTTP errors."""
+    try:
+        yield
+    except MeshOpNotFoundError as exc:
+        raise HTTPException(unknown_status, f"Unknown mesh operation: {exc}") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (MeshOpUnavailableError, MeshOpExecutionError) as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+def _run_operation(
+    operation_id: str,
+    input_path: Path,
+    params: dict[str, object],
+    output_path: Path | None = None,
+    preserve_visuals: bool = False,
+) -> MeshOpResult:
+    context = _operation_context(output_path, preserve_visuals)
+    started_at = time.time()
+    try:
+        with _mesh_op_http_errors():
+            result = mesh_ops_registry.run(operation_id, input_path, params, context)
+    except HTTPException as exc:
+        _record_mesh_op(operation_id, input_path, params, started_at, error=str(exc.detail))
+        raise
+    # Analysis ops (inspect_mesh, suggest_fixes) only report: the viewer calls them on
+    # every selection, and they would crowd real runs out of the capped history.
+    if result.file_path is not None:
+        _record_mesh_op(operation_id, input_path, params, started_at, output=result.file_path)
+    return result
+
+
+def _record_mesh_op(
+    operation_id: str,
+    input_path: Path,
+    params: dict[str, object],
+    started_at: float,
+    output: Path | None = None,
+    error: str | None = None,
+) -> None:
+    """Persist a synchronous mesh op in run history (services.run_history)."""
+    workspace = registry.WORKSPACE_DIR
+    run_history.save(RunRecord(
+        id=str(uuid.uuid4()),
+        kind="mesh_op",
+        op_id=operation_id,
+        status="error" if error is not None else "done",
+        inputs={"mesh": workspace_relative(input_path, workspace)},
+        params=dict(params),
+        error=error,
+        output_path=workspace_relative(output, workspace) if output is not None else None,
+        created_at=started_at,
+        started_at=started_at,
+        ended_at=time.time(),
+    ))
+
+
+def _operation_response(result: MeshOpResult) -> dict[str, object]:
+    if result.file_path is None:
+        # Analysis ops (inspect_mesh, suggest_fixes) return only their report.
+        return dict(result.details)
+
+    output_path = result.file_path.resolve()
+    try:
+        relative_path = output_path.relative_to(registry.WORKSPACE_DIR.resolve()).as_posix()
+    except ValueError:
+        payload: dict[str, object] = {"path": str(output_path)}
+    else:
+        payload = {
+            "path": relative_path,
+            "url": f"/workspace/{relative_path}",
+        }
+    payload.update(result.details)
+    return payload
+
+
+@router.get("/ops")
+def list_mesh_operations():
+    return mesh_ops_registry.describe()
+
+
+@router.post("/op/{op_name}")
+def run_mesh_operation(op_name: str, body: MeshOpRequest):
+    input_path = _resolve_input_path(body.path)
+    # Next to the input, like the dedicated edit routes; analysis ops ignore it.
+    output_path = _operation_output_path(
+        input_path,
+        f"{input_path.stem}_{op_name}_{uuid.uuid4().hex[:8]}.glb",
+    )
+    return _operation_response(
+        _run_operation(op_name, input_path, body.params, output_path)
+    )
+
+
 @router.post("/mesh")
 def optimize_mesh(body: OptimizeRequest):
-    _require_pymeshlab()
     target_faces = max(100, min(500_000, body.target_faces))
-
     input_path = _resolve_input_path(body.path)
-
-    tmp_dir = tempfile.mkdtemp()
-    try:
-        result = _decimate(str(input_path), target_faces, tmp_dir)
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    stem = input_path.stem
-    output_name = f"{stem}_opt{target_faces}.glb"
-    output_dir = input_path.parent if str(input_path).startswith(str(WORKSPACE_DIR.resolve())) else WORKSPACE_DIR / "Workflows"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / output_name
-    result.export(str(output_path))
-
-    face_count = len(result.faces)
-    rel = output_path.relative_to(WORKSPACE_DIR).as_posix()
-    return {"url": f"/workspace/{rel}", "face_count": face_count}
-
-
-def _has_texture(geom: trimesh.Trimesh) -> bool:
-    if not isinstance(geom.visual, trimesh.visual.TextureVisuals):
-        return False
-    mat = geom.visual.material
-    if mat is None:
-        return False
-    # Simple material (SimpleMaterial / Material)
-    if getattr(mat, "image", None) is not None:
-        return True
-    # PBR material (from Trellis2 SLaT texturing and GLB imports)
-    if getattr(mat, "baseColorTexture", None) is not None:
-        return True
-    return False
-
-
-def _get_texture_image(geom: trimesh.Trimesh):
-    """Return the base color texture image regardless of material type."""
-    mat = geom.visual.material
-    img = getattr(mat, "image", None)
-    if img is not None:
-        return img
-    return getattr(mat, "baseColorTexture", None)
-
-
-def _decimate(input_path: str, target_faces: int, tmp_dir: str) -> trimesh.Trimesh:
-    loaded = trimesh.load(input_path)
-    if isinstance(loaded, trimesh.Scene):
-        geoms = list(loaded.geometry.values())
-        geom = trimesh.util.concatenate(geoms) if len(geoms) > 1 else geoms[0]
-    else:
-        geom = loaded
-
-    ms = _pymeshlab.MeshSet()
-
-    if _has_texture(geom):
-        # ── Textured path: OBJ intermediate to preserve UV coordinates ──────
-        obj_in  = os.path.join(tmp_dir, "input.obj")
-        mtl_in  = os.path.join(tmp_dir, "input.mtl")
-        tex_in  = os.path.join(tmp_dir, "texture.png")
-        obj_out = os.path.join(tmp_dir, "output.obj")
-
-        # Save texture image under a known filename (handles PBR and simple materials)
-        _get_texture_image(geom).save(tex_in)
-
-        # Export OBJ (trimesh writes UV coords + MTL)
-        geom.export(obj_in)
-
-        # Patch MTL so any map_Kd points to our known texture filename
-        if os.path.exists(mtl_in):
-            mtl = open(mtl_in).read()
-            mtl = re.sub(r"map_Kd\s+\S+", "map_Kd texture.png", mtl)
-            open(mtl_in, "w").write(mtl)
-
-        ms.load_new_mesh(obj_in)
-        ms.meshing_decimation_quadric_edge_collapse(
-            targetfacenum=target_faces,
-            preservetexcoord=True,   # ← keeps UV coordinates intact
-            preservenormal=True,
-            preservetopology=True,
-            autoclean=True,
+    output_path = _operation_output_path(
+        input_path,
+        f"{input_path.stem}_opt{target_faces}.glb",
+    )
+    response = _operation_response(
+        _run_operation(
+            "decimate",
+            input_path,
+            {"target_faces": target_faces},
+            output_path,
         )
-        ms.save_current_mesh(obj_out)
-
-        # Patch output MTL too, so trimesh can find the texture on load
-        mtl_out = obj_out.replace(".obj", ".mtl")
-        if os.path.exists(mtl_out):
-            mtl = open(mtl_out).read()
-            mtl = re.sub(r"map_Kd\s+\S+", "map_Kd texture.png", mtl)
-            open(mtl_out, "w").write(mtl)
-
-        return trimesh.load(obj_out)
-
-    else:
-        # ── Geometry-only path: PLY (fast, no texture to worry about) ────────
-        ply_in  = os.path.join(tmp_dir, "input.ply")
-        ply_out = os.path.join(tmp_dir, "output.ply")
-
-        geom.export(ply_in)
-        ms.load_new_mesh(ply_in)
-        ms.meshing_decimation_quadric_edge_collapse(
-            targetfacenum=target_faces,
-            preservenormal=True,
-            preservetopology=True,
-            autoclean=True,
-        )
-        ms.save_current_mesh(ply_out)
-        return trimesh.load(ply_out, force="mesh")
+    )
+    return {
+        "url": response.get("url"),
+        "face_count": response.get("face_count", 0),
+    }
 
 
 @router.post("/smooth")
 def smooth_mesh(body: SmoothRequest):
-    _require_pymeshlab()
     iterations = max(1, min(20, body.iterations))
-
     input_path = _resolve_input_path(body.path)
-
-    tmp_dir = tempfile.mkdtemp()
-    try:
-        result = _smooth(str(input_path), iterations, tmp_dir)
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    stem = input_path.stem
-    output_name = f"{stem}_smooth{iterations}.glb"
-    output_dir = input_path.parent if str(input_path).startswith(str(WORKSPACE_DIR.resolve())) else WORKSPACE_DIR / "Workflows"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / output_name
-    result.export(str(output_path))
-
-    rel = output_path.relative_to(WORKSPACE_DIR).as_posix()
-    return {"url": f"/workspace/{rel}"}
+    output_path = _operation_output_path(
+        input_path,
+        f"{input_path.stem}_smooth{iterations}.glb",
+    )
+    response = _operation_response(
+        _run_operation(
+            "smooth",
+            input_path,
+            {"iterations": iterations, "lambda_": 0.5, "mode": "laplacian"},
+            output_path,
+            preserve_visuals=True,
+        )
+    )
+    return {"url": response.get("url")}
 
 
 @router.post("/transform")
@@ -212,67 +264,55 @@ def transform_mesh(body: TransformRequest):
     if not np.all(np.isfinite(matrix)):
         raise HTTPException(400, "matrix contains non-finite values")
 
-    # Keep the loaded result as-is (Scene when textured/multi-geometry) so
-    # apply_transform preserves materials and UVs.
-    loaded = trimesh.load(str(input_path))
-    loaded.apply_transform(matrix)
+    output_path = transform_file(input_path, matrix, _transform_output_path(input_path))
 
-    stem = input_path.stem
-    output_name = f"{stem}_xf_{uuid.uuid4().hex[:8]}.glb"
-    output_dir = input_path.parent if str(input_path).startswith(str(WORKSPACE_DIR.resolve())) else WORKSPACE_DIR / "Workflows"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / output_name
-    loaded.export(str(output_path))
-
-    rel = output_path.relative_to(WORKSPACE_DIR).as_posix()
+    rel = output_path.resolve().relative_to(registry.WORKSPACE_DIR.resolve()).as_posix()
     return {"url": f"/workspace/{rel}"}
 
 
-def _smooth(input_path: str, iterations: int, tmp_dir: str) -> trimesh.Trimesh:
-    loaded = trimesh.load(input_path)
-    if isinstance(loaded, trimesh.Scene):
-        geoms = list(loaded.geometry.values())
-        geom = trimesh.util.concatenate(geoms) if len(geoms) > 1 else geoms[0]
-    else:
-        geom = loaded
+@router.post("/arrange")
+def arrange_mesh(body: ArrangeRequest):
+    # Semantic transforms (recenter, drop_to_ground, auto_orient,
+    # normalize_scale) composed into one file, in canonical order.
+    input_path = _resolve_input_path(body.path)
+    with _mesh_op_http_errors(unknown_status=400):
+        steps = [
+            (step_id, mesh_ops_registry.resolve_params(step_id, body.params.get(step_id)))
+            for step_id in body.steps
+        ]
+        result = apply_transforms(
+            input_path,
+            steps,
+            _transform_output_path(input_path),
+            _operation_context(),
+        )
+    return _operation_response(result)
 
-    ms = _pymeshlab.MeshSet()
 
-    if _has_texture(geom):
-        obj_in  = os.path.join(tmp_dir, "input.obj")
-        mtl_in  = os.path.join(tmp_dir, "input.mtl")
-        tex_in  = os.path.join(tmp_dir, "texture.png")
-        obj_out = os.path.join(tmp_dir, "output.obj")
+@router.post("/patch-vertices")
+def patch_vertices(body: PatchVerticesRequest):
+    # Sculpt commit: write the viewer's edited vertex data into a copy of the
+    # GLB at container level, so textures, materials and extensions survive.
+    input_path = _resolve_input_path(body.path)
+    if input_path.suffix.lower() != ".glb":
+        raise HTTPException(400, "Sculpt patches can only be applied to .glb files")
+    output_path = _operation_output_path(
+        input_path,
+        f"{input_path.stem}_sculpt_{uuid.uuid4().hex[:8]}.glb",
+    )
+    patches = [VertexPatch(**patch.model_dump()) for patch in body.patches]
+    try:
+        patch_glb_file(input_path, output_path, patches)
+    except GlbPatchError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return _operation_response(MeshOpResult(output_path, {}))
 
-        _get_texture_image(geom).save(tex_in)
-        geom.export(obj_in)
 
-        if os.path.exists(mtl_in):
-            mtl = open(mtl_in).read()
-            mtl = re.sub(r"map_Kd\s+\S+", "map_Kd texture.png", mtl)
-            open(mtl_in, "w").write(mtl)
-
-        ms.load_new_mesh(obj_in)
-        ms.apply_coord_laplacian_smoothing(stepsmoothnum=iterations)
-        ms.save_current_mesh(obj_out)
-
-        mtl_out = obj_out.replace(".obj", ".mtl")
-        if os.path.exists(mtl_out):
-            mtl = open(mtl_out).read()
-            mtl = re.sub(r"map_Kd\s+\S+", "map_Kd texture.png", mtl)
-            open(mtl_out, "w").write(mtl)
-
-        return trimesh.load(obj_out)
-
-    else:
-        ply_in  = os.path.join(tmp_dir, "input.ply")
-        ply_out = os.path.join(tmp_dir, "output.ply")
-
-        geom.export(ply_in)
-        ms.load_new_mesh(ply_in)
-        ms.apply_coord_laplacian_smoothing(stepsmoothnum=iterations)
-        ms.save_current_mesh(ply_out)
-        return trimesh.load(ply_out, force="mesh")
+def _transform_output_path(input_path: Path) -> Path:
+    return _operation_output_path(
+        input_path,
+        f"{input_path.stem}_xf_{uuid.uuid4().hex[:8]}.glb",
+    )
 
 
 class ImportByPathRequest(BaseModel):
@@ -420,6 +460,7 @@ async def import_mesh_by_path(body: ImportByPathRequest):
 
     if ext == "glb":
         # Serve the original file directly — no copy
+        imported_sources.register(file_path, file_path)
         return {"url": f"/optimize/serve-file?path={quote(str(file_path))}"}
 
     # Mesh ply / obj / stl: convert to GLB in a temp directory (not the workspace)
@@ -427,6 +468,10 @@ async def import_mesh_by_path(body: ImportByPathRequest):
     output_path = os.path.join(tmp_dir, "mesh.glb")
     loaded = trimesh.load(str(file_path))
     loaded.export(output_path)
+    # Remember the ORIGINAL extension: this conversion changes the container but
+    # not the axes, so a .stl imported here still holds Z-up data despite the
+    # .glb suffix, and must not be rotated as if it were glTF.
+    imported_sources.register(output_path, file_path)
     return {"url": f"/optimize/serve-file?path={quote(output_path)}"}
 
 
@@ -454,10 +499,8 @@ def ply_to_splat(path: str):
     `path` is workspace-relative (e.g. "Workflows/foo.ply"). A .splat is served
     as-is; a GS .ply is normalised + converted (cached by mtime + conv version).
     """
-    import services.generator_registry as reg  # dynamic: workspace dir may change at runtime
-    workspace = reg.WORKSPACE_DIR.resolve()
-    src = (workspace / path).resolve()
-    if not str(src).startswith(str(workspace)):
+    src = (registry.WORKSPACE_DIR.resolve() / path).resolve()
+    if not registry.is_within_workspace(src):
         raise HTTPException(400, "Invalid path")
     if not src.is_file():
         raise HTTPException(404, "File not found")
@@ -482,8 +525,8 @@ def export_mesh(path: str, format: str):
     if format not in ("obj", "stl", "ply"):
         raise HTTPException(400, "Supported formats: obj, stl, ply")
 
-    input_path = (WORKSPACE_DIR / path).resolve()
-    if not str(input_path).startswith(str(WORKSPACE_DIR.resolve())):
+    input_path = (registry.WORKSPACE_DIR / path).resolve()
+    if not registry.is_within_workspace(input_path):
         raise HTTPException(400, "Invalid path")
     if not input_path.exists():
         raise HTTPException(404, f"File not found: {path}")

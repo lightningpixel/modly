@@ -4,8 +4,9 @@
  */
 import { existsSync, readdirSync, statSync, readFileSync } from 'fs'
 import { join } from 'path'
-import { getSettings } from './settings-store'
-import { app } from 'electron'
+import { getHfToken } from './hf-token'
+import { apiBaseUrl } from './python-bridge'
+import type { ModelSource } from './model-sources'
 
 export interface DownloadProgress {
   percent: number
@@ -19,7 +20,7 @@ export interface DownloadProgress {
 }
 export type ProgressCallback = (progress: DownloadProgress) => void
 
-const PYTHON_API_URL = process.env['PYTHON_API_URL'] ?? 'http://127.0.0.1:8765'
+const pythonApiUrl = (): string => process.env['PYTHON_API_URL'] ?? apiBaseUrl()
 
 // ------------------------------------------------------------------
 // Public API
@@ -121,34 +122,70 @@ export async function downloadModelFromHF(
   includePrefixes?: string[],
 ): Promise<void> {
   const { net } = require('electron')
-  const STALL_TIMEOUT_MS = 120_000
-  let url = `${PYTHON_API_URL}/model/hf-download?repo_id=${encodeURIComponent(repoId)}&model_id=${encodeURIComponent(modelId)}`
+  let url = `${pythonApiUrl()}/model/hf-download?repo_id=${encodeURIComponent(repoId)}&model_id=${encodeURIComponent(modelId)}`
   if (skipPrefixes && skipPrefixes.length > 0) {
     url += `&skip_prefixes=${encodeURIComponent(JSON.stringify(skipPrefixes))}`
   }
   if (includePrefixes && includePrefixes.length > 0) {
     url += `&include_prefixes=${encodeURIComponent(JSON.stringify(includePrefixes))}`
   }
-  const hfToken = getSettings(app.getPath('userData')).hfToken
-  if (hfToken) {
-    url += `&token=${encodeURIComponent(hfToken)}`
-  }
-
-  const res = await net.fetch(url)
+  // Header, never a query param: uvicorn logs the full request line to stdout,
+  // python-bridge pipes that into runtime.log, and `log:readAll` hands that file
+  // to the user for bug reports. The token used to ride all the way there.
+  const hfToken = getHfToken()   // decrypted cache — settings.json holds the ciphertext
+  const res = await net.fetch(url, hfToken ? { headers: { 'X-HF-Token': hfToken } } : undefined)
   if (!res.ok) throw new Error(`HuggingFace download failed: HTTP ${res.status}`)
+  await consumeDownloadStream(res, onProgress)
+}
+
+/** Download a validated node-level source plan through one aggregate SSE stream. */
+export async function downloadModelSourcesFromHF(
+  modelId: string,
+  sources: ModelSource[],
+  onProgress: ProgressCallback,
+): Promise<void> {
+  const { net } = require('electron')
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const hfToken = getHfToken()
+  if (hfToken) headers.Authorization = `Bearer ${hfToken}`
+  const url = `${pythonApiUrl()}/model/hf-download-sources?model_id=${encodeURIComponent(modelId)}`
+  const res = await net.fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ sources }),
+  })
+  if (!res.ok) throw new Error(`HuggingFace multi-source download failed: HTTP ${res.status}`)
+  await consumeDownloadStream(res, onProgress)
+}
+
+async function consumeDownloadStream(
+  res: Response,
+  onProgress: ProgressCallback,
+): Promise<void> {
   if (!res.body) throw new Error('No response body from HF download stream')
 
   const decoder = new TextDecoder()
   const reader  = res.body.getReader()
   let buffer = ''
+  const STALL_TIMEOUT_MS = 120_000
 
   async function readWithTimeout() {
-    return await Promise.race([
-      reader.read(),
-      new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error(`Model download stalled for ${Math.round(STALL_TIMEOUT_MS / 1000)}s`)), STALL_TIMEOUT_MS)
-      }),
-    ])
+    // The timer has to be cleared: an SSE stream emitting ~10 events/s otherwise
+    // keeps every timer created in the last 120 s alive in the main process.
+    let timer: NodeJS.Timeout | undefined
+    try {
+      return await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`Model download stalled for ${Math.round(STALL_TIMEOUT_MS / 1000)}s`)),
+            STALL_TIMEOUT_MS,
+          )
+        }),
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
   }
 
   while (true) {

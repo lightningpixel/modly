@@ -34,6 +34,15 @@ MODLY_API_DIR = os.environ.get("MODLY_API_DIR", "")
 # MODEL_DIR is set by ExtensionProcess to match its own model_dir (composite node id path).
 # Falls back to MODELS_DIR/manifest_id for standalone/legacy use.
 _MODEL_DIR_OVERRIDE = os.environ.get("MODEL_DIR", "")
+_MODEL_ID_OVERRIDE = os.environ.get("MODEL_ID", "")
+_MODEL_NODE_ID_OVERRIDE = os.environ.get("MODEL_NODE_ID", "")
+try:
+    _SHARED_MODEL_DIRS = {
+        str(group_id): Path(path)
+        for group_id, path in json.loads(os.environ.get("SHARED_MODEL_DIRS", "{}")).items()
+    }
+except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+    _SHARED_MODEL_DIRS = {}
 
 # Inject Modly's api/ so generator.py can do:
 #   from services.generators.base import BaseGenerator, ...
@@ -87,8 +96,12 @@ def load_generator(manifest: dict):
     return getattr(mod, manifest["generator_class"])
 
 
-def _select_node(manifest: dict, model_dir_override: str) -> dict:
+def _select_node(
+    manifest: dict, model_dir_override: str, node_id_override: str = ""
+) -> dict:
     nodes = manifest.get("nodes") or []
+    if nodes and node_id_override:
+        return next((n for n in nodes if n.get("id") == node_id_override), nodes[0])
     if nodes and model_dir_override:
         node_id = Path(model_dir_override).name
         return next((n for n in nodes if n.get("id") == node_id), nodes[0])
@@ -104,11 +117,77 @@ def _resolve_ready_schema(GenClass, node: dict, manifest: dict) -> list:
         return node.get("params_schema") or manifest.get("params_schema", [])
 
 
+def _generator_is_loaded(gen) -> bool:
+    """
+    Best-effort read of the generator's loaded state.
+
+    Never raises: this is used on the error path, where a generator left in a
+    half-initialised state can make is_loaded() itself blow up. An unreadable
+    state is reported as "not loaded" so the caller reloads rather than reusing
+    a worker that may be broken.
+    """
+    try:
+        return bool(gen.is_loaded())
+    except Exception:
+        return False
+
+
+def _ensure_model_loaded(gen) -> bool:
+    """
+    Guarantees the model is in memory before inference. Returns True if a
+    reload was needed.
+
+    Texture pipelines are built lazily on first use, and extensions typically
+    free the shape pipeline first to make room for them. When that setup fails
+    (a missing `xatlas` being the common case) the generator is left with
+    _model = None, yet the worker process stays alive and both ExtensionProcess
+    and GeneratorRegistry still consider it loaded — so load() is never called
+    again and every later generate() dies with
+
+        TypeError: 'NoneType' object is not callable
+
+    until the process is killed by hand. Re-loading here mirrors what
+    GeneratorRegistry.get_active() already does host-side, which makes a failed
+    setup recoverable on the next attempt instead of permanently poisoning the
+    worker.
+    """
+    if _generator_is_loaded(gen):
+        return False
+    gen.load()
+    return True
+
+
 def _apply_manifest_metadata(gen, manifest: dict, node: dict) -> None:
     gen.hf_repo = node.get("hf_repo") or manifest.get("hf_repo", "")
     gen.hf_skip_prefixes = node.get("hf_skip_prefixes") or manifest.get("hf_skip_prefixes", [])
     gen.download_check = node.get("download_check") or manifest.get("download_check", "")
     gen._params_schema = node.get("params_schema") or manifest.get("params_schema", [])
+
+
+def decode_model_input(msg: dict):
+    """Decode legacy image bytes or revalidate a typed artifact in the worker."""
+    if "input" not in msg:
+        return base64.b64decode(msg["image_b64"])
+    value = msg["input"]
+    if not isinstance(value, dict) or set(value) != {"kind", "path"}:
+        raise ValueError("Typed artifact input must contain exactly kind and path")
+    from services.artifact_input import TypedArtifactInput, revalidate_artifact_input
+    typed = TypedArtifactInput(kind=value.get("kind"), path=Path(value.get("path", "")))
+    return revalidate_artifact_input(WORKSPACE_DIR, typed)
+
+
+def validate_requested_model(msg: dict, manifest: dict, node: dict) -> None:
+    """Reject requests routed to a worker for a different manifest node."""
+    requested = msg.get("model_id")
+    if requested is None:  # Backward compatibility with already-running legacy hosts.
+        return
+    expected = manifest["id"]
+    if node.get("id"):
+        expected = f"{expected}/{node['id']}"
+    if requested != expected:
+        raise ValueError(
+            f"Generation request model '{requested}' does not match worker model '{expected}'"
+        )
 
 
 # ------------------------------------------------------------------ #
@@ -117,7 +196,7 @@ def _apply_manifest_metadata(gen, manifest: dict, node: dict) -> None:
 
 def main() -> None:
     manifest = json.loads((EXT_DIR / "manifest.json").read_text(encoding="utf-8"))
-    model_id = manifest["id"]
+    model_id = _MODEL_ID_OVERRIDE or manifest["id"]
 
     try:
         GenClass = load_generator(manifest)
@@ -127,11 +206,9 @@ def main() -> None:
               "traceback": traceback.format_exc()})
         return
 
-    # Support both flat manifest (legacy) and nodes[] format.
-    # Use MODEL_DIR to find the correct node for multi-node extensions:
-    # MODEL_DIR is set by ExtensionProcess to MODELS_DIR/ext_id/node_id,
-    # so its last component matches the node id.
-    node = _select_node(manifest, _MODEL_DIR_OVERRIDE)
+    # Support both flat manifest (legacy) and nodes[] format. The host passes an
+    # explicit node id; MODEL_DIR name inference remains only as a legacy fallback.
+    node = _select_node(manifest, _MODEL_DIR_OVERRIDE, _MODEL_NODE_ID_OVERRIDE)
 
     # Announce readiness and send params_schema so ExtensionProcess
     # can serve it without needing to query the subprocess later.
@@ -144,6 +221,9 @@ def main() -> None:
     # Falls back to MODELS_DIR/manifest_id for legacy / standalone use.
     model_dir = Path(_MODEL_DIR_OVERRIDE) if _MODEL_DIR_OVERRIDE else MODELS_DIR / model_id
     gen = GenClass(model_dir, WORKSPACE_DIR)
+    gen.MODEL_ID = model_id
+    gen.MODEL_NODE_ID = node.get("id", "")
+    gen.shared_model_dirs = dict(_SHARED_MODEL_DIRS)
     _apply_manifest_metadata(gen, manifest, node)
 
     # Active cancel events keyed by request id
@@ -161,10 +241,18 @@ def main() -> None:
 
             # ---- generate --------------------------------------------
             elif action == "generate":
+                validate_requested_model(msg, manifest, node)
                 cancel_evt = threading.Event()
                 _cancel[rid] = cancel_evt
-                image_bytes  = base64.b64decode(msg["image_b64"])
+                model_input  = decode_model_input(msg)
                 params       = msg.get("params", {})
+                if hasattr(model_input, "kind"):
+                    if not isinstance(params, dict):
+                        raise ValueError("Model params must be an object")
+                    from services.artifact_input import RESERVED_ARTIFACT_PARAMS
+                    params = {key: value for key, value in params.items()
+                              if key not in RESERVED_ARTIFACT_PARAMS}
+                    params["scene_manifest_path"] = str(model_input.path)
                 if msg.get("outputs_dir"):
                     gen.outputs_dir = Path(msg["outputs_dir"])
                     gen.outputs_dir.mkdir(parents=True, exist_ok=True)
@@ -173,16 +261,37 @@ def main() -> None:
                     send({"type": "progress", "id": rid, "pct": pct, "step": step})
 
                 try:
-                    output_path = gen.generate(image_bytes, params, progress_cb, cancel_evt)
+                    if _ensure_model_loaded(gen):
+                        send({"type": "log", "level": "warning",
+                              "message": ("Model was not loaded (earlier setup failure?); "
+                                          "reloaded before generating.")})
+                    if hasattr(model_input, "kind"):
+                        output_path = gen.generate_artifact(
+                            model_input.kind, model_input.path, params, progress_cb, cancel_evt
+                        )
+                    else:
+                        output_path = gen.generate(model_input, params, progress_cb, cancel_evt)
+                    if node.get("output") == "scene":
+                        from services.scene_input import validate_scene_input
+                        resolved_output = Path(output_path).resolve(strict=True)
+                        try:
+                            relative_output = resolved_output.relative_to(WORKSPACE_DIR.resolve(strict=True))
+                        except (OSError, ValueError) as exc:
+                            raise ValueError("Generated scene output is outside the workspace") from exc
+                        output_path = validate_scene_input(WORKSPACE_DIR, relative_output.as_posix())
                     send({"type": "done", "id": rid, "output_path": str(output_path)})
                 except Exception as exc:
                     # Detect GenerationCancelled by name to avoid import issues
                     if type(exc).__name__ == "GenerationCancelled":
                         send({"type": "cancelled", "id": rid})
                     else:
+                        # Report whether the model survived the failure so the
+                        # host can drop its cached "loaded" flag and reload
+                        # instead of reusing a worker whose _model is None.
                         send({"type": "error", "id": rid,
                               "message": str(exc),
-                              "traceback": traceback.format_exc()})
+                              "traceback": traceback.format_exc(),
+                              "loaded": _generator_is_loaded(gen)})
                 finally:
                     _cancel.pop(rid, None)
 

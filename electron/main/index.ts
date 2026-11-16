@@ -8,6 +8,7 @@ import { initAutoUpdater } from './updater'
 import { syncBuiltinExtensions } from './builtin-sync'
 import { reconcileInterruptedExtensionInstalls } from './extension-install-recovery'
 import { getSettings } from './settings-store'
+import { handleThumbnailProtocol, registerThumbnailScheme } from './asset-thumbnail-protocol'
 
 let mainWindow: BrowserWindow | null = null
 let pythonBridge: PythonBridge | null = null
@@ -33,7 +34,8 @@ function createWindow(): void {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      backgroundThrottling: false
     }
   })
 
@@ -75,6 +77,7 @@ function createWindow(): void {
 }
 
 app.setName('Modly')
+registerThumbnailScheme()
 
 process.on('uncaughtException', (err) => {
   if ((err as NodeJS.ErrnoException).code === 'EPIPE') return
@@ -99,6 +102,8 @@ app.whenReady().then(async () => {
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
+
+  handleThumbnailProtocol()
 
   // Sync built-in extensions from app resources to userData
   syncBuiltinExtensions()

@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from services.stdio_utf8 import ensure_utf8_stdio
 ensure_utf8_stdio()  # must run before any print/logging hits the pipe
 
-from routers import generation, model, optimize, status, settings, extensions, export, workflow_runs, agent
+from routers import generation, model, optimize, status, settings, extensions, export, workflow_runs, agent, llm
 
 
 @asynccontextmanager
@@ -20,9 +20,19 @@ async def lifespan(app: FastAPI):
     # Startup: initialize the registry (instantiates all adapters)
     from services.generator_registry import generator_registry
     generator_registry.initialize()
+    # Persisted run history at the workspace root; read per call so a relocated
+    # workspace is followed. Loading marks runs a previous backend left running as
+    # interrupted.
+    import services.generator_registry as registry
+    from services.run_history import RUN_HISTORY_FILENAME, run_history
+    run_history.start(lambda: registry.WORKSPACE_DIR / RUN_HISTORY_FILENAME)
     yield
-    # Shutdown: unload all models
+    # Shutdown: runs still in flight will never finish
+    run_history.stop()
+    # Unload all models and stop the local LLM server
     generator_registry.unload_all()
+    from services.llm_server import llama_pool
+    llama_pool.unload_all(force=True)
 
 
 class _StatusFilter(logging.Filter):
@@ -34,7 +44,7 @@ logging.getLogger("uvicorn.access").addFilter(_StatusFilter())
 
 app = FastAPI(
     title="Modly API",
-    version="0.4.2",
+    version="0.4.3",
     lifespan=lifespan,
 )
 
@@ -57,6 +67,7 @@ app.include_router(extensions.router, prefix="/extensions")
 app.include_router(export.router,          prefix="/export")
 app.include_router(workflow_runs.router,   prefix="/workflow-runs")
 app.include_router(agent.router)
+app.include_router(llm.router,             prefix="/llm")
 
 # Serve generated files from workspace — dynamic so path changes take effect immediately
 @app.get("/workspace/{full_path:path}")

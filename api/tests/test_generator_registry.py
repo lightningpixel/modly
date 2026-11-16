@@ -4,8 +4,10 @@ import inspect
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import services.generator_registry as registry_module
 from services.extension_process import ExtensionProcess
@@ -154,6 +156,277 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
         registry_module.EXTENSIONS_DIR.mkdir()
         self.registry.reload()
         self.assertNotIn(str(extension.resolve()), sys.path)
+
+    def test_scene_and_existing_custom_io_types_are_registered(self) -> None:
+        for extension_id, input_kind in (("scene-io", "scene"), ("capture-io", "capture"), ("video-io", "video")):
+            extension = self._make_extension(extension_id)
+            manifest = {
+                "id": extension_id, "name": extension_id, "type": "model",
+                "generator_class": "TestGenerator",
+                "nodes": [{"id": "generate", "input": input_kind, "output": "scene"}],
+            }
+            (extension / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            (extension / "generator.py").write_text(
+                "from services.generators.base import BaseGenerator\n"
+                "class TestGenerator(BaseGenerator):\n"
+                " def load(self): self._model = object()\n"
+                " def generate(self, value, params, progress_cb=None, cancel_event=None): return self.outputs_dir\n",
+                encoding="utf-8",
+            )
+
+        self.registry.initialize()
+        self.assertEqual(self.registry.get_manifest("scene-io/generate")["input"], "scene")
+        self.assertEqual(self.registry.get_manifest("capture-io/generate")["input"], "capture")
+        self.assertEqual(self.registry.get_manifest("video-io/generate")["input"], "video")
+
+    def test_scene_input_rejects_multi_input_shapes_but_image_multi_can_output_scene(self) -> None:
+        cases = {
+            "scene-mixed": {"input": "scene", "inputs": ["scene", "text"], "output": "mesh"},
+            "scene-array": {"input": "scene", "inputs": ["scene"], "output": "mesh"},
+            "images-scene": {"input": "image", "inputs": ["image", "image"], "output": "scene"},
+        }
+        for extension_id, node in cases.items():
+            extension = self._make_extension(extension_id)
+            (extension / "manifest.json").write_text(json.dumps({
+                "id": extension_id, "name": extension_id, "type": "model",
+                "generator_class": "TestGenerator",
+                "nodes": [{"id": "generate", **node}],
+            }), encoding="utf-8")
+            (extension / "generator.py").write_text(
+                "from services.generators.base import BaseGenerator\n"
+                "class TestGenerator(BaseGenerator):\n"
+                " def load(self): self._model = object()\n"
+                " def generate(self, value, params, progress_cb=None, cancel_event=None): return self.outputs_dir\n",
+                encoding="utf-8",
+            )
+        self.registry.initialize()
+        self.assertIn("scene-mixed/generate", self.registry.load_errors())
+        self.assertIn("scene-array/generate", self.registry.load_errors())
+        self.assertIn("images-scene/generate", self.registry._generators)
+
+    def test_declared_sources_block_generation_even_when_generator_overrides_readiness(self) -> None:
+        extension = self._make_extension("multi-source")
+        manifest = {
+            "id": "multi-source",
+            "name": "multi-source",
+            "type": "model",
+            "generator_class": "TestGenerator",
+            "nodes": [{
+                "id": "generate",
+                "model_sources": [
+                    {
+                        "id": "primary",
+                        "provider": "huggingface",
+                        "repo_id": "org/main",
+                        "destination": ".",
+                        "checks": ["main.bin"],
+                    },
+                    {
+                        "id": "encoder",
+                        "provider": "huggingface",
+                        "repo_id": "org/encoder",
+                        "destination": "auxiliary/encoder",
+                        "checks": ["encoder.bin"],
+                    },
+                ],
+            }],
+        }
+        (extension / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (extension / "generator.py").write_text(
+            "\n".join([
+                "from services.generators.base import BaseGenerator",
+                "class TestGenerator(BaseGenerator):",
+                "    def is_downloaded(self): return True",
+                "    def load(self): self._model = object()",
+                "    def generate(self, image_bytes, params, progress_cb=None, cancel_event=None):",
+                "        return self.outputs_dir / 'result.glb'",
+            ]),
+            encoding="utf-8",
+        )
+
+        self.registry.initialize()
+        self.registry._active_id = "multi-source/generate"
+        with self.assertRaisesRegex(RuntimeError, "Model sources are incomplete"):
+            self.registry.get_active()
+        self.assertFalse(self.registry.all_status()[0]["downloaded"])
+
+        model_root = self.models_dir / "multi-source" / "generate"
+        (model_root / "auxiliary" / "encoder").mkdir(parents=True)
+        (model_root / "main.bin").write_bytes(b"main")
+        (model_root / "auxiliary" / "encoder" / "encoder.bin").write_bytes(b"encoder")
+        self.assertIsNotNone(self.registry.get_active())
+        self.assertTrue(self.registry.all_status()[0]["downloaded"])
+        (model_root / "main.bin").unlink()
+        with self.assertRaisesRegex(RuntimeError, "Model sources are incomplete"):
+            self.registry.get_active()
+
+    def test_shared_groups_gate_all_dependents_and_keep_private_dirs_separate(self) -> None:
+        extension = self._make_extension("shared-model")
+        manifest = {
+            "id": "shared-model",
+            "name": "shared-model",
+            "type": "model",
+            "generator_class": "TestGenerator",
+            "weight_groups": [{
+                "id": "base",
+                "model_sources": [{
+                    "id": "base",
+                    "provider": "huggingface",
+                    "repo_id": "org/base",
+                    "destination": ".",
+                    "checks": ["base.bin"],
+                }],
+            }],
+            "nodes": [
+                {"id": "generate", "weight_groups": ["base"]},
+                {
+                    "id": "adapter",
+                    "weight_groups": ["base"],
+                    "model_sources": [{
+                        "id": "adapter",
+                        "provider": "huggingface",
+                        "repo_id": "org/adapter",
+                        "destination": ".",
+                        "checks": ["adapter.bin"],
+                    }],
+                },
+            ],
+        }
+        (extension / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (extension / "generator.py").write_text(
+            "\n".join([
+                "from services.generators.base import BaseGenerator",
+                "class TestGenerator(BaseGenerator):",
+                "    def load(self): self._model = object()",
+                "    def generate(self, image_bytes, params, progress_cb=None, cancel_event=None):",
+                "        return self.outputs_dir / 'result.glb'",
+            ]),
+            encoding="utf-8",
+        )
+
+        self.registry.initialize()
+        base_root = self.models_dir / "shared-model" / "_shared" / "base"
+        generate = self.registry.get_generator("shared-model/generate")
+        adapter = self.registry.get_generator("shared-model/adapter")
+        self.assertEqual(generate.shared_model_dirs, {"base": base_root})
+        self.assertEqual(adapter.shared_model_dirs, {"base": base_root})
+        self.assertEqual(generate.MODEL_ID, "shared-model/generate")
+        self.assertEqual(generate.MODEL_NODE_ID, "generate")
+        self.assertEqual(adapter.MODEL_ID, "shared-model/adapter")
+        self.assertEqual(adapter.MODEL_NODE_ID, "adapter")
+        self.assertFalse(self.registry._is_downloaded("shared-model/generate", generate))
+        self.assertFalse(self.registry._is_downloaded("shared-model/adapter", adapter))
+
+        base_root.mkdir(parents=True)
+        (base_root / "base.bin").write_bytes(b"base")
+        self.assertTrue(self.registry._is_downloaded("shared-model/generate", generate))
+        self.assertFalse(self.registry._is_downloaded("shared-model/adapter", adapter))
+
+        private_root = self.models_dir / "shared-model" / "adapter"
+        private_root.mkdir(parents=True)
+        (private_root / "adapter.bin").write_bytes(b"adapter")
+        self.assertTrue(self.registry._is_downloaded("shared-model/adapter", adapter))
+        relocated = self.root / "relocated-models"
+        self.registry.update_paths(relocated, None)
+        self.assertEqual(adapter.model_dir, relocated / "shared-model/adapter")
+        self.assertEqual(adapter.shared_model_dirs, {"base": relocated / "shared-model/_shared/base"})
+        self.assertEqual(adapter.MODEL_NODE_ID, "adapter")
+        self.assertFalse(self.registry._is_downloaded("shared-model/adapter", adapter))
+
+    def test_selected_weight_variant_must_be_installed_before_generation(self) -> None:
+        def variant(quant: str) -> dict:
+            return {
+                "id": quant,
+                "include_prefixes": [f"dit_{quant}.gguf"],
+                "checks": [f"dit_{quant}.gguf"],
+            }
+
+        extension = self._make_extension("quantized")
+        manifest = {
+            "id": "quantized",
+            "name": "quantized",
+            "type": "model",
+            "generator_class": "TestGenerator",
+            "params_schema": [
+                {"id": "quant", "type": "select", "options": [{"value": "Q4"}, {"value": "Q5"}]}
+            ],
+            "nodes": [{
+                "id": "generate",
+                "hf_repo": "org/model-gguf",
+                "download_check": "pipeline.json",
+                "weight_variants": {
+                    "param": "quant",
+                    "default": "Q5",
+                    "options": [variant("Q4"), variant("Q5")],
+                },
+            }],
+        }
+        (extension / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (extension / "generator.py").write_text(
+            "\n".join([
+                "from services.generators.base import BaseGenerator",
+                "class TestGenerator(BaseGenerator):",
+                "    def is_downloaded(self): return True",
+                "    def load(self): self._model = object()",
+                "    def generate(self, image_bytes, params, progress_cb=None, cancel_event=None):",
+                "        return self.outputs_dir / 'result.glb'",
+            ]),
+            encoding="utf-8",
+        )
+
+        self.registry.initialize()
+        manifest_variants = self.registry.get_manifest("quantized/generate")["weight_variants"]
+        self.assertEqual([option["id"] for option in manifest_variants["options"]], ["Q4", "Q5"])
+
+        model_root = self.models_dir / "quantized" / "generate"
+        model_root.mkdir(parents=True)
+        (model_root / "dit_Q5.gguf").write_bytes(b"q5")
+        # The job's model is checked, not whichever model is still active: the
+        # switch to the job's model only happens once the job starts running.
+        self.registry._active_id = "other/generate"
+        model_id = "quantized/generate"
+        self.registry.assert_weight_variant_installed({}, model_id)
+        self.registry.assert_weight_variant_installed({"quant": "Q5"}, model_id)
+        self.registry.assert_weight_variant_installed({"quant": "fp16"}, model_id)
+        with self.assertRaisesRegex(RuntimeError, "Q4 weights for quantized/generate are not installed"):
+            self.registry.assert_weight_variant_installed({"quant": "Q4"}, model_id)
+
+        # Without an explicit model id the active one is used (legacy callers).
+        self.registry._active_id = model_id
+        with self.assertRaisesRegex(RuntimeError, "Q4 weights"):
+            self.registry.assert_weight_variant_installed({"quant": "Q4"})
+
+
+    def test_activate_ready_generator_switches_before_loading_exact_model(self) -> None:
+        class Generator:
+            DISPLAY_NAME = "test"
+            def __init__(self):
+                self.loaded = False
+                self.unloads = 0
+            def is_downloaded(self): return True
+            def is_loaded(self): return self.loaded
+            def load(self): self.loaded = True
+            def unload(self):
+                self.loaded = False
+                self.unloads += 1
+
+        first = Generator()
+        second = Generator()
+        first.loaded = True
+        self.registry._generators = {"demo/a": first, "demo/b": second}
+        self.registry._manifests = {
+            "demo/a": {"name": "A"},
+            "demo/b": {"name": "B"},
+        }
+        self.registry._active_id = "demo/a"
+
+        selected = self.registry.activate_ready_generator("demo/b")
+
+        self.assertIs(selected, second)
+        self.assertEqual(self.registry._active_id, "demo/b")
+        self.assertFalse(first.loaded)
+        self.assertEqual(first.unloads, 1)
+        self.assertTrue(second.loaded)
 
     def test_reload_preserves_legacy_path_owned_by_the_host(self) -> None:
         extension = self._make_extension("host-owned-path")
@@ -414,6 +687,27 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
         self.assertNotIn("pending-update/generate", self.registry._generators)
         self.assertIn("pending-update/generate", self.registry.load_errors())
 
+    @unittest.skipUnless(sys.platform == "win32", "8.3 short paths are Windows-only")
+    def test_valid_capability_authorizes_extension_under_a_short_path(self) -> None:
+        # GitHub's Windows runners use an 8.3 TEMP (C:\Users\RUNNER~1\...): the
+        # capability destination is resolved (long form) while discovery walks
+        # the configured, short-form EXTENSIONS_DIR.
+        import ctypes
+
+        capability = self._make_loadable_pending_extension("pending-short")
+        buffer = ctypes.create_unicode_buffer(32768)
+        if not ctypes.windll.kernel32.GetShortPathNameW(str(self.extensions_dir), buffer, len(buffer)):
+            self.skipTest("short path unavailable")
+        short_dir = Path(buffer.value)
+        if str(short_dir) == str(self.extensions_dir):
+            self.skipTest("8.3 names are disabled on this volume")
+        registry_module.EXTENSIONS_DIR = short_dir
+
+        self.registry.reload(capability)
+
+        self.assertIn("pending-short/generate", self.registry._generators)
+        self.assertEqual(self.registry.load_errors(), {})
+
     def test_public_reload_and_predictable_id_cannot_bypass_pending_state(self) -> None:
         self._make_loadable_pending_extension("pending-public")
 
@@ -515,6 +809,157 @@ class GeneratorRegistryDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(self.registry._generators, {})
         self.assertEqual(self.registry.load_errors(), {})
+
+
+class _StatusOnlyGenerator:
+    DISPLAY_NAME = "Fake"
+    VRAM_GB = 1
+
+    def is_downloaded(self) -> bool:
+        return True
+
+    def is_loaded(self) -> bool:
+        return False
+
+    def params_schema(self) -> list:
+        return [{"id": "steps"}]
+
+
+class _DirectGenerator:
+    def __init__(self, sticky: bool = False) -> None:
+        self.loaded = True
+        self.sticky = sticky
+
+    def unload(self) -> None:
+        if not self.sticky:
+            self.loaded = False
+
+    def is_loaded(self) -> bool:
+        return self.loaded
+
+
+class GeneratorRegistryUnloadTests(unittest.TestCase):
+    def test_unload_all_unloads_every_model_before_reporting_a_stuck_one(self):
+        registry = GeneratorRegistry()
+        stuck = _DirectGenerator(sticky=True)
+        other = _DirectGenerator()
+        registry._generators = {"demo/stuck": stuck, "demo/other": other}
+
+        with self.assertRaisesRegex(RuntimeError, "demo/stuck"):
+            registry.unload_all()
+
+        self.assertFalse(other.loaded)
+
+
+class GeneratorRegistryLockTests(unittest.TestCase):
+    def test_status_reads_do_not_wait_for_an_in_progress_load(self):
+        # A load holds the lifecycle lock for its whole duration (first-run
+        # downloads included); status endpoints must keep answering meanwhile.
+        registry = GeneratorRegistry()
+        registry._generators["demo/generate"] = _StatusOnlyGenerator()
+        registry._manifests["demo/generate"] = {"name": "Demo"}
+        registry._active_id = "demo/generate"
+
+        lock_held = threading.Event()
+        release = threading.Event()
+
+        def hold_lock() -> None:
+            with registry._lifecycle_lock:
+                lock_held.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=hold_lock)
+        holder.start()
+        self.addCleanup(holder.join)
+        self.addCleanup(release.set)
+        self.assertTrue(lock_held.wait(5))
+
+        results = {}
+
+        def read_status() -> None:
+            results["active"] = registry.active_status()
+            results["all"] = registry.all_status()
+            results["params"] = registry.params_schema("demo/generate")
+            results["model"] = registry.model_status("demo/generate")
+
+        reader = threading.Thread(target=read_status)
+        reader.start()
+        reader.join(2)
+
+        self.assertFalse(reader.is_alive(), "status reads blocked on the lifecycle lock")
+        self.assertEqual(results["active"]["id"], "demo/generate")
+        self.assertEqual([m["id"] for m in results["all"]], ["demo/generate"])
+        self.assertEqual(results["params"], [{"id": "steps"}])
+        self.assertFalse(results["model"]["loaded"])
+
+
+class _FakeGenerator:
+    def __init__(self) -> None:
+        self.loaded = True
+
+    def is_loaded(self) -> bool:
+        return self.loaded
+
+    def unload(self) -> None:
+        self.loaded = False
+
+
+class KeepResidentPairTests(unittest.TestCase):
+    GEOMETRY = "triposg/generate"
+    TEXTURE = "trellis2/refine"
+    OTHER = "other/generate"
+
+    def setUp(self) -> None:
+        self.registry = GeneratorRegistry()
+        self.gens = {model_id: _FakeGenerator() for model_id in (self.GEOMETRY, self.TEXTURE, self.OTHER)}
+        self.registry._generators = dict(self.gens)
+        self.registry._active_id = self.GEOMETRY
+        self.gens[self.TEXTURE].loaded = False
+        self.gens[self.OTHER].loaded = False
+        patches = [
+            mock.patch("services.llm_server.llama_pool.unload_all"),
+            mock.patch("services.llm_server.detect_vram_gb", return_value=23.9),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _switch_and_load(self, model_id: str) -> None:
+        self.registry.switch_model(model_id)
+        self.gens[model_id].loaded = True
+
+    def _loaded(self) -> set:
+        return {model_id for model_id, gen in self.gens.items() if gen.loaded}
+
+    def test_pair_stays_loaded_when_switching_inside_it(self) -> None:
+        self._switch_and_load(self.TEXTURE)
+        self._switch_and_load(self.GEOMETRY)
+
+        self.assertEqual(self._loaded(), {self.GEOMETRY, self.TEXTURE})
+
+    def test_leaving_the_pair_unloads_both_models(self) -> None:
+        self._switch_and_load(self.TEXTURE)
+        self._switch_and_load(self.OTHER)
+
+        self.assertEqual(self._loaded(), {self.OTHER})
+
+    def test_pair_is_not_kept_when_vram_is_too_small(self) -> None:
+        with mock.patch("services.llm_server.detect_vram_gb", return_value=11.9):
+            self._switch_and_load(self.TEXTURE)
+
+        self.assertEqual(self._loaded(), {self.TEXTURE})
+
+    def test_pair_is_not_kept_when_vram_is_unknown(self) -> None:
+        with mock.patch("services.llm_server.detect_vram_gb", return_value=0.0):
+            self._switch_and_load(self.TEXTURE)
+
+        self.assertEqual(self._loaded(), {self.TEXTURE})
+
+    def test_pair_is_not_kept_on_a_16_gb_card(self) -> None:
+        with mock.patch("services.llm_server.detect_vram_gb", return_value=15.9):
+            self._switch_and_load(self.TEXTURE)
+
+        self.assertEqual(self._loaded(), {self.TEXTURE})
 
 
 if __name__ == "__main__":

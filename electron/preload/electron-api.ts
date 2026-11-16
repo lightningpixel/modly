@@ -4,7 +4,14 @@ import type {
   AssetLibraryOpenResult,
   AssetLibraryReadRequest,
   AssetLibraryReadResult,
+  AssetThumbnailSaveRequest,
+  AssetThumbnailSaveResult,
+  AssetThumbnailStatusResult,
 } from '../../src/shared/types/assetLibrary'
+import type {
+  Conversation as AgentConversation,
+  ConversationSummary as AgentConversationSummary,
+} from '../main/agent-conversations'
 
 export interface IpcRendererLike {
   invoke(channel: string, ...args: unknown[]): Promise<unknown>
@@ -17,7 +24,9 @@ export interface WebFrameLike {
   setZoomFactor(factor: number): void
 }
 
-export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFrameLike) {
+export type WebUtilsLike = Pick<typeof import('electron').webUtils, 'getPathForFile'>
+
+export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFrameLike, webUtils: WebUtilsLike) {
   return {
     // Window controls
     window: {
@@ -42,6 +51,12 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
 
     // Shell utilities
     shell: { openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url) },
+
+    // Slicer integration — open a model in OrcaSlicer via its deeplink
+    slicer: {
+      open: (url: string): Promise<{ success: boolean; error?: string }> =>
+        ipcRenderer.invoke('slicer:open', url) as Promise<{ success: boolean; error?: string }>,
+    },
 
     // System info
     system: {
@@ -69,6 +84,8 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
 
     // File system dialogs + local file reading
     fs: {
+      getPathForFile:    (file: Parameters<WebUtilsLike['getPathForFile']>[0]): string =>
+        webUtils.getPathForFile(file),
       selectImage:       (): Promise<string | null> =>
         ipcRenderer.invoke('fs:selectImage') as Promise<string | null>,
       selectMeshFile:    (): Promise<string | null> =>
@@ -87,12 +104,42 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         ipcRenderer.invoke('fs:listFiles', dirPath, extensions) as Promise<string[]>,
       selectTextFile:    (): Promise<string | null> =>
         ipcRenderer.invoke('fs:selectTextFile') as Promise<string | null>,
-      moveDirectory:     (args: { src: string; dest: string }): Promise<{ success: boolean; error?: string }> =>
-        ipcRenderer.invoke('fs:moveDirectory', args) as Promise<{ success: boolean; error?: string }>,
-      deleteDirectory:   (dirPath: string): Promise<{ success: boolean; error?: string }> =>
-        ipcRenderer.invoke('fs:deleteDirectory', dirPath) as Promise<{ success: boolean; error?: string }>,
+      moveDirectory:     (args: { src: string; dest: string }): Promise<{ success: boolean; error?: string; kept?: string[] }> =>
+        ipcRenderer.invoke('fs:moveDirectory', args) as Promise<{ success: boolean; error?: string; kept?: string[] }>,
+      deleteDirectory:   (dirPath: string): Promise<{ success: boolean; error?: string; kept?: string[] }> =>
+        ipcRenderer.invoke('fs:deleteDirectory', dirPath) as Promise<{ success: boolean; error?: string; kept?: string[] }>,
+      storageEntries:    (kind: 'models' | 'workspace' | 'workflows'): Promise<{ modly: string[]; other: string[] }> =>
+        ipcRenderer.invoke('fs:storageEntries', kind) as Promise<{ modly: string[]; other: string[] }>,
+      checkStorageLocation: (dirPath: string): Promise<{ ok: boolean; error?: string }> =>
+        ipcRenderer.invoke('fs:checkStorageLocation', dirPath) as Promise<{ ok: boolean; error?: string }>,
       readScreenshotDataUrl: (filename: string): Promise<string> =>
         ipcRenderer.invoke('fs:readScreenshotDataUrl', filename) as Promise<string>,
+    },
+
+    // Secure storage — OS-level encryption for secrets (API keys, …)
+    secureStore: {
+      encrypt: (plainText: string): Promise<string> => ipcRenderer.invoke('secure:encrypt', plainText) as Promise<string>,
+      // null = one of our blobs that couldn't be decrypted here (different OS
+      // user/machine). Never the ciphertext — see secure-store.ts.
+      decrypt: (stored: string): Promise<string | null> => ipcRenderer.invoke('secure:decrypt', stored) as Promise<string | null>,
+    },
+
+    // Agent — local LLM models
+    agent: {
+      // Opens a file picker and copies the chosen .gguf into the agent's models folder.
+      addModel: (): Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }> =>
+        ipcRenderer.invoke('agent:addModel') as Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }>,
+      // Persisted chat conversations (<userData>/agent/conversations/{id}.json).
+      conversations: {
+        list:   (): Promise<AgentConversationSummary[]> =>
+          ipcRenderer.invoke('agent:conversations:list') as Promise<AgentConversationSummary[]>,
+        read:   (id: string): Promise<AgentConversation | null> =>
+          ipcRenderer.invoke('agent:conversations:read', id) as Promise<AgentConversation | null>,
+        save:   (conversation: AgentConversation): Promise<void> =>
+          ipcRenderer.invoke('agent:conversations:save', conversation) as Promise<void>,
+        remove: (id: string): Promise<void> =>
+          ipcRenderer.invoke('agent:conversations:remove', id) as Promise<void>,
+      },
     },
 
     // Settings
@@ -119,12 +166,19 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
     model: {
       export:         (args: { outputUrl: string; format: string }) => ipcRenderer.invoke('model:export', args),
       listDownloaded: () => ipcRenderer.invoke('model:listDownloaded'),
-      isDownloaded:   (modelId: string, downloadCheck?: string) => ipcRenderer.invoke('model:isDownloaded', modelId, downloadCheck),
-      download:       (repoId: string, modelId: string, skipPrefixes?: string[], includePrefixes?: string[]) =>
-        ipcRenderer.invoke('model:download', { repoId, modelId, skipPrefixes, includePrefixes }),
+      isDownloaded:   (modelId: string) => ipcRenderer.invoke('model:isDownloaded', modelId),
+      hasLocalData:    (modelId: string) => ipcRenderer.invoke('model:hasLocalData', modelId),
+      sharedGroups:    (extensionId: string) => ipcRenderer.invoke('model:sharedGroups', extensionId),
+      download:       (modelId: string, variantId?: string) => (variantId === undefined
+        ? ipcRenderer.invoke('model:download', modelId)
+        : ipcRenderer.invoke('model:download', modelId, variantId)),
       pauseDownload:  (modelId: string) => ipcRenderer.invoke('model:pauseDownload', modelId),
       cancelDownload: (modelId: string) => ipcRenderer.invoke('model:cancelDownload', modelId),
       delete:         (modelId: string) => ipcRenderer.invoke('model:delete', modelId),
+      deleteSharedGroup: (extensionId: string, groupId: string) => ipcRenderer.invoke('model:deleteSharedGroup', extensionId, groupId),
+      deleteExtensionWeights: (extensionId: string) => ipcRenderer.invoke('model:deleteExtensionWeights', extensionId),
+      installedWeightVariants: (modelId: string) => ipcRenderer.invoke('model:installedWeightVariants', modelId),
+      deleteWeightVariant: (modelId: string, variantId: string) => ipcRenderer.invoke('model:deleteWeightVariant', modelId, variantId),
       unloadAll:      () => ipcRenderer.invoke('model:unloadAll'),
       showInFolder:   (modelId: string) => ipcRenderer.invoke('model:showInFolder', modelId),
       activeDownloads: (): Promise<{ modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]> =>
@@ -157,6 +211,8 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         }))
       },
       offProgress:    () => ipcRenderer.removeAllListeners('model:downloadProgress'),
+      onWeightsChanged: (cb: () => void) => ipcRenderer.on('model:weightsChanged', cb),
+      offWeightsChanged: () => ipcRenderer.removeAllListeners('model:weightsChanged'),
     },
 
     // App metadata
@@ -197,6 +253,10 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         list: (): Promise<AssetLibraryListResult> => ipcRenderer.invoke('workspace:library:list') as Promise<AssetLibraryListResult>,
         read: (request: AssetLibraryReadRequest): Promise<AssetLibraryReadResult> => ipcRenderer.invoke('workspace:library:read', request) as Promise<AssetLibraryReadResult>,
         open: (request: AssetLibraryOpenRequest): Promise<AssetLibraryOpenResult> => ipcRenderer.invoke('workspace:library:open', request) as Promise<AssetLibraryOpenResult>,
+      },
+      thumbnails: {
+        status: (workspacePath: string): Promise<AssetThumbnailStatusResult> => ipcRenderer.invoke('workspace:thumbnails:status', { workspacePath }) as Promise<AssetThumbnailStatusResult>,
+        save: (request: AssetThumbnailSaveRequest): Promise<AssetThumbnailSaveResult> => ipcRenderer.invoke('workspace:thumbnails:save', request) as Promise<AssetThumbnailSaveResult>,
       },
     },
 

@@ -25,6 +25,25 @@ from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 from services.generators.base import BaseGenerator
 from services.extension_process import ExtensionProcess, _venv_python
+from services.model_sources import (
+    missing_weight_variant,
+    model_sources_are_downloaded,
+    normalize_model_sources,
+    normalize_weight_group_references,
+    normalize_weight_groups,
+    normalize_weight_variants,
+    validate_model_node_ids,
+    resolve_weight_group_root,
+    safe_source_id,
+    weight_group_sources_are_downloaded,
+)
+
+# Model pairs that stay loaded together when the active model switches between them (a mesh -> texture
+# pipeline would otherwise unload and reload both models on every asset), with the minimum total VRAM
+# (GiB, as detect_vram_gb() reports it) for keeping both resident. Manifests can't size this: TripoSG
+# declares no `vram_gb`. TripoSG + Trellis2 refine peak around 10-11 GB, so only 24 GB cards
+# (23.9 GiB reported) qualify; smaller cards keep the unload-on-switch behavior.
+_KEEP_RESIDENT_PAIRS = [({"triposg/generate", "trellis2/refine"}, 19.5)]
 
 # ------------------------------------------------------------------ #
 # Global paths
@@ -52,6 +71,17 @@ _REGISTRATION_CAPABILITY_LOCK = threading.Lock()
 print(f"[Registry] MODELS_DIR     = {MODELS_DIR}")
 print(f"[Registry] WORKSPACE_DIR  = {WORKSPACE_DIR}")
 print(f"[Registry] EXTENSIONS_DIR = {EXTENSIONS_DIR or '(not set)'}")
+
+
+def is_within_workspace(resolved_path: Path) -> bool:
+    """True when an already-resolved path is the current workspace or inside it.
+
+    Compares ancestry, not string prefixes: ``startswith`` would also accept a
+    sibling folder such as ``<workspace>-other``. Reads WORKSPACE_DIR at call
+    time, since moving the workspace rebinds it.
+    """
+    workspace = WORKSPACE_DIR.resolve()
+    return resolved_path == workspace or workspace in resolved_path.parents
 
 
 # ------------------------------------------------------------------ #
@@ -428,6 +458,11 @@ def _discover_extensions(
             ext_id     = manifest["id"]
             class_name = manifest["generator_class"]
 
+            if "model_sources" in manifest:
+                raise ValueError("model_sources must be declared on a model node")
+
+            weight_groups = normalize_weight_groups(manifest)
+
             if ext_id != ext_dir.name:
                 message = (
                     f"Extension folder '{ext_dir.name}' declares mismatched "
@@ -448,6 +483,50 @@ def _discover_extensions(
                 node for node in raw_nodes
                 if isinstance(node, dict) and node.get("id")
             ]
+            group_by_id = {group["id"]: group for group in weight_groups or []}
+            uses_shared_weights = weight_groups is not None or any(
+                "weight_groups" in node for node in nodes
+            )
+            if uses_shared_weights or any("model_sources" in node for node in nodes):
+                validate_model_node_ids(raw_nodes)
+            if uses_shared_weights:
+                for node in nodes:
+                    raw_node_id = node.get("id")
+                    if (
+                        weight_groups is not None
+                        and isinstance(raw_node_id, str)
+                        and raw_node_id.casefold() == "_shared"
+                    ):
+                        raise ValueError('model node id "_shared" is reserved')
+                    node_id = safe_source_id(raw_node_id, "model node id")
+                    normalize_weight_group_references(
+                        node,
+                        weight_groups,
+                        field_name=f"nodes[{node_id}].weight_groups",
+                    )
+                    if "weight_groups" in node and "weight_variants" in node:
+                        raise ValueError(
+                            f'model node "{node_id}": weight_variants cannot be combined '
+                            "with weight_groups"
+                        )
+                    if "weight_groups" in node and "hf_repo" in node:
+                        raise ValueError(
+                            f'model node "{node_id}" must use model_sources for private '
+                            "weights when weight_groups are declared"
+                        )
+            for node in nodes:
+                declared_inputs = node.get("inputs")
+                uses_scene_input = (
+                    node.get("input", "image") == "scene"
+                    or (isinstance(declared_inputs, list) and "scene" in declared_inputs)
+                )
+                if uses_scene_input and (
+                    "inputs" in node or node.get("input", "image") != "scene"
+                ):
+                    raise ValueError(
+                        f'model node "{node.get("id", "unknown")}" must declare scene '
+                        'as its single input field'
+                    )
 
             # Markers left while setup or runtime registration is unfinished:
             # the folder is not ready to be loaded. The readable manifest lets
@@ -462,8 +541,11 @@ def _discover_extensions(
                         registration_authorization is not None
                         and registration_authorization[0] == ext_id
                         and registration_authorization[1].exists()
+                        # Normalize like the capability's destination (resolved
+                        # root + name): EXTENSIONS_DIR may be a Windows 8.3 short
+                        # path. The extension folder itself is not resolved.
                         and registration_authorization[2]
-                        == Path(os.path.abspath(ext_dir))
+                        == Path(os.path.abspath(ext_dir.parent.resolve() / ext_dir.name))
                     )
                 )
             )
@@ -523,6 +605,15 @@ def _discover_extensions(
 
             if nodes:
                 for node in nodes:
+                    model_sources = normalize_model_sources(node)
+                    group_ids = normalize_weight_group_references(
+                        node,
+                        weight_groups,
+                        field_name=f"nodes[{node['id']}].weight_groups",
+                    ) or []
+                    weight_variants = normalize_weight_variants(
+                        node, node.get("params_schema", manifest.get("params_schema", []))
+                    )
                     node_manifest = {
                         **manifest,
                         "id":               f"{ext_id}/{node['id']}",
@@ -535,8 +626,14 @@ def _discover_extensions(
                         "hf_include_prefixes": node.get("hf_include_prefixes", []),
                         "params_schema":    node.get("params_schema", manifest.get("params_schema", [])),
                         "input":            node.get("input", "image"),
+                        "inputs":           node.get("inputs"),
                         "output":           node.get("output", "mesh"),
+                        "weight_groups":    [group_by_id[group_id] for group_id in group_ids],
                     }
+                    if model_sources is not None:
+                        node_manifest["model_sources"] = model_sources
+                    if weight_variants is not None:
+                        node_manifest["weight_variants"] = weight_variants
                     full_id = f"{ext_id}/{node['id']}"
                     result[full_id] = (cls_or_None, node_manifest, ext_dir, legacy_context)
                     if subprocess_mode:
@@ -579,6 +676,11 @@ class GeneratorRegistry:
         self._generators: Dict[str, BaseGenerator] = {}
         self._manifests:  Dict[str, dict]          = {}
         self._errors:     Dict[str, str]           = {}
+        # Serializes everything that changes which generators exist or are
+        # loaded (switch/load, unload, reload, path changes). Read-only status
+        # calls deliberately skip it: a load can hold it for minutes (first-run
+        # downloads happen inside load()), and status must stay responsive.
+        self._lifecycle_lock = threading.RLock()
         self._legacy_imports = _LegacyImportManager()
         self._active_id:  str = os.environ.get("SELECTED_MODEL_ID", "sf3d")
 
@@ -605,6 +707,9 @@ class GeneratorRegistry:
                         )
                     # Subprocess mode: wrap in ExtensionProcess
                     gen = ExtensionProcess(ext_dir, manifest)
+                    # Pin the subprocess envelope to the exact registry key;
+                    # multi-node workers must never fall back to an extension ID.
+                    gen.MODEL_ID    = model_id
                     gen.model_dir   = MODELS_DIR / model_id
                     gen.outputs_dir = WORKSPACE_DIR
                 else:
@@ -622,6 +727,15 @@ class GeneratorRegistry:
                     gen.hf_skip_prefixes = manifest.get("hf_skip_prefixes", [])
                     gen.download_check   = manifest.get("download_check", "")
                     gen._params_schema   = manifest.get("params_schema", [])
+
+                gen.MODEL_ID = model_id
+                gen.MODEL_NODE_ID = manifest.get("node_id", "")
+                gen.shared_model_dirs = {
+                    group["id"]: resolve_weight_group_root(
+                        MODELS_DIR, manifest.get("ext_id", model_id.split("/", 1)[0]), group["id"]
+                    )
+                    for group in manifest.get("weight_groups", [])
+                }
 
                 self._generators[model_id] = gen
                 self._manifests[model_id]  = manifest
@@ -654,25 +768,26 @@ class GeneratorRegistry:
         registration_authorization = _consume_registration_validation_capability(
             validation_capability,
         )
-        print("[Registry] Reloading extensions...")
-        for gen in self._generators.values():
-            if isinstance(gen, ExtensionProcess):
-                gen.stop()
-                if gen._proc is not None:
-                    raise RuntimeError(
-                        "Extension subprocess remained attached after stop()"
-                    )
-            else:
-                try:
-                    gen.unload()
-                except Exception:
-                    pass
-        self._generators.clear()
-        self._manifests.clear()
-        self._errors.clear()
-        self._remove_legacy_paths()
-        self.initialize(registration_authorization)
-        print("[Registry] Reload complete.")
+        with self._lifecycle_lock:
+            print("[Registry] Reloading extensions...")
+            for gen in self._generators.values():
+                if isinstance(gen, ExtensionProcess):
+                    gen.stop()
+                    if gen._proc is not None:
+                        raise RuntimeError(
+                            "Extension subprocess remained attached after stop()"
+                        )
+                else:
+                    try:
+                        gen.unload()
+                    except Exception:
+                        pass
+            self._generators.clear()
+            self._manifests.clear()
+            self._errors.clear()
+            self._remove_legacy_paths()
+            self.initialize(registration_authorization)
+            print("[Registry] Reload complete.")
 
     def load_errors(self) -> Dict[str, str]:
         """Returns extension loading errors."""
@@ -697,19 +812,68 @@ class GeneratorRegistry:
 
     def get_active(self) -> BaseGenerator:
         """Returns the active generator. Downloads and loads if necessary."""
-        self._assert_not_quarantined(self._active_id)
-        gen = self._generators[self._active_id]
-        if not gen.is_loaded():
-            if not gen.is_downloaded():
-                if isinstance(gen, ExtensionProcess):
-                    # Let the subprocess handle its own download logic during
-                    # load() — some extensions (e.g. mv-adapter) need custom
-                    # multi-repo downloads that the standard HF endpoint can't do.
-                    pass
-                else:
-                    gen._auto_download()
-            gen.load()
-        return gen
+        with self._lifecycle_lock:
+            return self.get_ready_generator(self._active_id)
+
+    def get_ready_generator(self, model_id: str) -> BaseGenerator:
+        """Load and return exactly ``model_id`` without consulting active state."""
+        with self._lifecycle_lock:
+            gen = self.get_generator(model_id)
+            downloaded = self._is_downloaded(model_id, gen)
+            manifest = self._manifests[model_id]
+            if (
+                "model_sources" in manifest or manifest.get("weight_groups")
+            ) and not downloaded:
+                raise RuntimeError(
+                    "Model sources are incomplete. Download this node's shared and private weights "
+                    "from the Modly Models page before generation."
+                )
+            if not gen.is_loaded():
+                if not downloaded:
+                    if isinstance(gen, ExtensionProcess):
+                        # Let the subprocess handle its own download logic during
+                        # load() — some extensions (e.g. mv-adapter) need custom
+                        # multi-repo downloads that the standard HF endpoint can't do.
+                        pass
+                    else:
+                        gen._auto_download()
+                gen.load()
+            return gen
+
+    def activate_ready_generator(self, model_id: str) -> BaseGenerator:
+        """Atomically make ``model_id`` active and return it ready for inference."""
+        with self._lifecycle_lock:
+            self.switch_model(model_id)
+            return self.get_ready_generator(model_id)
+
+    def model_status(self, model_id: str) -> dict:
+        gen = self.get_generator(model_id)
+        manifest = self._manifests[model_id]
+        return {
+            "id": model_id,
+            "name": manifest.get("name", gen.DISPLAY_NAME),
+            "downloaded": self._is_downloaded(model_id, gen),
+            "loaded": gen.is_loaded(),
+        }
+
+    def assert_weight_variant_installed(
+        self, params: dict, model_id: Optional[str] = None
+    ) -> None:
+        """Refuse generation when the weight variant selected by params is not installed.
+
+        ``model_id`` is the job's model. Pinned jobs only switch to it once they
+        run, so the active model is not a reliable stand-in before that.
+        """
+        target_id = model_id or self._active_id
+        manifest = self._manifests.get(target_id, {})
+        option = missing_weight_variant(
+            MODELS_DIR, target_id, manifest.get("weight_variants"), params
+        )
+        if option is not None:
+            raise RuntimeError(
+                f'{option["label"]} weights for {target_id} are not installed. '
+                "Install them from the Extensions page, or select an installed variant."
+            )
 
     def get_generator(self, model_id: str) -> BaseGenerator:
         self._assert_not_quarantined(model_id)
@@ -727,36 +891,81 @@ class GeneratorRegistry:
         return self._manifests[model_id]
 
     def switch_model(self, model_id: str) -> None:
-        """Switches the active model. Unloads the previous one if different."""
-        self._assert_not_quarantined(model_id)
-        if model_id not in self._generators:
-            raise ValueError(
-                f"Unknown model ID: '{model_id}'. "
-                f"Available: {list(self._generators.keys())}"
-            )
-        if model_id != self._active_id:
-            if self._active_id in self._generators:
-                self._generators[self._active_id].unload()
-            self._active_id = model_id
+        """Switches the active model. Unloads every other model unless it is a resident partner."""
+        with self._lifecycle_lock:
+            self._assert_not_quarantined(model_id)
+            if model_id not in self._generators:
+                raise ValueError(
+                    f"Unknown model ID: '{model_id}'. "
+                    f"Available: {list(self._generators.keys())}"
+                )
+            # 3D generation owns the GPU: evict the chat LLMs before anything is
+            # about to allocate on it. The trigger is "the target model is not
+            # resident", not "the target model changed" — the common case is the
+            # default generator, which is already `_active_id` at boot and still
+            # has to load its weights. Gating on the id alone let a full LLM pool
+            # (2 slots, ~11.6 GB of 12) sit through an entire generation.
+            target = self._generators[model_id]
+            if model_id != self._active_id or not target.is_loaded():
+                from services.llm_server import llama_pool
+                llama_pool.unload_all()
+
+            if model_id != self._active_id:
+                # Unload everything except the target and its resident partners, not just the
+                # previous active model: after A -> B (pair) -> C, A is no longer active but is
+                # still loaded, and would otherwise sit in VRAM beside C.
+                keep = {model_id} | self._resident_partners(model_id)
+                for other_id, gen in self._generators.items():
+                    if other_id not in keep and gen.is_loaded():
+                        gen.unload()
+                self._active_id = model_id
+
+    def _resident_partners(self, model_id: str) -> Set[str]:
+        """Models allowed to stay loaded beside ``model_id`` (see _KEEP_RESIDENT_PAIRS)."""
+        from services.llm_server import detect_vram_gb
+        partners: Set[str] = set()
+        for pair, min_vram_gb in _KEEP_RESIDENT_PAIRS:
+            if model_id not in pair:
+                continue
+            # detect_vram_gb() is 0.0 when no NVIDIA GPU answers, which never passes.
+            if detect_vram_gb() >= min_vram_gb:
+                partners |= pair - {model_id}
+        return partners
 
     # ------------------------------------------------------------------ #
     # Status
     # ------------------------------------------------------------------ #
 
+    def _is_downloaded(self, model_id: str, gen: BaseGenerator) -> bool:
+        manifest = self._manifests[model_id]
+        private_ready = True
+        if "model_sources" in manifest:
+            private_ready = model_sources_are_downloaded(
+                MODELS_DIR, model_id, manifest["model_sources"]
+            )
+        shared_ready = all(
+            weight_group_sources_are_downloaded(
+                MODELS_DIR,
+                manifest.get("ext_id", model_id.split("/", 1)[0]),
+                group,
+            )
+            for group in manifest.get("weight_groups", [])
+        )
+        if "model_sources" in manifest or manifest.get("weight_groups"):
+            return private_ready and shared_ready
+        return gen.is_downloaded()
+
     def active_status(self) -> dict:
-        gen      = self._generators[self._active_id]
-        manifest = self._manifests[self._active_id]
-        return {
-            "id":         self._active_id,
-            "name":       manifest.get("name", gen.DISPLAY_NAME),
-            "downloaded": gen.is_downloaded(),
-            "loaded":     gen.is_loaded(),
-        }
+        return self.model_status(self._active_id)
 
     def all_status(self) -> list:
         result = []
-        for model_id, gen in self._generators.items():
-            manifest = self._manifests[model_id]
+        active_id = self._active_id
+        # Snapshot: a concurrent reload() may clear the dicts mid-iteration.
+        for model_id, gen in list(self._generators.items()):
+            manifest = self._manifests.get(model_id)
+            if manifest is None:
+                continue
             result.append({
                 "id":          model_id,
                 "name":        manifest.get("name", gen.DISPLAY_NAME),
@@ -765,17 +974,18 @@ class GeneratorRegistry:
                 "vram_gb":     manifest.get("vram_gb", gen.VRAM_GB),
                 "hf_repo":     manifest.get("hf_repo", ""),
                 "tags":        manifest.get("tags", []),
-                "downloaded":  gen.is_downloaded(),
+                "downloaded":  self._is_downloaded(model_id, gen),
                 "loaded":      gen.is_loaded(),
-                "active":      model_id == self._active_id,
+                "active":      model_id == active_id,
             })
         return result
 
     def params_schema(self, model_id: Optional[str] = None) -> list:
         target_id = model_id or self._active_id
-        if target_id not in self._generators:
+        gen = self._generators.get(target_id)
+        if gen is None:
             raise KeyError(target_id)
-        return self._generators[target_id].params_schema()
+        return gen.params_schema()
 
     # ------------------------------------------------------------------ #
     # Paths update & shutdown
@@ -785,25 +995,44 @@ class GeneratorRegistry:
         global MODELS_DIR, WORKSPACE_DIR
         import services.generator_registry as _self_module
 
-        if models_dir is not None:
-            self.unload_all()
-            models_dir.mkdir(parents=True, exist_ok=True)
-            _self_module.MODELS_DIR = models_dir
-            for model_id, gen in self._generators.items():
-                gen.model_dir = models_dir / model_id
+        with self._lifecycle_lock:
+            if models_dir is not None:
+                self.unload_all()
+                models_dir.mkdir(parents=True, exist_ok=True)
+                _self_module.MODELS_DIR = models_dir
+                for model_id, gen in self._generators.items():
+                    gen.model_dir = models_dir / model_id
+                    manifest = self._manifests[model_id]
+                    gen.shared_model_dirs = {
+                        group["id"]: resolve_weight_group_root(
+                            models_dir,
+                            manifest.get("ext_id", model_id.split("/", 1)[0]),
+                            group["id"],
+                        )
+                        for group in manifest.get("weight_groups", [])
+                    }
 
-        if workspace_dir is not None:
-            workspace_dir.mkdir(parents=True, exist_ok=True)
-            _self_module.WORKSPACE_DIR = workspace_dir
-            for gen in self._generators.values():
-                gen.outputs_dir = workspace_dir
+            if workspace_dir is not None:
+                workspace_dir.mkdir(parents=True, exist_ok=True)
+                _self_module.WORKSPACE_DIR = workspace_dir
+                for gen in self._generators.values():
+                    gen.outputs_dir = workspace_dir
 
     def unload_all(self) -> None:
-        for gen in self._generators.values():
-            if isinstance(gen, ExtensionProcess):
-                gen.stop()
-            else:
-                gen.unload()
+        with self._lifecycle_lock:
+            still_loaded = []
+            for model_id, gen in self._generators.items():
+                if isinstance(gen, ExtensionProcess):
+                    gen.stop()
+                else:
+                    gen.unload()
+                    if gen.is_loaded():
+                        still_loaded.append(model_id)
+            if still_loaded:
+                raise RuntimeError(
+                    "Models are still loaded; weights were preserved: "
+                    + ", ".join(still_loaded)
+                )
 
 
 # Singleton

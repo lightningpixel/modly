@@ -1,10 +1,12 @@
 import { BrowserWindow, app } from 'electron'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
-import { cp, rm, mkdir } from 'fs/promises'
+import { rm, mkdir } from 'fs/promises'
 import { join } from 'path'
 import { spawn, execSync } from 'child_process'
 import { createHash } from 'crypto'
 import { getSettings } from './settings-store'
+import { copyRuntimeTree } from './copy-runtime'
+import { pythonChildEnv } from './child-env'
 
 const SETUP_VERSION = 3
 
@@ -35,16 +37,7 @@ function hashRequirements(): string {
  * Strips vars that could redirect imports or installs to the user's system Python.
  */
 export function cleanPythonEnv(): NodeJS.ProcessEnv {
-  const {
-    PYTHONHOME, PYTHONPATH, PYTHONSTARTUP, PYTHONUSERBASE,
-    PIP_USER, PIP_TARGET, PIP_PREFIX, PIP_REQUIRE_VIRTUALENV,
-    VIRTUAL_ENV, CONDA_PREFIX,
-    ...rest
-  } = process.env
-  void PYTHONHOME; void PYTHONPATH; void PYTHONSTARTUP; void PYTHONUSERBASE
-  void PIP_USER; void PIP_TARGET; void PIP_PREFIX; void PIP_REQUIRE_VIRTUALENV
-  void VIRTUAL_ENV; void CONDA_PREFIX
-  return rest
+  return pythonChildEnv(process.env)
 }
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
@@ -176,7 +169,7 @@ async function ensureStableEmbeddedPython(userData: string, win: BrowserWindow):
       await rm(stableDir, { recursive: true, force: true })
     }
     await mkdir(stableDir, { recursive: true })
-    await cp(getEmbeddedPythonDir(), stableDir, { recursive: true, preserveTimestamps: true })
+    await copyRuntimeTree(getEmbeddedPythonDir(), stableDir)
     writeFileSync(versionFile, currentVersion, 'utf-8')
     console.log('[PythonSetup] Python runtime ready at:', stableDir)
   }

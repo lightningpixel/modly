@@ -8,6 +8,7 @@ import {
   filterAssetLibraryScopeGroups,
   getDefaultAssetLibraryCollapsedSectionKeys,
   isAssetLibraryEntryOpenable,
+  openAssetLibraryEntry,
   resolveOpenPanelAfterLibrarySelection,
   toggleAssetLibrarySectionKey,
   type AssetLibrarySortMode,
@@ -122,4 +123,38 @@ test('builds linked-source open requests and import jobs for safe sidecars', () 
   const selection = createAssetLibraryOpenJob(sidecar, target, 1718546400001)
   assert.equal(selection?.historyUrl, '/workspace/Workflows/run/hero.glb')
   assert.equal(selection?.job.outputUrl, '/workspace/Workflows/run/hero.glb')
+})
+
+test('openAssetLibraryEntry opens through the service and builds the viewer job', async () => {
+  const requests: unknown[] = []
+  const service = {
+    open: async (request: { workspacePath: string, sourceWorkspacePath?: string }) => {
+      requests.push(request)
+      return { success: true as const, entry: entry() }
+    },
+  }
+  const opened = await openAssetLibraryEntry(service, entry(), 42)
+  assert.deepEqual(requests, [{ workspacePath: 'Workflows/hero.glb' }])
+  assert.equal(opened.success, true)
+  if (!opened.success) throw new Error('expected success')
+  assert.equal(opened.selection.historyUrl, '/workspace/Workflows/hero.glb')
+  assert.equal(opened.selection.job.id, 'library-42')
+})
+
+test('openAssetLibraryEntry refuses unopenable entries without calling the service and relays service errors', async () => {
+  let calls = 0
+  const failing = {
+    open: async () => {
+      calls += 1
+      return { success: false as const, error: { code: 'not-found' as const, message: 'Gone.' } }
+    },
+  }
+  const unsafe = entry({ workspacePath: 'C:/outside/hero.glb' })
+  assert.deepEqual(await openAssetLibraryEntry(failing, unsafe), {
+    success: false,
+    message: describeAssetLibraryOpenability(unsafe),
+  })
+  assert.equal(calls, 0)
+  assert.deepEqual(await openAssetLibraryEntry(failing, entry()), { success: false, message: 'Gone.' })
+  assert.equal(calls, 1)
 })

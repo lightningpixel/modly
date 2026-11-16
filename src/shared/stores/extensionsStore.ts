@@ -24,8 +24,11 @@ interface ExtensionsStore {
   installProgress:   InstallProgress | null
   installError:      string | null
   loadErrors:        Record<string, string>
+  /** Installed weight variant ids, keyed by "ext_id/node_id", for nodes that declare variants */
+  installedWeightVariants: Record<string, string[]>
 
   loadExtensions:    () => Promise<void>
+  refreshInstalledWeightVariants: () => Promise<void>
   installFromGitHub: (url: string) => Promise<{ success: boolean; error?: string }>
   installFromLocal:  () => Promise<{ success: boolean; error?: string; cancelled?: boolean; needsRepair?: boolean }>
   uninstall:         (extensionId: string) => Promise<{ success: boolean; error?: string }>
@@ -54,6 +57,7 @@ export const useExtensionsStore = create<ExtensionsStore>((set, get) => ({
   installProgress:   null,
   installError:      null,
   loadErrors:        {},
+  installedWeightVariants: {},
 
   // ── Load list ──────────────────────────────────────────────────────────────
 
@@ -66,9 +70,28 @@ export const useExtensionsStore = create<ExtensionsStore>((set, get) => ({
         ...extensions,
         loading:           false,
       })
+      await get().refreshInstalledWeightVariants()
     } catch {
       set({ loading: false })
     }
+  },
+
+  async refreshInstalledWeightVariants() {
+    const entries = await Promise.all(
+      get().modelExtensions.flatMap((ext) => ext.nodes
+        .filter((node) => node.weightVariants)
+        .map(async (node) => {
+          const fullId = `${ext.id}/${node.id}`
+          return [fullId, await window.electron.model.installedWeightVariants(fullId)] as const
+        })),
+    )
+    // A node whose state could not be read stays absent: undefined reads as "unknown",
+    // which the UI keeps neutral, while [] would claim no variant is installed.
+    set({
+      installedWeightVariants: Object.fromEntries(
+        entries.filter((entry): entry is readonly [string, string[]] => entry[1] !== null),
+      ),
+    })
   },
 
   // ── Install from GitHub ────────────────────────────────────────────────────

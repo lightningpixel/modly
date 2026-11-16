@@ -1,5 +1,5 @@
-from typing import Literal, Optional
-from pydantic import BaseModel
+from typing import Any, Literal, Optional
+from pydantic import BaseModel, Field
 
 
 class JobStatus(BaseModel):
@@ -9,3 +9,12 @@ class JobStatus(BaseModel):
     step: Optional[str] = None    # Human-readable current step
     output_url: Optional[str] = None
     error: Optional[str] = None
+
+
+class GenerateFromArtifactRequest(BaseModel):
+    """Generic typed-artifact request. Only scene is public in this release."""
+    input_kind: Literal["scene"]
+    input_path: str
+    model_id: str
+    collection: str = "Workflows"
+    params: dict[str, Any] = Field(default_factory=dict)

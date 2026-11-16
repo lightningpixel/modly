@@ -202,8 +202,17 @@ const processor = async (
 
   let outPath: string
   if (outputPath) {
-    fs.mkdirSync(outputPath, { recursive: true })
-    outPath = path.join(outputPath, `export-${Date.now()}${ext}`)
+    // Relative destinations belong to the configured workspace, never the
+    // application's working directory (often Program Files on Windows).
+    const destination = path.resolve(context.workspaceDir, outputPath)
+    const destinationExt = path.extname(destination).toLowerCase()
+    const isFile = !/[\\/]$/.test(outputPath)
+      && Object.values(EXT_MAP).includes(destinationExt)
+      && !(fs.existsSync(destination) && fs.statSync(destination).isDirectory())
+    if (isFile && destinationExt !== ext) {
+      throw new Error(`mesh-exporter: output file extension must be ${ext} for format "${format}"`)
+    }
+    outPath = isFile ? destination : path.join(destination, `export-${Date.now()}${ext}`)
   } else {
     const exportsDir = path.join(context.workspaceDir, 'Exports')
     fs.mkdirSync(exportsDir, { recursive: true })

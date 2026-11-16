@@ -1,8 +1,9 @@
 import type { Workflow, WFNode } from '@shared/types/electron.d'
 import { getWorkflowExtension, type WorkflowExtension } from './mockExtensions'
+import { hasUnsupportedSceneShape } from './sceneShape'
 import { isPassthrough, isBranchConsumer, resolveDataSource, nearestUpstreamWaits } from './nodeBehaviors'
 
-type DataType = 'image' | 'text' | 'mesh' | 'audio'
+type DataType = 'image' | 'text' | 'mesh' | 'audio' | 'scene'
 
 export interface WorkflowPreflightIssue {
   key: string
@@ -14,8 +15,10 @@ function nodeLabel(node: WFNode, allExtensions: WorkflowExtension[]): string {
   if (node.type === 'imageNode') return 'Image'
   if (node.type === 'textNode') return 'Text'
   if (node.type === 'meshNode') return 'Load 3D Mesh'
+  if (node.type === 'sceneNode') return 'Load Scene'
   if (node.type === 'outputNode') return 'Add to Scene'
   if (node.type === 'previewNode') return 'Preview Views'
+  if (node.type === 'imagePreviewNode') return 'Preview Image'
   if (node.type === 'forEachNode') {
     const mode = (node.data.params?.mode as string) ?? 'image'
     return mode === 'text' ? 'For Each Text' : mode === 'mesh' ? 'For Each Mesh' : 'For Each Image'
@@ -27,10 +30,7 @@ function nodeLabel(node: WFNode, allExtensions: WorkflowExtension[]): string {
 }
 
 function formatType(type: DataType): string {
-  if (type === 'mesh') return 'mesh'
-  if (type === 'image') return 'image'
-  if (type === 'audio') return 'audio'
-  return 'text'
+  return String(type)
 }
 
 function formatRequiredTypes(types: DataType[]): string {
@@ -43,7 +43,9 @@ function getNodeOutputType(node: WFNode, allExtensions: WorkflowExtension[]): Da
   if (node.type === 'imageNode') return 'image'
   if (node.type === 'textNode') return 'text'
   if (node.type === 'meshNode' || node.type === 'outputNode') return 'mesh'
+  if (node.type === 'sceneNode') return 'scene'
   if (node.type === 'previewNode') return 'image'
+  if (node.type === 'imagePreviewNode') return 'image'
   if (node.type === 'forEachNode') {
     const mode = (node.data.params?.mode as DataType | undefined) ?? 'image'
     return mode === 'text' || mode === 'mesh' ? mode : 'image'
@@ -94,6 +96,13 @@ export function validateWorkflowPreflight(
       })
     }
 
+    if (node.type === 'sceneNode' && !((node.data.params?.manifestPath as string | undefined)?.trim())) {
+      pushIssue(issues, {
+        key: `${node.id}:scene-invalid`, nodeId: node.id,
+        message: 'Load Scene needs a validated scene directory.',
+      })
+    }
+
     // A node fed by two different Wait branches can't be scheduled into a single
     // branch — it would run before either branch produces its mesh.
     if (
@@ -119,8 +128,20 @@ export function validateWorkflowPreflight(
       continue
     }
 
+    if (hasUnsupportedSceneShape(ext)) {
+      pushIssue(issues, {
+        key: `${node.id}:unsupported-scene-shape`,
+        nodeId: node.id,
+        message: `${ext.name} uses an unsupported scene input or output declaration.`,
+      })
+      continue
+    }
+
     const incomingEdges = workflow.edges.filter((edge) => edge.target === node.id)
-    const requiredTypes = [...new Set((ext.inputs ?? [ext.input]) as DataType[])]
+    const slotTypes = (ext.inputs ?? [ext.input]) as DataType[]
+    const acceptedTypes = [...new Set(slotTypes)]
+    // A type is required when at least one slot of that type is not optional.
+    const requiredTypes = [...new Set(slotTypes.filter((_, i) => ext.inputsRequired?.[i] !== false))]
 
     for (const requiredType of requiredTypes) {
       const hasMatchingInput = incomingEdges.some((edge) => outputTypes.get(edge.source) === requiredType)
@@ -136,11 +157,11 @@ export function validateWorkflowPreflight(
     for (const edge of incomingEdges) {
       const sourceNode = nodeMap.get(edge.source)
       const sourceType = outputTypes.get(edge.source)
-      if (!sourceNode || !sourceType || requiredTypes.includes(sourceType)) continue
+      if (!sourceNode || !sourceType || acceptedTypes.includes(sourceType)) continue
       pushIssue(issues, {
         key: `${node.id}:type:${edge.id}`,
         nodeId: node.id,
-        message: `${ext.name} expects ${formatRequiredTypes(requiredTypes)}, but ${nodeLabel(sourceNode, allExtensions)} outputs ${formatType(sourceType)}.`,
+        message: `${ext.name} expects ${formatRequiredTypes(acceptedTypes)}, but ${nodeLabel(sourceNode, allExtensions)} outputs ${formatType(sourceType)}.`,
       })
     }
   }

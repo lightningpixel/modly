@@ -13,13 +13,13 @@ import { useWorkflowRunStore } from '@areas/workflows/workflowRunStore'
 import { useWaitButton } from '@areas/workflows/useWaitButton'
 import { buildAllWorkflowExtensions, getWorkflowExtension } from '@areas/workflows/mockExtensions'
 import { validateWorkflowPreflight } from '@areas/workflows/preflight'
+import { mimeFromPath } from '@areas/workflows/nodes/imageUtils'
+import { SUPPORTED_IMAGE_TYPES, useImageHandoff } from '@shared/utils/imageInput'
 import type { WorkflowExtension } from '@areas/workflows/mockExtensions'
 import type { Workflow, WFNode, WFEdge, ParamSchema } from '@shared/types/electron.d'
 import { PICKER_LABELS, openParamPicker, resolvePickerIntent } from '@shared/utils/paramPicker'
-import { PickerIcon } from '@shared/components/ui'
-import ChatPanel from './ChatPanel'
-
-type PanelMode = 'basic' | 'chat'
+import { FloatInput, IntInput, PickerIcon } from '@shared/components/ui'
+import { isMissingWeightVariant, withWeightVariantAvailability } from '@shared/utils/weightVariants'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -54,64 +54,9 @@ function topoSortNodes(nodes: Workflow['nodes'], edges: Workflow['edges']): WFNo
   return result
 }
 
-function mimeFromPath(p: string): string {
-  const ext = p.split('.').pop()?.toLowerCase() ?? ''
-  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg'
-  if (ext === 'webp') return 'image/webp'
-  return 'image/png'
-}
-
 // ─── Param field ──────────────────────────────────────────────────────────────
 
 const inputCls = 'w-full bg-zinc-800 border border-zinc-700/80 rounded-md px-2 py-1 text-[11px] text-zinc-200 focus:outline-none focus:border-accent/60'
-
-function IntInput({ value, onChange, className }: { value: number; onChange: (v: number) => void; className: string }) {
-  const [text, setText] = useState(String(value))
-  const prevValue = useRef(value)
-  if (prevValue.current !== value && parseInt(text, 10) !== value) {
-    prevValue.current = value
-    setText(String(value))
-  }
-  return (
-    <input
-      type="text"
-      inputMode="numeric"
-      value={text}
-      onChange={(e) => {
-        const raw = e.target.value
-        if (raw !== '' && raw !== '-' && !/^-?\d+$/.test(raw)) return
-        setText(raw)
-        const n = parseInt(raw, 10)
-        if (!isNaN(n)) { prevValue.current = n; onChange(n) }
-      }}
-      className={className}
-    />
-  )
-}
-
-function FloatInput({ value, onChange, className }: { value: number; onChange: (v: number) => void; className: string }) {
-  const [text, setText] = useState(String(value))
-  const prevValue = useRef(value)
-  if (prevValue.current !== value && parseFloat(text.replace(',', '.')) !== value) {
-    prevValue.current = value
-    setText(String(value))
-  }
-  return (
-    <input
-      type="text"
-      inputMode="decimal"
-      value={text}
-      onChange={(e) => {
-        const raw = e.target.value.replace(',', '.')
-        if (raw !== '' && raw !== '-' && raw !== '.' && !/^-?\d*\.?\d*$/.test(raw)) return
-        setText(e.target.value)
-        const num = parseFloat(raw)
-        if (!isNaN(num)) { prevValue.current = num; onChange(num) }
-      }}
-      className={className}
-    />
-  )
-}
 
 function ParamField({ param, value, onChange }: {
   param:    ParamSchema
@@ -144,7 +89,8 @@ function ParamField({ param, value, onChange }: {
     )
   }
   if (param.type === 'float') {
-    return <FloatInput value={value as number} onChange={(v) => onChange(v)} className={inputCls} />
+    return <FloatInput value={value as number} onChange={(v) => onChange(v)} className={inputCls}
+      min={param.min} max={param.max} step={param.step} label={param.label} />
   }
   // int
   return <IntInput value={value as number} onChange={(v) => onChange(v)} className={inputCls} />
@@ -208,21 +154,49 @@ function WorkflowDropdown({ workflows, value, onChange }: {
 
 type PatchFn = (nodeId: string, patch: Record<string, unknown>) => void
 
+/** The image node params for a file on disk: its path and an inline preview. */
+async function readImageParams(path: string): Promise<{ filePath: string, preview: string }> {
+  const base64 = await window.electron.fs.readFileBase64(path)
+  return { filePath: path, preview: `data:${mimeFromPath(path)};base64,${base64}` }
+}
+
 function ImageParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: FlowNode[]; onPatch: PatchFn }) {
   const node     = nodes.find((n) => n.id === nodeId)
   const data     = node?.data as { params: Record<string, unknown> } | undefined
   const preview  = data?.params.preview as string | undefined
+  const showToast = useAppStore((state) => state.showToast)
+  const loadRequest = useRef(0)
+
+  const applyImagePath = useCallback(async (path: string | null) => {
+    const request = ++loadRequest.current
+    if (!path) return
+    try {
+      const image = await readImageParams(path)
+      if (request !== loadRequest.current) return
+      onPatch(nodeId, { params: { ...(data?.params ?? {}), ...image } })
+    } catch {
+      if (request === loadRequest.current) showToast('Unable to load the selected image')
+    }
+  }, [nodeId, data?.params, onPatch, showToast])
 
   const browse = useCallback(async () => {
-    const p = await window.electron.fs.selectImage()
-    if (!p) return
-    const base64 = await window.electron.fs.readFileBase64(p)
-    const src = `data:${mimeFromPath(p)};base64,${base64}`
-    onPatch(nodeId, { params: { ...(data?.params ?? {}), filePath: p, preview: src } })
-  }, [nodeId, data?.params, onPatch])
+    await applyImagePath(await window.electron.fs.selectImage())
+  }, [applyImagePath])
 
   return (
-    <div className="flex flex-col gap-1.5">
+    <div
+      className="flex flex-col gap-1.5"
+      onDragOver={(event) => {
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'copy'
+      }}
+      onDrop={(event) => {
+        event.preventDefault()
+        const file = event.dataTransfer.files[0]
+        if (!file || !SUPPORTED_IMAGE_TYPES.has(file.type)) return
+        void applyImagePath(window.electron.fs.getPathForFile(file))
+      }}
+    >
       <div className="flex items-center gap-1.5">
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" strokeWidth="2">
           <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/>
@@ -383,6 +357,8 @@ function WaitParamRow({ nodeId }: { nodeId: string }) {
 
 function ExtensionParamRow({ nodeId, ext, nodes, onPatch }: { nodeId: string; ext: WorkflowExtension; nodes: FlowNode[]; onPatch: PatchFn }) {
   const [expanded, setExpanded] = useState(true)
+  const installedVariants = useExtensionsStore((s) => s.installedWeightVariants[ext.id])
+  const openExtension = useNavStore((s) => s.openExtension)
   const node    = nodes.find((n) => n.id === nodeId)
   const data    = node?.data as { enabled: boolean; params: Record<string, unknown> } | undefined
   const enabled = data?.enabled ?? true
@@ -430,8 +406,17 @@ function ExtensionParamRow({ nodeId, ext, nodes, onPatch }: { nodeId: string; ex
               <div key={param.id} className="flex items-center gap-2">
                 <label className="text-[10px] text-zinc-500 w-20 shrink-0 truncate">{param.label}</label>
                 <div className="flex-1">
-                  <ParamField param={param} value={val}
+                  <ParamField param={withWeightVariantAvailability(param, ext.weightVariants, installedVariants)} value={val}
                     onChange={(v) => onPatch(nodeId, { params: { ...(data?.params ?? {}), [param.id]: v } })} />
+                  {/* Offer the install instead of leaving the panel on selection. */}
+                  {isMissingWeightVariant(param.id, val, ext.weightVariants, installedVariants) && (
+                    <button
+                      onClick={() => openExtension(ext.extensionId)}
+                      className="mt-1 text-[10px] text-amber-400 hover:text-amber-300 hover:underline"
+                    >
+                      Not installed — install it
+                    </button>
+                  )}
                 </div>
               </div>
             )
@@ -538,6 +523,23 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
     && (n.data as { showInGenerate?: boolean }).showInGenerate === true,
   )
 
+  // An image handed over by another page (Home) goes into the first image input
+  // shown here, exactly as if it had been browsed in this panel.
+  const pendingImage = useImageHandoff((s) => s.pendingPath)
+  useEffect(() => {
+    const path = useImageHandoff.getState().take()
+    if (!path) return
+    const target = paramNodes.find((n) => n.type === 'imageNode')
+    if (!target) {
+      showToast('This workflow has no image input. Pick a workflow with one.')
+      return
+    }
+    readImageParams(path)
+      .then((image) => patchNode(target.id, { params: { ...(target.data.params ?? {}), ...image } }))
+      .catch(() => showToast('Unable to load the selected image'))
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs when an image is handed over; nodes are read at that point
+  }, [pendingImage])
+
   const handleGenerate = useCallback(() => {
     if (firstPreflightIssue) {
       showToast(firstPreflightIssue)
@@ -626,30 +628,6 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
   )
 }
 
-// ─── Mode toggle ──────────────────────────────────────────────────────────────
-
-function ModeToggle({ mode, onChange }: { mode: PanelMode; onChange: (m: PanelMode) => void }): JSX.Element {
-  return (
-    <div className="shrink-0 px-3 pt-3 pb-2.5">
-      <div className="flex bg-zinc-900 border border-zinc-800 rounded-lg p-0.5">
-        {(['basic', 'chat'] as PanelMode[]).map((m) => (
-          <button
-            key={m}
-            onClick={() => onChange(m)}
-            className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-colors capitalize ${
-              mode === m
-                ? 'bg-zinc-700 text-zinc-100 shadow-sm'
-                : 'text-zinc-500 hover:text-zinc-300'
-            }`}
-          >
-            {m}
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
-
 // ─── Main panel ───────────────────────────────────────────────────────────────
 
 export default function WorkflowPanel() {
@@ -658,7 +636,6 @@ export default function WorkflowPanel() {
   const loadExtensions         = useExtensionsStore((s) => s.loadExtensions)
   const { navigate }           = useNavStore()
   const [selectedId, setSelectedId] = useState<string | null>(activeId)
-  const [mode, setMode]             = useState<PanelMode>('basic')
 
   const allExtensions = useMemo(
     () => buildAllWorkflowExtensions(modelExtensions, processExtensions),
@@ -683,56 +660,44 @@ export default function WorkflowPanel() {
   return (
     <div className="flex flex-col flex-1 min-h-0">
 
-      {/* Mode toggle */}
-      <ModeToggle mode={mode} onChange={setMode} />
-
-      {mode === 'chat' ? (
-        <>
-          <div className="shrink-0 h-px bg-zinc-800" />
-          <ChatPanel />
-        </>
-      ) : (
-        <>
-          {/* Header */}
-          <div className="shrink-0 px-4 pt-2.5 pb-3 border-b border-zinc-800 flex flex-col gap-3">
-            <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-500">Workflow</h2>
-            <div className="flex items-center gap-2">
-              <div className="flex-1 min-w-0">
-                <WorkflowDropdown workflows={workflows} value={selectedId} onChange={setSelectedId} />
-              </div>
-              {selectedId && (
-                <button
-                  onClick={() => { useWorkflowsStore.getState().setActive(selectedId!); navigate('workflows') }}
-                  title="Edit workflow"
-                  className="shrink-0 p-1.5 rounded-lg border border-zinc-700 bg-zinc-800/60 text-zinc-400
-                             hover:text-zinc-100 hover:bg-zinc-700 hover:border-zinc-600 transition-colors"
-                >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                  </svg>
-                </button>
-              )}
-            </div>
+      {/* Header */}
+      <div className="shrink-0 px-4 pt-3 pb-3 border-b border-zinc-800 flex flex-col gap-3">
+        <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-500">Workflow</h2>
+        <div className="flex items-center gap-2">
+          <div className="flex-1 min-w-0">
+            <WorkflowDropdown workflows={workflows} value={selectedId} onChange={setSelectedId} />
           </div>
-
-          {/* Canvas or empty state */}
-          {workflow ? (
-            <ReactFlowProvider>
-              <EmbeddedCanvas
-                key={workflow.id}
-                workflow={workflow}
-                allExtensions={allExtensions}
-              />
-            </ReactFlowProvider>
-          ) : (
-            <div className="flex-1 flex items-center justify-center px-6">
-              <p className="text-xs text-zinc-600 text-center leading-relaxed">
-                No workflows yet.<br/>Create one in the Workflows tab.
-              </p>
-            </div>
+          {selectedId && (
+            <button
+              onClick={() => { useWorkflowsStore.getState().setActive(selectedId!); navigate('workflows') }}
+              title="Edit workflow"
+              className="shrink-0 p-1.5 rounded-lg border border-zinc-700 bg-zinc-800/60 text-zinc-400
+                         hover:text-zinc-100 hover:bg-zinc-700 hover:border-zinc-600 transition-colors"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+              </svg>
+            </button>
           )}
-        </>
+        </div>
+      </div>
+
+      {/* Canvas or empty state */}
+      {workflow ? (
+        <ReactFlowProvider>
+          <EmbeddedCanvas
+            key={workflow.id}
+            workflow={workflow}
+            allExtensions={allExtensions}
+          />
+        </ReactFlowProvider>
+      ) : (
+        <div className="flex-1 flex items-center justify-center px-6">
+          <p className="text-xs text-zinc-600 text-center leading-relaxed">
+            No workflows yet.<br/>Create one in the Workflows tab.
+          </p>
+        </div>
       )}
     </div>
   )

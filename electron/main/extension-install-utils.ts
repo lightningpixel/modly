@@ -1,9 +1,33 @@
+import {
+  normalizeModelSources,
+  normalizeWeightGroupReferences,
+  normalizeWeightGroups,
+  normalizeWeightVariants,
+  validateModelNodeIds,
+  safeModelSourceId,
+  type ModelWeightNode,
+  type WeightVariantNode,
+} from './model-sources'
+
 export interface InstallManifest {
   id?: string
   type?: 'model' | 'process'
   entry?: string
   generator_class?: string
-  nodes?: Array<{ id?: string }>
+  model_sources?: unknown
+  params_schema?: unknown
+  weight_groups?: unknown
+  nodes?: Array<{
+    id?: string
+    input?: unknown
+    inputs?: unknown
+    input_labels?: unknown
+    output?: unknown
+    hf_repo?: unknown
+    model_sources?: unknown
+    weight_groups?: unknown
+    weight_variants?: unknown
+  } & ModelWeightNode & WeightVariantNode>
 }
 
 export interface ValidatedInstallManifest {
@@ -18,6 +42,82 @@ export interface ExtensionReloadPayload {
   reloaded: true
   models: string[]
   errors: Record<string, string>
+}
+
+export interface NormalizedNodeInputs {
+  /** One type name per input slot, or undefined for a single-input node. */
+  inputs?: string[]
+  /** Display label per slot: explicit `input_labels`, else the objects' labels. */
+  inputLabels?: string[]
+  /** Set only when at least one slot is optional; true means required. */
+  inputsRequired?: boolean[]
+}
+
+/**
+ * A manifest may declare `inputs` as type names (`["image", "text"]`) or as
+ * slot objects (`[{ "type": "image", "label": "Front", "required": false }]`).
+ * Everything downstream compares slots against type names, so objects are
+ * reduced to their type here and their label/required carried separately.
+ */
+export function normalizeNodeInputs(node: { id?: unknown; inputs?: unknown; input_labels?: unknown }): NormalizedNodeInputs {
+  const explicitLabels = Array.isArray(node.input_labels) ? node.input_labels as string[] : undefined
+  if (!Array.isArray(node.inputs)) return { inputLabels: explicitLabels }
+
+  const inputs: string[] = []
+  const labels: (string | undefined)[] = []
+  const required: boolean[] = []
+  node.inputs.forEach((entry: unknown, i: number) => {
+    if (typeof entry === 'string') {
+      inputs.push(entry)
+      labels.push(undefined)
+      required.push(true)
+      return
+    }
+    const slot = entry as { type?: unknown; label?: unknown; name?: unknown; required?: unknown } | null
+    if (!slot || typeof slot !== 'object' || typeof slot.type !== 'string') {
+      throw new Error(`manifest.json: ${String(node.id ?? 'node')} inputs[${i}] must be a type name or an object with a "type"`)
+    }
+    inputs.push(slot.type)
+    labels.push(typeof slot.label === 'string' ? slot.label : typeof slot.name === 'string' ? slot.name : undefined)
+    required.push(slot.required !== false)
+  })
+
+  const derivedLabels = labels.some((label) => label !== undefined)
+    ? labels.map((label, i) => label ?? inputs[i])
+    : undefined
+  return {
+    inputs,
+    inputLabels: explicitLabels ?? derivedLabels,
+    inputsRequired: required.every(Boolean) ? undefined : required,
+  }
+}
+
+export function assertSupportedSceneNodeShape(
+  kind: 'model' | 'process',
+  node: { id?: string; input?: unknown; inputs?: unknown; output?: unknown },
+  declaredInputs: unknown[],
+  output: unknown,
+): void {
+  const usesSceneInput = declaredInputs.includes('scene')
+  if (kind === 'process' && (usesSceneInput || output === 'scene')) {
+    throw new Error('manifest.json: scene input and output are supported only for model nodes')
+  }
+  if (kind === 'model' && usesSceneInput && (node.inputs !== undefined || node.input !== 'scene')) {
+    throw new Error(`manifest.json: ${node.id ?? 'node'} must declare scene as its single input field`)
+  }
+}
+
+/**
+ * Owner and repo of a pasted github.com URL. Accepts the clone URL form
+ * ("<repo>.git"), which the GitHub API would otherwise answer with a 404.
+ */
+export function parseGitHubRepoUrl(input: string): { owner: string; repo: string } {
+  const parsed = new URL(input.trim())
+  if (parsed.hostname !== 'github.com') throw new Error('Invalid URL: must be a GitHub repository (github.com)')
+  const [owner, rawRepo] = parsed.pathname.split('/').filter(Boolean)
+  const repo = rawRepo?.replace(/\.git$/, '')
+  if (!owner || !repo) throw new Error('Invalid URL: expected format https://github.com/owner/repo')
+  return { owner, repo }
 }
 
 export type IncompleteInstallRecoveryAction =
@@ -38,6 +138,43 @@ export function validateInstallManifest(
   const isProcess = manifest.type === 'process'
   const entryFile = manifest.entry ?? 'processor.js'
   const nodes = Array.isArray(manifest.nodes) ? manifest.nodes.filter((node) => node?.id) : []
+  if (manifest.model_sources !== undefined) {
+    throw new Error('manifest.json: model_sources must be declared on a model node')
+  }
+  if (isProcess && manifest.weight_groups !== undefined) {
+    throw new Error('manifest.json: weight_groups is supported only for model extensions')
+  }
+  const weightGroups = normalizeWeightGroups(manifest)
+  if (weightGroups || nodes.some((node) => node.model_sources !== undefined || node.weight_groups !== undefined)) {
+    validateModelNodeIds(manifest.nodes ?? [])
+  }
+  for (const node of Array.isArray(manifest.nodes) ? manifest.nodes : []) {
+    const declaredInputs = normalizeNodeInputs(node).inputs ?? [node.input ?? 'image']
+    const output = node.output ?? 'mesh'
+    assertSupportedSceneNodeShape(isProcess ? 'process' : 'model', node, declaredInputs, output)
+    const usesSharedWeights = weightGroups !== undefined || node.weight_groups !== undefined
+    if (usesSharedWeights && typeof node.id === 'string' && node.id.toLowerCase() === '_shared') {
+      throw new Error('manifest.json: model node id "_shared" is reserved')
+    }
+    if (isProcess && node.weight_variants !== undefined) {
+      throw new Error('manifest.json: weight_variants is supported only for model nodes')
+    }
+    if (isProcess && (node.model_sources !== undefined || node.weight_groups !== undefined)) {
+      throw new Error('manifest.json: model_sources and weight_groups are supported only for model nodes')
+    }
+    if (!usesSharedWeights && node.model_sources === undefined && node.weight_variants === undefined) continue
+    const nodeId = safeModelSourceId(node.id, 'model node id')
+    if (node.model_sources !== undefined) normalizeModelSources(node)
+    // Before the weight_groups/hf_repo check, so a variants + groups node gets
+    // the explicit "cannot be combined" error.
+    normalizeWeightVariants(node, node.params_schema ?? manifest.params_schema)
+    normalizeWeightGroupReferences(node, weightGroups, `nodes[${nodeId}].weight_groups`)
+    if (node.weight_groups !== undefined && node.hf_repo !== undefined) {
+      throw new Error(
+        `manifest.json: model node "${nodeId}" must use model_sources for private weights when weight_groups are declared`,
+      )
+    }
+  }
 
   if (isProcess) {
     if (!opts.hasEntryFile(entryFile)) {

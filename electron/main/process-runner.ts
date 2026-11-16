@@ -2,6 +2,7 @@ import { Worker }      from 'worker_threads'
 import { spawn }       from 'child_process'
 import { existsSync }  from 'fs'
 import { join }        from 'path'
+import { app }         from 'electron'
 
 // ─── Worker code for JS process extensions ────────────────────────────────────
 
@@ -114,6 +115,11 @@ export class ProcessRunner implements IProcessRunner {
       worker.once('error', (err) => {
         reject(err)
       })
+
+      // A worker can also die between runs (e.g. a timer the processor left
+      // behind throws after it returned). Forget it whenever it exits, so the
+      // next run starts a fresh one instead of posting into a dead thread.
+      worker.once('exit', () => this.discardWorker(worker))
     })
   }
 
@@ -127,23 +133,50 @@ export class ProcessRunner implements IProcessRunner {
     const worker = this.worker!
 
     return new Promise((resolve, reject) => {
+      const settle = () => {
+        worker.off('message', handler)
+        worker.off('error', onError)
+        worker.off('exit', onExit)
+      }
       const handler = (msg: { type: string; result?: ProcessResult; message?: string; percent?: number; label?: string }) => {
         if (msg.type === 'progress') {
           onProgress?.(msg.percent ?? 0, msg.label ?? '')
         } else if (msg.type === 'log') {
           onLog?.(msg.message ?? '')
         } else if (msg.type === 'done') {
-          worker.off('message', handler)
+          settle()
           resolve(msg.result ?? {})
         } else if (msg.type === 'error') {
-          worker.off('message', handler)
+          settle()
           reject(new Error(msg.message))
         }
       }
+      // A worker that dies mid-run (an uncaught error, out of memory,
+      // process.exit) never posts 'done' or 'error'. Settle the run instead of
+      // waiting forever, and drop the dead worker so the next run starts a
+      // fresh one rather than posting into it.
+      const onError = (err: Error) => {
+        settle()
+        this.discardWorker(worker)
+        reject(err)
+      }
+      const onExit = (code: number) => {
+        settle()
+        this.discardWorker(worker)
+        reject(new Error(`Process extension worker exited with code ${code}`))
+      }
 
       worker.on('message', handler)
+      worker.on('error', onError)
+      worker.on('exit', onExit)
       worker.postMessage({ action: 'run', input, params })
     })
+  }
+
+  private discardWorker(worker: Worker): void {
+    if (this.worker !== worker) return
+    this.worker = null
+    this.ready  = false
   }
 
   terminate(): void {
@@ -160,12 +193,14 @@ export class ProcessRunner implements IProcessRunner {
 
 export class PythonProcessRunner implements IProcessRunner {
   private pythonExe:    string
+  private extDir:       string
   private scriptPath:   string
   private workspaceDir: string
   private tempDir:      string
 
   constructor(pythonExe: string, extDir: string, entry: string, workspaceDir: string, tempDir: string) {
     this.pythonExe    = pythonExe
+    this.extDir       = extDir
     this.scriptPath   = join(extDir, entry)
     this.workspaceDir = workspaceDir
     this.tempDir      = tempDir
@@ -180,9 +215,22 @@ export class PythonProcessRunner implements IProcessRunner {
     return new Promise((resolve, reject) => {
       const proc = spawn(this.pythonExe, [this.scriptPath], {
         stdio: ['pipe', 'pipe', 'pipe'],
-        // Force UTF-8 stdio so Unicode prints from process extensions do not
-        // crash under legacy Windows codepages (cp1252/cp932).
-        env: { ...process.env, PYTHONUTF8: '1' },
+        env: {
+          ...process.env,
+          // Force UTF-8 stdio so Unicode prints from process extensions do not
+          // crash under legacy Windows codepages (cp1252/cp932).
+          PYTHONUTF8: '1',
+          // Built-in process nodes may import shared services from the backend.
+          MODLY_API_DIR: app.isPackaged
+            ? join(process.resourcesPath, 'api')
+            : join(app.getAppPath(), 'api'),
+          // Electron is also the packaged Node runtime. meshopt_runner.cjs uses
+          // ELECTRON_RUN_AS_NODE when it launches this executable.
+          MODLY_NODE_EXECUTABLE: process.execPath,
+          EXTENSION_DIR: this.extDir,
+          WORKSPACE_DIR: this.workspaceDir,
+          TEMP_DIR: this.tempDir,
+        },
       })
 
       // Send input as a single JSON line on stdin
@@ -270,6 +318,19 @@ export function getExtPythonExe(extDir: string): string | null {
 // ─── Registry (one runner per extension id, reused across calls) ──────────────
 
 const registry = new Map<string, IProcessRunner>()
+// The arguments each cached runner was built with. A runner bakes them in at
+// construction, so a call with different ones — e.g. after the workspace is
+// moved in Settings, which updates paths without a restart — must not get the
+// old runner back, or node output keeps landing in the previous folder.
+const registryArgs = new Map<string, string>()
+
+function canReuseRunner(extensionId: string, args: string[]): boolean {
+  const key = JSON.stringify(args)
+  if (registry.has(extensionId) && registryArgs.get(extensionId) === key) return true
+  terminateProcessRunner(extensionId)
+  registryArgs.set(extensionId, key)
+  return false
+}
 
 export function getProcessRunner(
   extensionId:  string,
@@ -278,7 +339,7 @@ export function getProcessRunner(
   workspaceDir: string,
   tempDir:      string,
 ): ProcessRunner {
-  if (!registry.has(extensionId)) {
+  if (!canReuseRunner(extensionId, [extDir, entry, workspaceDir, tempDir])) {
     registry.set(extensionId, new ProcessRunner(extDir, entry, workspaceDir, tempDir))
   }
   return registry.get(extensionId)! as ProcessRunner
@@ -292,7 +353,7 @@ export function getPythonProcessRunner(
   workspaceDir: string,
   tempDir:      string,
 ): PythonProcessRunner {
-  if (!registry.has(extensionId)) {
+  if (!canReuseRunner(extensionId, [pythonExe, extDir, entry, workspaceDir, tempDir])) {
     registry.set(extensionId, new PythonProcessRunner(pythonExe, extDir, entry, workspaceDir, tempDir))
   }
   return registry.get(extensionId)! as PythonProcessRunner

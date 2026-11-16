@@ -53,6 +53,156 @@ test('validateInstallManifest still rejects missing process entry files', () => 
   )
 })
 
+test('validateInstallManifest accepts multi-source nodes and preserves legacy shapes', () => {
+  const mod = loadModule()
+  assert.doesNotThrow(() => mod.validateInstallManifest({
+    id: 'multi-model',
+    generator_class: 'Generator',
+    nodes: [{
+      id: 'generate',
+      model_sources: [
+        {
+          id: 'primary', provider: 'huggingface', repo_id: 'org/main',
+          destination: '.', checks: ['pipeline.json'],
+        },
+        {
+          id: 'encoder', provider: 'huggingface', repo_id: 'org/encoder',
+          destination: 'auxiliary/encoder', checks: ['model.safetensors'],
+        },
+      ],
+    }],
+  }, { hasEntryFile: () => false, hasGeneratorFile: () => true }, 'repository'))
+
+  assert.doesNotThrow(() => mod.validateInstallManifest({
+    id: 'legacy',
+    generator_class: 'Generator',
+    nodes: [{
+      id: 'projection',
+      hf_repo: 'org/legacy',
+      download_check: '../generate/model.safetensors',
+      hf_skip_prefixes: ['weights/**'],
+    }],
+  }, { hasEntryFile: () => false, hasGeneratorFile: () => true }, 'repository'))
+
+  // Nodes that do not opt into managed sources keep the pre-existing validation path.
+  assert.doesNotThrow(() => mod.validateInstallManifest({
+    id: 'legacy-unmanaged',
+    generator_class: 'Generator',
+    nodes: [{ id: 'legacy node' }],
+  }, { hasEntryFile: () => false, hasGeneratorFile: () => true }, 'repository'))
+})
+
+test('validateInstallManifest accepts scene IO without rejecting third-party artifact kinds', () => {
+  const mod = loadModule()
+  const files = { hasEntryFile: () => false, hasGeneratorFile: () => true }
+  assert.doesNotThrow(() => mod.validateInstallManifest({
+    id: 'scene-model', generator_class: 'Generator',
+    nodes: [{ id: 'normalize', input: 'scene', output: 'scene' }],
+  }, files, 'repository'))
+  for (const input of ['capture', 'video']) {
+    assert.doesNotThrow(() => mod.validateInstallManifest({
+      id: 'future-model', generator_class: 'Generator',
+      nodes: [{ id: 'future', input, output: 'scene' }],
+    }, files, 'repository'))
+  }
+})
+
+test('scene is model-only, single-input, while image-multi to scene stays valid', () => {
+  const mod = loadModule()
+  const modelFiles = { hasEntryFile: () => false, hasGeneratorFile: () => true }
+  const processFiles = { hasEntryFile: () => true, hasGeneratorFile: () => false }
+  for (const node of [
+    { id: 'mixed', input: 'scene', inputs: ['scene', 'text'], output: 'mesh' },
+    { id: 'duplicate', input: 'scene', inputs: ['scene', 'scene'], output: 'mesh' },
+    { id: 'hidden', input: 'image', inputs: ['scene'], output: 'mesh' },
+  ]) {
+    assert.throws(() => mod.validateInstallManifest({ id: 'bad', generator_class: 'Generator', nodes: [node] }, modelFiles, 'repository'), /scene.*single|single.*scene/i)
+  }
+  for (const node of [
+    { id: 'input', input: 'scene', output: 'mesh' },
+    { id: 'output', input: 'image', output: 'scene' },
+  ]) {
+    assert.throws(() => mod.validateInstallManifest({ id: 'proc', type: 'process', entry: 'processor.js', nodes: [node] }, processFiles, 'repository'), /scene.*model|model.*scene/i)
+  }
+  assert.doesNotThrow(() => mod.validateInstallManifest({
+    id: 'images-to-scene', generator_class: 'Generator',
+    nodes: [{ id: 'prepare', input: 'image', inputs: ['image', 'image'], output: 'scene' }],
+  }, modelFiles, 'repository'))
+  for (const output of ['scene', 'mesh']) {
+    assert.doesNotThrow(() => mod.validateInstallManifest({
+      id: `scene-to-${output}`, generator_class: 'Generator',
+      nodes: [{ id: 'generate', input: 'scene', output }],
+    }, modelFiles, 'repository'))
+  }
+})
+
+test('validateInstallManifest rejects malformed or process model_sources', () => {
+  const mod = loadModule()
+  const source = {
+    id: 'weights', provider: 'huggingface', repo_id: 'org/model',
+    destination: '../outside', checks: ['model.safetensors'],
+  }
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'unsafe', generator_class: 'Generator',
+    nodes: [{ id: 'generate', model_sources: [source] }],
+  }, { hasEntryFile: () => false, hasGeneratorFile: () => true }, 'repository'), /destination/i)
+
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'process', type: 'process', entry: 'processor.js',
+    nodes: [{ id: 'run', model_sources: [{ ...source, destination: '.' }] }],
+  }, { hasEntryFile: () => true, hasGeneratorFile: () => false }, 'repository'), /only for model nodes/i)
+})
+
+test('validateInstallManifest accepts shared groups with private sources', () => {
+  const mod = loadModule()
+  assert.doesNotThrow(() => mod.validateInstallManifest({
+    id: 'shared-model',
+    generator_class: 'Generator',
+    weight_groups: [{
+      id: 'base',
+      model_sources: [{
+        id: 'base', provider: 'huggingface', repo_id: 'org/base',
+        destination: '.', checks: ['base.bin'],
+      }],
+    }],
+    nodes: [
+      { id: 'base-node', weight_groups: ['base'] },
+      {
+        id: 'adapter-node',
+        weight_groups: ['base'],
+        model_sources: [{
+          id: 'adapter', provider: 'huggingface', repo_id: 'org/adapter',
+          destination: '.', checks: ['adapter.bin'],
+        }],
+      },
+    ],
+  }, { hasEntryFile: () => false, hasGeneratorFile: () => true }, 'repository'))
+})
+
+test('validateInstallManifest rejects unsafe shared-weight contracts', () => {
+  const mod = loadModule()
+  const group = {
+    id: 'base',
+    model_sources: [{
+      id: 'base', provider: 'huggingface', repo_id: 'org/base',
+      destination: '.', checks: ['base.bin'],
+    }],
+  }
+  const files = { hasEntryFile: () => true, hasGeneratorFile: () => true }
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'unknown', generator_class: 'Generator',
+    weight_groups: [group], nodes: [{ id: 'generate', weight_groups: ['missing'] }],
+  }, files, 'repository'), /unknown weight group/i)
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'reserved', generator_class: 'Generator',
+    weight_groups: [group], nodes: [{ id: '_shared', weight_groups: ['base'] }],
+  }, files, 'repository'), /reserved/i)
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'process', type: 'process', entry: 'processor.py', weight_groups: [group],
+    nodes: [{ id: 'run' }],
+  }, files, 'repository'), /only for model extensions/i)
+})
+
 test('python process setup failures are treated as fatal', () => {
   const mod = loadModule()
 
@@ -316,4 +466,110 @@ test('incompleteInstallRecoveryAction chooses restore, removal, or no-op', () =>
     destinationIncomplete: false,
     backupExists: true,
   }), 'none')
+})
+
+test('managed model node ids reject portable aliases before installation', () => {
+  const { validateInstallManifest } = loadModule()
+  const opts = { hasGeneratorFile: () => true, hasEntryFile: () => true }
+  for (const ids of [['Fast', 'fast'], ['fast', 'fast']]) {
+    const manifest = {
+      id: 'demo', type: 'model', generator_class: 'Generator',
+      weight_groups: [{ id: 'base', model_sources: [{ id: 'main', provider: 'huggingface', repo_id: 'org/base', destination: '.', checks: ['weights.bin'] }] }],
+      nodes: ids.map((id) => ({ id, weight_groups: ['base'] })),
+    }
+    assert.throws(() => validateInstallManifest(manifest, opts, 'test'), /portable-unique/)
+  }
+})
+
+test('validateInstallManifest validates weight variants and keeps them off process nodes', () => {
+  const mod = loadModule()
+  const files = { hasEntryFile: () => true, hasGeneratorFile: () => true }
+  const weightVariants = {
+    param: 'quant',
+    options: [{ id: 'Q4', include_prefixes: ['dit/model_Q4.gguf'], checks: ['dit/model_Q4.gguf'] }],
+  }
+  const paramsSchema = [{ id: 'quant', type: 'select', options: [{ value: 'Q4' }] }]
+  assert.doesNotThrow(() => mod.validateInstallManifest({
+    id: 'quantized', generator_class: 'Generator', params_schema: paramsSchema,
+    nodes: [{ id: 'generate', hf_repo: 'org/model', weight_variants: weightVariants }],
+  }, files, 'repository'))
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'quantized', generator_class: 'Generator',
+    nodes: [{ id: 'generate', hf_repo: 'org/model', weight_variants: weightVariants }],
+  }, files, 'repository'), /must name a params_schema entry/)
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'quantized', generator_class: 'Generator', params_schema: paramsSchema,
+    nodes: [{ id: 'generate', weight_variants: weightVariants }],
+  }, files, 'repository'), /requires hf_repo/)
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'proc', type: 'process', entry: 'processor.js',
+    nodes: [{ id: 'run', hf_repo: 'org/model', weight_variants: weightVariants }],
+  }, files, 'repository'), /weight_variants is supported only for model nodes/)
+})
+
+test('parseGitHubRepoUrl resolves owner and repo from the URL forms people paste (#280)', () => {
+  const mod = loadModule()
+  const expected = { owner: 'DrHepa', repo: 'modly-trellis-text-extension' }
+  for (const url of [
+    'https://github.com/DrHepa/modly-trellis-text-extension',
+    '  https://github.com/DrHepa/modly-trellis-text-extension/  ',
+    // The "Code > HTTPS" clone URL: the GitHub API answers 404 for "<repo>.git"
+    'https://github.com/DrHepa/modly-trellis-text-extension.git',
+    'https://github.com/DrHepa/modly-trellis-text-extension/tree/master',
+    'https://github.com/DrHepa/modly-trellis-text-extension?tab=readme-ov-file',
+  ]) {
+    assert.deepEqual(mod.parseGitHubRepoUrl(url), expected, url)
+  }
+})
+
+test('parseGitHubRepoUrl rejects URLs that do not name a GitHub repository', () => {
+  const mod = loadModule()
+  assert.throws(() => mod.parseGitHubRepoUrl('https://gitlab.com/owner/repo'), /must be a GitHub repository/)
+  assert.throws(() => mod.parseGitHubRepoUrl('https://github.com/owner'), /expected format/)
+  assert.throws(() => mod.parseGitHubRepoUrl('https://github.com/owner/.git'), /expected format/)
+})
+
+
+test('normalizeNodeInputs reduces slot objects to type names and keeps labels and optionality (#241)', () => {
+  const mod = loadModule()
+  // The manifest shape from the report (modly-Codex-image-extension, image-to-image)
+  assert.deepEqual(mod.normalizeNodeInputs({
+    id: 'image-to-image',
+    input: 'image',
+    inputs: [
+      { name: 'front', label: 'Primary image', type: 'image', required: true },
+      { name: 'left', label: 'Image 2', type: 'image', required: false },
+    ],
+  }), {
+    inputs: ['image', 'image'],
+    inputLabels: ['Primary image', 'Image 2'],
+    inputsRequired: [true, false],
+  })
+
+  // Plain type names are unchanged, with no derived labels or optionality
+  assert.deepEqual(
+    mod.normalizeNodeInputs({ inputs: ['image', 'text'], input_labels: ['Image', 'Prompt'] }),
+    { inputs: ['image', 'text'], inputLabels: ['Image', 'Prompt'], inputsRequired: undefined },
+  )
+  // Explicit input_labels win; a slot without a label falls back to its name, then its type
+  assert.deepEqual(
+    mod.normalizeNodeInputs({ inputs: ['mesh', { type: 'image', name: 'ref' }] }).inputLabels,
+    ['mesh', 'ref'],
+  )
+  assert.deepEqual(mod.normalizeNodeInputs({ input: 'image' }), { inputLabels: undefined })
+})
+
+test('normalizeNodeInputs rejects slot entries without a type', () => {
+  const mod = loadModule()
+  assert.throws(() => mod.normalizeNodeInputs({ id: 'n', inputs: [{ label: 'x' }] }), /n inputs\[0\] must be a type name/)
+  assert.throws(() => mod.normalizeNodeInputs({ id: 'n', inputs: ['image', null] }), /inputs\[1\]/)
+})
+
+test('validateInstallManifest sees object-shaped scene slots as scene inputs', () => {
+  const mod = loadModule()
+  const files = { hasEntryFile: () => true, hasGeneratorFile: () => true }
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'proc', type: 'process', entry: 'processor.js',
+    nodes: [{ id: 'run', inputs: [{ type: 'scene' }] }],
+  }, files, 'repository'), /scene input and output are supported only for model nodes/)
 })

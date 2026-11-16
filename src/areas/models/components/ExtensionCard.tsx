@@ -125,7 +125,12 @@ export function ExtensionCard({
                 className="flex items-center justify-between gap-2.5 px-2.5 py-1.5 rounded-lg bg-white/[0.02] border border-zinc-800"
               >
                 <div className="flex flex-col gap-1 min-w-0 items-start">
-                  <span className="text-xs font-medium text-zinc-200 truncate max-w-full">{node.name}</span>
+                  <span className="text-xs font-medium text-zinc-200 truncate max-w-full">
+                    {node.name}
+                    {isModel && node.weightVariants && (
+                      <span className="font-normal text-zinc-500"> · {node.weightVariants.options.length} variants</span>
+                    )}
+                  </span>
                   <IOBadge node={node} />
                 </div>
                 {isModel && (

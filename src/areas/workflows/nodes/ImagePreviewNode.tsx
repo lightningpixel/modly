@@ -1,0 +1,117 @@
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Handle, Position, useEdges, useNodes } from '@xyflow/react'
+import { useWorkflowRunStore, fromWorkspaceUrl } from '../workflowRunStore'
+import { resolveDataSource } from '../nodeBehaviors'
+import BaseNode from './BaseNode'
+import { mimeFromPath } from './imageUtils'
+import type { WFNode } from '@shared/types/electron.d'
+
+const IO_COLOR = '#38bdf8'
+
+/**
+ * Single-image passthrough preview: an image in, the same image forwarded out
+ * unchanged. Distinct from PreviewImageNode ("Preview Views"), which is a
+ * terminal node for multi-view strip outputs (e.g. MV-Adapter) and has no
+ * output handle.
+ *
+ * Reads the source file straight off disk and renders it as a `data:` URL
+ * (rather than an API-served URL) so the preview works without depending on
+ * the backend being up or CSP allowances for a remote origin.
+ */
+export default function ImagePreviewNode({ id, selected }: { id: string; selected?: boolean }) {
+  const nodeImageOutputs = useWorkflowRunStore((s) => s.nodeImageOutputs)
+  const edges            = useEdges()
+  const nodes            = useNodes()
+  const ioRowRef         = useRef<HTMLDivElement>(null)
+  const [handleTop, setHandleTop] = useState('50%')
+  const [dataUrl, setDataUrl]     = useState<string | undefined>(undefined)
+
+  useLayoutEffect(() => {
+    if (ioRowRef.current) {
+      const center = ioRowRef.current.offsetTop + ioRowRef.current.offsetHeight / 2
+      setHandleTop(`${center}px`)
+    }
+  }, [])
+
+  const incomingEdge  = edges.find((e) => e.target === id)
+  const nodeMap       = new Map(nodes.map((n) => [n.id, n as unknown as WFNode]))
+  const realSourceId  = incomingEdge
+    ? resolveDataSource(incomingEdge.source, edges, nodeMap)
+    : undefined
+  const sourceNode    = realSourceId ? nodes.find((n) => n.id === realSourceId) : undefined
+  const workspaceUrl  = realSourceId ? nodeImageOutputs[realSourceId] : undefined
+  const imageFilePath = sourceNode?.type === 'imageNode'
+    ? (sourceNode.data as { params?: { filePath?: string } })?.params?.filePath
+    : undefined
+
+  useEffect(() => {
+    let cancelled = false
+    if (!workspaceUrl && !imageFilePath) {
+      setDataUrl(undefined)
+      return
+    }
+    ;(async () => {
+      try {
+        let absPath: string
+        if (workspaceUrl) {
+          const settings = await window.electron.settings.get()
+          absPath        = fromWorkspaceUrl(workspaceUrl, settings.workspaceDir)
+        } else {
+          absPath = imageFilePath!
+        }
+        const base64 = await window.electron.fs.readFileBase64(absPath)
+        if (!cancelled) setDataUrl(`data:${mimeFromPath(absPath)};base64,${base64}`)
+      } catch {
+        if (!cancelled) setDataUrl(undefined)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [workspaceUrl, imageFilePath])
+
+  return (
+    <BaseNode
+      id={id}
+      selected={selected}
+      title="Preview Image"
+      minWidth={180}
+      icon={
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={IO_COLOR} strokeWidth="2">
+          <rect x="3" y="3" width="18" height="18" rx="2"/>
+          <circle cx="8.5" cy="8.5" r="1.5"/>
+          <polyline points="21 15 16 10 5 21"/>
+        </svg>
+      }
+      subheader={
+        <div ref={ioRowRef} className="flex items-center justify-between px-3 py-2">
+          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border border-sky-500/30 bg-sky-500/10 text-sky-400">image</span>
+          <span className="text-[9px] text-zinc-600">&rarr;</span>
+          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border border-sky-500/30 bg-sky-500/10 text-sky-400">image</span>
+        </div>
+      }
+      handles={
+        <>
+          <Handle
+            type="target"
+            position={Position.Left}
+            style={{ background: IO_COLOR, width: 14, height: 14, border: '2.5px solid #18181b', top: handleTop }}
+          />
+          <Handle
+            type="source"
+            position={Position.Right}
+            style={{ background: IO_COLOR, width: 14, height: 14, border: '2.5px solid #18181b', top: handleTop }}
+          />
+        </>
+      }
+    >
+      <div className="px-2 pb-2 pt-1 flex-1 min-h-0">
+        {dataUrl ? (
+          <img src={dataUrl} alt="preview" className="nodrag w-full h-full object-contain rounded" />
+        ) : (
+          <p className="py-3 text-center text-[10px] text-zinc-600 italic">
+            Connect an image and run to preview.
+          </p>
+        )}
+      </div>
+    </BaseNode>
+  )
+}

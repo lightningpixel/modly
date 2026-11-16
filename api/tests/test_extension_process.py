@@ -1,7 +1,11 @@
 import io
+import json
 import platform
 import queue
 import unittest
+import json
+import tempfile
+from unittest.mock import patch
 from pathlib import Path
 
 from services.extension_process import ExtensionProcess, _venv_python
@@ -12,6 +16,31 @@ def _make_proc() -> ExtensionProcess:
 
 
 class ExtensionProcessTests(unittest.TestCase):
+    def test_generation_envelope_pins_worker_model_id(self) -> None:
+        proc = _make_proc()
+        sent = []
+        proc._send = sent.append
+        proc._receive_generation = lambda *args: Path("result.glb")
+        proc._generate_request({"image_b64": ""}, {}, None, None)
+        self.assertEqual(sent[0]["model_id"], "demo")
+
+    def test_generate_artifact_sends_typed_scene_without_image_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            scene = workspace / "Workflows" / "room"
+            scene.mkdir(parents=True)
+            manifest = scene / "scene-manifest.json"
+            manifest.write_text(json.dumps({
+                "schema": "modly.scene-manifest.v1", "sceneRoot": ".", "assets": [],
+            }))
+            proc = _make_proc()
+            calls = []
+            proc._generate_request = lambda payload, params, progress, cancel: calls.append((payload, params)) or manifest
+            with patch("services.generator_registry.WORKSPACE_DIR", workspace):
+                result = proc.generate_artifact("scene", manifest, {"quality": "high"})
+            self.assertEqual(result, manifest)
+            self.assertEqual(calls, [({"input": {"kind": "scene", "path": str(manifest.resolve())}}, {"quality": "high"})])
+
     def test_read_loop_writes_sentinel_to_own_queue_only(self) -> None:
         proc = _make_proc()
 
@@ -102,6 +131,23 @@ class BuildEnvTests(unittest.TestCase):
         env = proc._build_env()
         self.assertEqual(env.get("MODEL_DIR"), str(Path("/tmp/models/ext/node")))
 
+    def test_sets_explicit_node_identity_and_shared_weight_dirs(self) -> None:
+        proc = ExtensionProcess(
+            ext_dir=Path("/tmp/extensions/ext"),
+            manifest={"id": "ext/quality", "node_id": "quality"},
+        )
+        proc.model_dir = Path("/tmp/models/ext/quality")
+        proc.shared_model_dirs = {"base": Path("/tmp/models/ext/_shared/base")}
+
+        env = proc._build_env()
+
+        self.assertEqual(env["MODEL_ID"], "ext/quality")
+        self.assertEqual(env["MODEL_NODE_ID"], "quality")
+        self.assertEqual(
+            json.loads(env["SHARED_MODEL_DIRS"]),
+            {"base": str(Path("/tmp/models/ext/_shared/base"))},
+        )
+
 
 class MissingModuleExtractionTests(unittest.TestCase):
     def test_extracts_module_name_from_message(self) -> None:
@@ -137,6 +183,24 @@ class AutoRepairPackageTests(unittest.TestCase):
         self.assertIsNone(proc._resolve_auto_repair_package("totally_unknown_pkg"))
 
 
+class StderrDecodingTests(unittest.TestCase):
+    """tqdm draws partial blocks with U+258D/U+258F, whose UTF-8 bytes are
+    undefined in cp1252. Decoding the child's pipes with the locale codec killed
+    _stderr_loop mid-run; nothing then drained stderr and the child blocked
+    forever on write once the pipe filled (a 3D generation froze at 80%)."""
+
+    def test_tqdm_partial_blocks_survive_the_loop(self) -> None:
+        proc = _make_proc()
+        bar = "Volume Decoding:   1%|█▍▏| 123/13827\r"
+        fake_proc = type("FakeProc", (), {"stderr": io.StringIO(bar)})()
+
+        proc._stderr_loop(fake_proc)  # must not raise
+
+    def test_child_is_told_to_write_utf8(self) -> None:
+        proc = _make_proc()
+        self.assertEqual(proc._build_env().get("PYTHONIOENCODING"), "utf-8")
+
+
 class RecvTests(unittest.TestCase):
     def test_returns_message_from_queue(self) -> None:
         proc = _make_proc()
@@ -153,6 +217,51 @@ class RecvTests(unittest.TestCase):
         proc = _make_proc()
         with self.assertRaises(TimeoutError):
             proc._recv(timeout=0.05)
+
+
+class GenerateErrorLoadedFlagTests(unittest.TestCase):
+    """
+    Issue #239: a generation that fails during lazy texture setup leaves the
+    worker without a model. If _loaded stays True, GeneratorRegistry.get_active()
+    skips load() forever and every later run reuses the broken worker.
+    """
+
+    def _failing_generate(self, error_msg: dict) -> ExtensionProcess:
+        proc = _make_proc()
+        proc._loaded = True
+        proc._send = lambda msg: None  # type: ignore[assignment]
+        proc._queue.put(error_msg)
+        with self.assertRaises(RuntimeError):
+            proc.generate(b"", {})
+        return proc
+
+    def test_clears_loaded_when_worker_reports_model_lost(self) -> None:
+        proc = self._failing_generate(
+            {"type": "error", "message": "No module named 'xatlas'", "loaded": False}
+        )
+        self.assertFalse(proc._loaded)
+
+    def test_keeps_loaded_when_worker_still_has_its_model(self) -> None:
+        proc = self._failing_generate(
+            {"type": "error", "message": "bad input image", "loaded": True}
+        )
+        self.assertTrue(proc._loaded)
+
+    def test_keeps_loaded_when_worker_reports_no_state(self) -> None:
+        proc = self._failing_generate({"type": "error", "message": "boom"})
+        self.assertTrue(proc._loaded)
+
+    def test_error_still_propagates_the_original_cause(self) -> None:
+        proc = _make_proc()
+        proc._loaded = True
+        proc._send = lambda msg: None  # type: ignore[assignment]
+        proc._queue.put(
+            {"type": "error", "message": "short", "traceback": "full traceback here",
+             "loaded": False}
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            proc.generate(b"", {})
+        self.assertIn("full traceback here", str(ctx.exception))
 
 
 if __name__ == "__main__":

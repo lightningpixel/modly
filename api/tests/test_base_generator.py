@@ -43,6 +43,12 @@ class AutoDownloadPrintTests(unittest.TestCase):
         self.assertTrue(first_line.endswith("..."))
         self.assertTrue(all(ord(ch) < 128 for ch in printed))
 
+    def test_typed_artifact_generation_requires_an_explicit_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _DownloadGen(Path(tmp) / "model", Path(tmp) / "out")
+            with self.assertRaisesRegex(NotImplementedError, "scene artifact generation"):
+                gen.generate_artifact("scene", Path(tmp) / "scene-manifest.json", {})
+
 
 if __name__ == "__main__":
     unittest.main()

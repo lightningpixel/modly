@@ -2,10 +2,19 @@ import { create } from 'zustand'
 import axios, { AxiosInstance } from 'axios'
 import { useAppStore } from '@shared/stores/appStore'
 import { getWorkflowExtension } from './mockExtensions'
-import { showCompletionNotification } from '@shared/utils/notification'
+import { hasUnsupportedSceneShape } from './sceneShape'
+import { showCompletionNotification, showRunErrorNotification } from '@shared/utils/notification'
 import type { WorkflowExtension } from './mockExtensions'
 import type { Workflow, WFNode, WFEdge } from '@shared/types/electron.d'
 import { isBranchStarter, isSceneOutput, resolveDataSource, reachesSceneOutput, nearestUpstreamWaits } from './nodeBehaviors'
+import { assignSlotFilePaths } from './slotInputs'
+import type { SlotInputType } from './slotInputs'
+import {
+  endRecordStep, finishWorkflowRunRecord, isTerminalRunStatus, newWorkflowRunRecord,
+  reopenWorkflowRunRecord, runOutputPath, startRecordStep,
+} from './workflowRunRecord'
+import type { WorkflowRunRecord } from './workflowRunRecord'
+import type { RunStatus } from '@shared/types/runs'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -38,6 +47,44 @@ const _pauseRequested = { current: false }
 // Live node params — the UI pushes edits here so a looping/paused run re-reads the
 // latest values when a body node starts (instead of the snapshot from run start).
 const _liveParams  = { current: new Map<string, Record<string, unknown>>() }
+
+// ─── Run history ──────────────────────────────────────────────────────────────
+// The run's persisted record (GET /workflow-runs lists it). Every change is PUT to
+// the backend; the PUTs are chained so a slow early write can never land after —
+// and overwrite — the final status.
+
+const _record = { current: null as WorkflowRunRecord | null }
+let _recordWrites: Promise<void> = Promise.resolve()
+
+function nowSeconds(): number {
+  return Date.now() / 1000
+}
+
+function updateRecord(fn: (record: WorkflowRunRecord) => WorkflowRunRecord): void {
+  if (!_record.current) return
+  const record = fn(_record.current)
+  _record.current = record
+  const { id, ...body } = record
+  const apiUrl = useAppStore.getState().apiUrl
+  _recordWrites = _recordWrites
+    .then(() => axios.put(`${apiUrl}/workflow-runs/${encodeURIComponent(id)}`, body))
+    .then(() => undefined, (err) => { console.warn('[workflows] Could not save run history:', err) })
+}
+
+function finishRecord(status: RunStatus, outcome?: { error?: string; outputPath?: string }): void {
+  if (!_record.current || isTerminalRunStatus(_record.current.status)) return
+  updateRecord((r) => finishWorkflowRunRecord(r, status, nowSeconds(), outcome))
+}
+
+function recordStepStart(node: WFNode, allExtensions: WorkflowExtension[]): void {
+  const name = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)?.name
+    ?? node.data.extensionId ?? node.type
+  updateRecord((r) => startRecordStep(r, name, node.id, nowSeconds()))
+}
+
+function recordStepEnd(status: RunStatus): void {
+  updateRecord((r) => endRecordStep(r, status, nowSeconds()))
+}
 
 function flushResume(): void {
   const fn = _resume.current
@@ -116,6 +163,14 @@ function toWorkspaceUrl(filePath: string, workspaceDir: string): string | undefi
   const norm = filePath.replace(/\\/g, '/')
   if (!norm.startsWith(workspaceDir)) return undefined
   return `/workspace/${norm.slice(workspaceDir.length).replace(/^\//, '')}`
+}
+
+// Inverse of toWorkspaceUrl — used by node components that read a `/workspace/...`
+// output URL back off disk (e.g. to build a data: URL for a preview).
+export function fromWorkspaceUrl(url: string, workspaceDir: string): string {
+  const wsDir = workspaceDir.replace(/\\/g, '/').replace(/\/+$/, '')
+  const rel   = url.replace(/^\/workspace\//, '')
+  return `${wsDir}/${rel}`
 }
 
 interface RunContext {
@@ -297,6 +352,9 @@ async function executeExtensionNode(
           selectedImagePath, selectedImageData } = ctx
 
   const ext = getWorkflowExtension(node.data.extensionId ?? '', allExtensions)
+  if (ext && hasUnsupportedSceneShape(ext)) {
+    throw new Error(`${ext.name} uses an unsupported scene input or output declaration`)
+  }
   // Freshest params at the moment the node starts (so loop iterations / Retry pick
   // up edits made while paused, not the values captured at run start).
   const liveParams = _liveParams.current.get(node.id) ?? node.data.params ?? {}
@@ -309,6 +367,7 @@ async function executeExtensionNode(
   let nodeInputPath:     string | undefined
   let nodeInputText:     string | undefined
   let nodeInputMeshPath: string | undefined
+  let nodeInputScenePath: string | undefined
   // Per-slot texts for multi-text-input nodes (e.g. positive/negative prompts).
   // Indexed by target handle: input-0 → texts[0], input-1 → texts[1].
   const nodeInputTexts: (string | undefined)[] = []
@@ -319,7 +378,10 @@ async function executeExtensionNode(
   const incomingEdges = workflow.edges.filter((e) => e.target === node.id)
 
   if (ext?.inputs && ext.inputs.length > 1) {
-    const inputTypes  = ext.inputs
+    // Scene is intentionally a single-input-only model contract. The guard
+    // above rejects it before this multi-slot path, and filtering it here also
+    // narrows the remaining declarations to assignSlotFilePaths' exact ABI.
+    const inputTypes: SlotInputType[] = ext.inputs.filter((input) => input !== 'scene')
     // Resolved by target handle first, then typed by that slot's declared input --
     // not by the arrival order of `incomingEdges`, which does not match slot order.
     const inputPaths  = new Array<string | undefined>(inputTypes.length).fill(undefined)
@@ -336,36 +398,33 @@ async function executeExtensionNode(
       }
     }
 
-    for (let i = 0; i < inputTypes.length; i++) {
-      const fp = inputPaths[i]
-      if (!fp) continue
-      if (inputTypes[i] === 'mesh') {
-        nodeInputMeshPath = fp
-      } else if (inputTypes[i] === 'image') {
-        if (!nodeInputPath) nodeInputPath = fp
-        else extraImagePaths.push(fp)
-      }
-    }
+    const slots = assignSlotFilePaths(inputTypes, inputPaths)
+    nodeInputPath     = slots.nodeInputPath
+    nodeInputMeshPath = slots.nodeInputMeshPath
+    extraImagePaths.push(...slots.extraImagePaths)
   } else {
     for (const edge of incomingEdges) {
       const src = resolveSource(edge.source)
       if (src?.filePath !== undefined) nodeInputPath = src.filePath
       if (src?.text !== undefined && src.text.trim().length > 0) nodeInputText = src.text
+      if (src?.outputType === 'scene') nodeInputScenePath = src.filePath
     }
   }
 
   const isModelNode = ext?.type === 'model'
 
   if (isModelNode) {
+    const isSceneInput = ext?.inputs ? ext.inputs.includes('scene') : ext?.input === 'scene'
     const isTextInput = ext?.inputs ? ext.inputs.every((i) => i === 'text') : ext?.input === 'text'
-    const activeImagePath = isTextInput ? undefined : (nodeInputPath ?? selectedImagePath)
-    if (!isTextInput && !selectedImageData && (!activeImagePath || activeImagePath.trim().length === 0)) {
+    if (isSceneInput && !nodeInputScenePath) throw new Error(`${ext?.name ?? 'Model'} needs an incoming scene connection`)
+    const activeImagePath = (isTextInput || isSceneInput) ? undefined : (nodeInputPath ?? selectedImagePath)
+    if (!isTextInput && !isSceneInput && !selectedImageData && (!activeImagePath || activeImagePath.trim().length === 0)) {
       throw new Error('No input image selected for model node')
     }
 
     let blob: Blob
     let fname: string
-    if (isTextInput || (selectedImageData && nodeInputPath === undefined)) {
+    if (isTextInput || isSceneInput || (selectedImageData && nodeInputPath === undefined)) {
       const base64 = selectedImageData && nodeInputPath === undefined
         ? selectedImageData
         : 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==' // 1x1 transparent PNG
@@ -398,21 +457,30 @@ async function executeExtensionNode(
     )
     const effectiveParams = { ...schemaDefaults, ...liveParams }
 
-    const fd = new FormData()
-    fd.append('image', blob, fname)
-    fd.append('model_id', node.data.extensionId ?? '')
-    fd.append('collection', 'Workflows')
-    fd.append('remesh', 'none')
-    fd.append('enable_texture', 'false')
-    fd.append('texture_resolution', '1024')
-    fd.append('params', JSON.stringify({ ...effectiveParams, ...extraParams }))
-
     setRunState((s) => ({ ...s, blockProgress: 5, blockStep: 'Submitting to model…' }))
-
-    const { data } = await client.post<{ job_id: string }>(
-      '/generate/from-image', fd,
-      { headers: { 'Content-Type': 'multipart/form-data' } },
-    )
+    let submission: { data: { job_id: string } }
+    if (isSceneInput) {
+      const normalized = nodeInputScenePath!.replace(/\\/g, '/')
+      const inputPath = normalized.startsWith(`${workspaceDir}/`)
+        ? normalized.slice(workspaceDir.length + 1)
+        : normalized.replace(/^\/workspace\//, '')
+      submission = await client.post('/generate/from-artifact', {
+        input_kind: 'scene', input_path: inputPath,
+        model_id: node.data.extensionId ?? '', collection: 'Workflows',
+        params: { ...effectiveParams, ...extraParams },
+      })
+    } else {
+      const fd = new FormData()
+      fd.append('image', blob, fname)
+      fd.append('model_id', node.data.extensionId ?? '')
+      fd.append('collection', 'Workflows')
+      fd.append('remesh', 'none')
+      fd.append('enable_texture', 'false')
+      fd.append('texture_resolution', '1024')
+      fd.append('params', JSON.stringify({ ...effectiveParams, ...extraParams }))
+      submission = await client.post('/generate/from-image', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+    }
+    const { data } = submission
     _activeJobId.current = data.job_id
 
     while (true) {
@@ -591,7 +659,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
     if (!outputUrl) {
       for (const [, o] of ctx.nodeOutputs) {
         if (o.filePath) {
-          if (o.outputType === 'audio') {
+          if (o.outputType === 'audio' || o.outputType === 'scene') {
             outputPath = o.filePath
             continue
           }
@@ -620,6 +688,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
       },
     }))
     useAppStore.getState().updateCurrentJob({ status: 'done', progress: 100, outputUrl })
+    finishRecord('done', { outputPath: runOutputPath(outputUrl, outputPath) })
     void showCompletionNotification('Workflow run complete')
   }
 
@@ -642,6 +711,16 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
       const appState = useAppStore.getState()
       const apiUrl   = appState.apiUrl
 
+      // A previous run still parked on its Wait branches is abandoned by this one.
+      finishRecord('cancelled')
+      _record.current = newWorkflowRunRecord(
+        crypto.randomUUID(),
+        workflow,
+        overrideImageData ? { image: '(attached image)' } : appState.selectedImagePath ? { image: appState.selectedImagePath } : {},
+        nowSeconds(),
+      )
+      updateRecord((r) => r)
+
       const { preExecExtNodes, branches, waitIds, parentWait, ordered } = identifyBranches(workflow)
       const branchSteps = waitIds.reduce((acc, w) => acc + (branches.get(w)?.length ?? 0), 0)
 
@@ -656,6 +735,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
         const dir = (w.data.params?.dir as string | undefined)?.trim()
         const fail = (msg: string, step: string): void => {
           set((s) => ({ runState: { ...s.runState, status: 'error', error: msg, blockStep: step }, activeNodeId: null }))
+          finishRecord('error', { error: msg })
         }
         if (!dir) { fail('For Each: pick a folder first', 'No folder selected'); return }
         try {
@@ -799,6 +879,13 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
               if (fp) nodeOutputs.set(node.id, { filePath: fp, outputType: 'mesh' })
             }
           }
+          if (node.type === 'sceneNode') {
+            const manifestPath = node.data.params?.manifestPath as string | undefined
+            if (manifestPath) nodeOutputs.set(node.id, {
+              filePath: `${workspaceDir}/${manifestPath.replace(/^\/+/, '')}`,
+              outputType: 'scene',
+            })
+          }
         }
 
         const ctx: RunContext = {
@@ -920,7 +1007,9 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
             activeNodeId: node.id,
             runState: { ...s.runState, blockIndex: stepsDone, blockProgress: 0, blockStep: 'Starting…' },
           }))
+          recordStepStart(node, allExtensions)
           await executeExtensionNode(node, ctx, setRunState)
+          recordStepEnd('done')
           stepsDone++
 
           const jump = await handleLoopEnd(i)
@@ -941,7 +1030,9 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
       } catch (err) {
         if (!_cancel.current) {
           set((s) => ({ runState: { ...s.runState, status: 'error', error: String(err) }, activeNodeId: null }))
+          finishRecord('error', { error: String(err) })
           useAppStore.getState().updateCurrentJob({ status: 'error', error: String(err) })
+          void showRunErrorNotification({ title: 'Workflow run failed', name: workflow.name, error: err })
         }
       }
     },
@@ -968,6 +1059,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
       const descendants = descendantWaits(waitId, ctx)
 
       _cancel.current = false
+      updateRecord(reopenWorkflowRunRecord)
 
       // Reset outputs for this branch's nodes so Retry re-executes cleanly.
       for (const node of branch) ctx.nodeOutputs.delete(node.id)
@@ -1000,6 +1092,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
           for (const d of descendantWaits(waitId, ctx)) {
             if (newWaitStates[d] === 'blocked') newWaitStates[d] = 'error'
           }
+          void showRunErrorNotification({ title: 'Workflow branch failed', name: ctx.workflow.name, error: err })
         }
         const allFinished = ctx.waitIds.every((id) => newWaitStates[id] === 'done' || newWaitStates[id] === 'error')
         const anyError    = ctx.waitIds.some((id) => newWaitStates[id] === 'error')
@@ -1007,6 +1100,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
         if (allFinished && !anyError) {
           finalize(ctx, newWaitStates)
         } else {
+          if (allFinished) finishRecord('error', { error: err ?? get().runState.error })
           set((s) => ({
             activeNodeId:    null,
             runningBranchId: null,
@@ -1029,15 +1123,19 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
             activeNodeId: node.id,
             runState: { ...s.runState, blockIndex: i, blockProgress: 0, blockStep: 'Starting…' },
           }))
+          recordStepStart(node, ctx.allExtensions)
           await executeExtensionNode(node, ctx, setRunState)
+          recordStepEnd('done')
         }
         finishBranch('done')
       } catch (err) {
+        if (!_cancel.current) recordStepEnd('error')
         finishBranch('error', String(err))
       }
     },
 
     cancel() {
+      finishRecord('cancelled')
       _cancel.current = true
       _pauseRequested.current = false
       flushResume()   // unblock a manual While pause so the run can tear down
@@ -1052,6 +1150,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
     },
 
     reset() {
+      finishRecord('cancelled')
       _ctx.current = null
       set({ runState: IDLE, activeNodeId: null, activeWorkflowId: null, nodeImageOutputs: {}, waitStates: {}, runningBranchId: null, whileProgress: {}, pausedGroup: [] })
     },

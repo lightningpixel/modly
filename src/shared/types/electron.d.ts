@@ -7,23 +7,42 @@ import type {
   AssetLibraryOpenResult,
   AssetLibraryReadRequest,
   AssetLibraryReadResult,
+  AssetThumbnailSaveRequest,
+  AssetThumbnailSaveResult,
+  AssetThumbnailStatusResult,
 } from './assetLibrary'
+import type { Conversation, ConversationSummary } from '../utils/agentConversations'
 
 // ─── Extension types ──────────────────────────────────────────────────────────
 
 export interface ExtensionNode {
   id:               string
   name:             string
-  input:            'image' | 'text' | 'mesh' | 'audio'
-  inputs?:          ('image' | 'text' | 'mesh' | 'audio')[]   // multi-input nodes; overrides input when set
+  input:            'image' | 'text' | 'mesh' | 'audio' | 'scene'
+  inputs?:          ('image' | 'text' | 'mesh' | 'audio' | 'scene')[]   // multi-input nodes; overrides input when set
   inputLabels?:     string[]   // display labels per input slot (e.g. positive/negative)
-  output:           'image' | 'text' | 'mesh' | 'audio'
+  inputsRequired?:  boolean[]  // per input slot; absent means every slot is required
+  output:           'image' | 'text' | 'mesh' | 'audio' | 'scene'
   paramsSchema:     ParamSchema[]
   paramDefaults?:   Record<string, number | string>
   hfRepo?:          string
   downloadCheck?:   string
   hfSkipPrefixes?:  string[]
   hfIncludePrefixes?: string[]
+  hasModelSources?: boolean
+  weightGroups?:    string[]
+  weightVariants?:  WeightVariantsInfo
+}
+
+export interface WeightVariantsInfo {
+  param:   string   // params_schema id whose value selects the variant
+  default: string
+  options: { id: string; label: string; sizeGb?: number; vramGb?: number }[]
+}
+
+export interface SharedWeightGroup {
+  id: string
+  dependentNodeIds: string[]
 }
 
 export interface ModelExtension {
@@ -38,6 +57,7 @@ export interface ModelExtension {
   source?:      string
   localPath?:   string
   nodes:        ExtensionNode[]
+  weightGroups?: SharedWeightGroup[]
   /** Folder exists but is not a loadable extension — see manifestError */
   corrupted?:   boolean
   /** Why the folder is corrupted: manifest gone, manifest unparseable, or install never completed */
@@ -154,6 +174,9 @@ declare global {
       shell: {
         openExternal: (url: string) => Promise<void>
       }
+      slicer: {
+        open: (url: string) => Promise<{ success: boolean; error?: string }>
+      }
       system: {
         memory: () => Promise<{ total: number; used: number; available: number }>
       }
@@ -180,6 +203,7 @@ declare global {
         offLog: () => void
       }
       fs: {
+        getPathForFile:  (file: File) => string
         selectImage:     () => Promise<string | null>
         selectMeshFile:  () => Promise<string | null>
         saveModel:       (defaultName: string) => Promise<string | null>
@@ -189,13 +213,36 @@ declare global {
         listDir:         (dirPath: string) => Promise<string[]>
         listFiles:       (dirPath: string, extensions?: string[]) => Promise<string[]>
         selectTextFile:  () => Promise<string | null>
-        moveDirectory:   (args: { src: string; dest: string }) => Promise<{ success: boolean; error?: string }>
-        deleteDirectory: (dirPath: string) => Promise<{ success: boolean; error?: string }>
+        moveDirectory:   (args: { src: string; dest: string }) => Promise<{ success: boolean; error?: string; kept?: string[] }>
+        deleteDirectory: (dirPath: string) => Promise<{ success: boolean; error?: string; kept?: string[] }>
+        /** Entries of a storage folder Modly may move/delete, and the ones it leaves alone. */
+        storageEntries:  (kind: 'models' | 'workspace' | 'workflows') => Promise<{ modly: string[]; other: string[] }>
+        /** Refuses a drive root, system folder or an ancestor of home/app data as storage. */
+        checkStorageLocation: (dirPath: string) => Promise<{ ok: boolean; error?: string }>
         readScreenshotDataUrl: (filename: string) => Promise<string>
       }
       settings: {
         get: () => Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string; hfToken?: string }>
         set: (patch: { modelsDir?: string; workspaceDir?: string; workflowsDir?: string; extensionsDir?: string; hfToken?: string }) => Promise<{ modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string; hfToken?: string }>
+      }
+      /** decrypt returns null when the stored blob can't be decrypted here. */
+      secureStore: {
+        encrypt: (plainText: string) => Promise<string>
+        decrypt: (stored: string) => Promise<string | null>
+      }
+      agent: {
+        /** Opens a file picker and copies the chosen .gguf into the agent's models folder. */
+        addModel: () => Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }>
+        /** Persisted chat conversations, one JSON file each in <userData>/agent/conversations. */
+        conversations: {
+          /** Newest first. */
+          list:   () => Promise<ConversationSummary[]>
+          /** null when the id is invalid, missing or the file is corrupted. */
+          read:   (id: string) => Promise<Conversation | null>
+          /** Rejects on an invalid id or shape. */
+          save:   (conversation: Conversation) => Promise<void>
+          remove: (id: string) => Promise<void>
+        }
       }
       cache: {
         clear: () => Promise<{ success: boolean; error?: string }>
@@ -206,16 +253,24 @@ declare global {
       model: {
         export:         (args: { outputUrl: string; format: string }) => Promise<{ success: boolean; error?: string }>
         listDownloaded: () => Promise<{ id: string; name: string; size_gb: number }[]>
-        activeDownloads: () => Promise<{ modelId: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]>
-        isDownloaded:   (modelId: string, downloadCheck?: string) => Promise<boolean>
-        download:       (repoId: string, modelId: string, skipPrefixes?: string[], includePrefixes?: string[]) => Promise<{ success: boolean; error?: string }>
+        activeDownloads: () => Promise<{ modelId: string; variantId?: string; percent: number; file?: string; fileIndex?: number; totalFiles?: number }[]>
+        isDownloaded:   (modelId: string) => Promise<boolean>
+        hasLocalData:    (modelId: string) => Promise<boolean>
+        sharedGroups:    (extensionId: string) => Promise<SharedWeightGroupState[]>
+        download:       (modelId: string, variantId?: string) => Promise<{ success: boolean; error?: string; paused?: boolean; cancelled?: boolean }>
         pauseDownload:  (modelId: string) => Promise<{ success: boolean; error?: string }>
         cancelDownload: (modelId: string) => Promise<{ success: boolean; error?: string }>
         delete:         (modelId: string) => Promise<{ success: boolean; error?: string }>
+        deleteSharedGroup: (extensionId: string, groupId: string) => Promise<{ success: boolean; error?: string }>
+        deleteExtensionWeights: (extensionId: string) => Promise<{ success: boolean; error?: string }>
+        /** Installed variant ids, or null when the node's install state could not be read */
+        installedWeightVariants: (modelId: string) => Promise<string[] | null>
+        deleteWeightVariant: (modelId: string, variantId: string) => Promise<{ success: boolean; error?: string }>
         unloadAll:      () => Promise<{ success: boolean; error?: string }>
         showInFolder:   (modelId: string) => Promise<void>
         onProgress:     (cb: (data: {
           modelId: string
+          variantId?: string
           percent: number
           file?: string
           fileIndex?: number
@@ -228,6 +283,8 @@ declare global {
           cancelled?: boolean
         }) => void) => void
         offProgress:    () => void
+        onWeightsChanged: (cb: () => void) => void
+        offWeightsChanged: () => void
       }
       app: {
         info: () => Promise<{
@@ -259,6 +316,10 @@ declare global {
           list: () => Promise<AssetLibraryListResult>
           read: (request: AssetLibraryReadRequest) => Promise<AssetLibraryReadResult>
           open: (request: AssetLibraryOpenRequest) => Promise<AssetLibraryOpenResult>
+        }
+        thumbnails: {
+          status: (workspacePath: string) => Promise<AssetThumbnailStatusResult>
+          save: (request: AssetThumbnailSaveRequest) => Promise<AssetThumbnailSaveResult>
         }
       }
       setup: {
@@ -319,4 +380,12 @@ declare global {
       }
     }
   }
+}
+
+export interface SharedWeightGroupState {
+  id: string
+  targetId: string
+  dependentModelIds: string[]
+  downloaded: boolean
+  hasLocalData: boolean
 }
