@@ -37,6 +37,9 @@ class RunRecord(BaseModel):
     workflow_id: Optional[str] = None
     workflow_name: Optional[str] = None
     op_id: Optional[str] = None          # mesh operation id, e.g. "decimate"
+    # The run this one was launched by: a workflow run's model nodes each file their own
+    # generation, linked back here so a history feed can fold them under the workflow.
+    parent_run_id: Optional[str] = None
     inputs: dict[str, Any] = Field(default_factory=dict)
     params: dict[str, Any] = Field(default_factory=dict)
     steps: list[RunStep] = Field(default_factory=list)

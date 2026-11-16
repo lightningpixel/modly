@@ -63,12 +63,27 @@ def record_job_filed(
     inputs: dict,
     params: dict,
     collection: str,
+    parent_run_id: Optional[str] = None,
 ) -> None:
     """File the persisted history record of a generation job (see services.run_history)."""
     run_history.begin(
         job_id, "generation", model_id=model_id, inputs=inputs,
-        params={**params, "collection": collection},
+        params={**params, "collection": collection}, parent_run_id=parent_run_id,
     )
+
+
+MAX_RUN_ID_CHARS = 200
+
+
+def normalize_parent_run_id(value: object) -> Optional[str]:
+    """The optional ``parent_run_id`` a caller sent: the workflow run that launched this
+    generation. Blank means none (a multipart form sends "" rather than omitting it)."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    if len(value) > MAX_RUN_ID_CHARS:
+        raise HTTPException(400, "parent_run_id is too long")
+    return value
 
 
 def _record_job_end(job_id: str) -> None:
@@ -134,9 +149,11 @@ async def generate_from_image(
     enable_texture: bool = Form(False),
     texture_resolution: int = Form(1024),
     params: str = Form("{}"),
+    parent_run_id: Optional[str] = Form(None),
 ):
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(400, "File must be an image")
+    parent_run_id = normalize_parent_run_id(parent_run_id)
 
     if remesh not in VALID_REMESH_MODES:
         raise HTTPException(400, "remesh must be 'quad', 'triangle', or 'none'")
@@ -171,7 +188,9 @@ async def generate_from_image(
     _jobs[job_id] = job
     _cancel_events[job_id] = threading.Event()
 
-    record_job_filed(job_id, model_id, {"image": image.filename}, full_params, collection)
+    record_job_filed(
+        job_id, model_id, {"image": image.filename}, full_params, collection, parent_run_id
+    )
 
     background_tasks.add_task(
         _run_generation, job_id, image_bytes, full_params, collection, output_kind, model_id
@@ -186,6 +205,7 @@ async def generate_from_artifact(
     background_tasks: BackgroundTasks,
 ):
     """Queue a validated typed artifact without serializing it as image bytes."""
+    parent_run_id = normalize_parent_run_id(request.parent_run_id)
     try:
         manifest = generator_registry.get_manifest(request.model_id)
     except (KeyError, ValueError) as exc:
@@ -202,7 +222,8 @@ async def generate_from_artifact(
     collection = sanitize_collection(request.collection)
     job_id = str(uuid.uuid4())
     record_job_filed(
-        job_id, request.model_id, {request.input_kind: request.input_path}, params, collection
+        job_id, request.model_id, {request.input_kind: request.input_path}, params, collection,
+        parent_run_id,
     )
     params["scene_manifest_path"] = str(artifact.path)
     _purge_old_jobs()

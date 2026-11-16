@@ -34,6 +34,8 @@ export interface RunRecord {
   ended_at?:      number | null
   /** Computed by the backend; null while the run has not ended. */
   duration_s?:    number | null
+  /** The run that launched this one (a workflow's model step); null for top-level runs. */
+  parent_run_id?: string | null
 }
 
 export interface RunRecordPage {

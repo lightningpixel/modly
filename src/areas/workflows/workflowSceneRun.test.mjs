@@ -54,6 +54,8 @@ test('scene model uses typed artifact route and preserves scene output', async (
   assert.deepEqual(posts[0].body, {
     input_kind: 'scene', input_path: 'Workflows/input/scene-manifest.json',
     model_id: 'pixal/world', collection: 'Workflows', params: {},
+    // The generation is filed under the workflow run that started it.
+    parent_run_id: useWorkflowRunStore.getState().liveRecord.id,
   })
   assert.equal(useWorkflowRunStore.getState().runState.outputPath, '/workspace/Workflows/result/scene-manifest.json')
   assert.equal(useWorkflowRunStore.getState().runState.outputUrl, undefined)

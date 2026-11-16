@@ -39,6 +39,15 @@ export async function requestLibraryThumbnails(entries: AssetLibraryEntry[]): Pr
   await Promise.all(entriesNeedingThumbnails(entries).map((entry) => getQueue().ensure(entry.workspacePath)))
 }
 
+/**
+ * Queues a thumbnail for one workspace mesh (.glb/.gltf) unless it is cached;
+ * the result lands in the thumbnail store, keyed by `workspacePath`.
+ */
+export function ensureThumbnail(workspacePath: string): void {
+  if (!/\.(glb|gltf)$/i.test(workspacePath)) return
+  void getQueue().ensure(workspacePath)
+}
+
 async function backfillLibraryThumbnails(): Promise<void> {
   try {
     const result = await window.electron.workspace.library.list()

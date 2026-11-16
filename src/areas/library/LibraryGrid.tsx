@@ -1,4 +1,4 @@
-import { createElement, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type RefObject } from 'react'
+import { createElement, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type RefObject } from 'react'
 import type { IconShape } from '@shared/pages/pageRegistry'
 import type { AssetCapability } from '@shared/types/assetLibrary'
 import { useAssetThumbnailUrl } from '@shared/thumbnails/assetThumbnailStore'
@@ -210,19 +210,22 @@ export interface LibraryGridProps {
   openingId: string | null
   onSelect: (entryId: string) => void
   onOpen: (entry: ProjectedAssetLibraryEntry) => void
+  /** Scrolls this entry into view once (e.g. opened from another page); bump `revealKey` to repeat. */
+  revealId?: string | null
+  revealKey?: number
 }
 
 /**
  * Windowed grid/list: the scroll area has the full height of every row, but
  * only the rows in (or just around) the viewport are mounted.
  */
-export default function LibraryGrid({ entries, view, selectedId, openingId, onSelect, onOpen }: LibraryGridProps): JSX.Element {
+export default function LibraryGrid({ entries, view, selectedId, openingId, onSelect, onOpen, revealId = null, revealKey = 0 }: LibraryGridProps): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null)
   const { width, height } = useElementSize(scrollRef)
   const [scrollTop, setScrollTop] = useState(0)
   const focusAfterRender = useRef<string | null>(null)
 
-  const layout = layoutFor(view, Math.max(0, width - PADDING_X * 2), entries.length)
+  const layout = useMemo(() => layoutFor(view, Math.max(0, width - PADDING_X * 2), entries.length), [view, width, entries.length])
   const range = visibleRowRange(layout, scrollTop - PADDING_Y, height, OVERSCAN_ROWS)
   const firstIndex = range.start * layout.columns
   const rendered = entries.slice(firstIndex, Math.min(entries.length, range.end * layout.columns))
@@ -233,6 +236,23 @@ export default function LibraryGrid({ entries, view, selectedId, openingId, onSe
     scrollRef.current?.scrollTo({ top: 0 })
     setScrollTop(0)
   }, [view, entries])
+
+  // Reveal a tile asked for from outside, once the grid has a size to lay it out in.
+  const revealedKey = useRef<number | null>(null)
+  useEffect(() => {
+    const id = revealId
+    const scroller = scrollRef.current
+    if (!id || revealedKey.current === revealKey || !scroller || width === 0 || height === 0) return
+    revealedKey.current = revealKey
+    const index = entries.findIndex((entry) => entry.id === id)
+    if (index < 0) return
+    const reveal = scrollTopToReveal(layout, Math.floor(index / layout.columns), scroller.scrollTop - PADDING_Y, scroller.clientHeight)
+    if (reveal !== null) {
+      scroller.scrollTop = reveal + PADDING_Y
+      setScrollTop(scroller.scrollTop)
+    }
+    focusAfterRender.current = id
+  }, [revealId, revealKey, width, height, entries, layout])
 
   // Keyboard moves can target a tile that was not mounted yet: focus it once it is.
   useEffect(() => {

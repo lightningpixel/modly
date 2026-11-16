@@ -113,13 +113,14 @@ class RunHistoryStore:
         op_id: Optional[str] = None,
         inputs: Optional[dict[str, Any]] = None,
         params: Optional[dict[str, Any]] = None,
+        parent_run_id: Optional[str] = None,
     ) -> None:
         """File a pending run (persisted, so a crash before it starts still shows)."""
         if not self.enabled:
             return
         record = RunRecord(
             id=run_id, kind=kind, status="pending", model_id=model_id, op_id=op_id,
-            inputs=inputs or {}, params=params or {},
+            inputs=inputs or {}, params=params or {}, parent_run_id=parent_run_id,
             created_at=time.time(),
         )
         self.save(record)
@@ -135,7 +136,9 @@ class RunHistoryStore:
 
     def step(self, run_id: str, name: str) -> None:
         """Note the current step label. In memory only -- labels can change many times
-        a second; the steps are written out with the next status change."""
+        a second; the steps are written out with the next status change. Readers still
+        see them live: a live record is the very object ``_records`` holds, and
+        ``get``/``list`` copy it at read time."""
         if not name:
             return
         with self._lock:
@@ -214,8 +217,10 @@ class RunHistoryStore:
         kinds: Optional[Iterable[str]] = None,
         limit: int = 50,
         offset: int = 0,
+        top_level: bool = False,
     ) -> tuple[list[RunRecord], int]:
-        """Newest first. Returns (page, total matching)."""
+        """Newest first. Returns (page, total matching). ``top_level`` leaves out runs
+        launched by another run (see ``children``)."""
         if not self.enabled:
             return [], 0
         wanted_status = set(statuses) if statuses else None
@@ -226,10 +231,21 @@ class RunHistoryStore:
                 r for r in self._records.values()
                 if (wanted_status is None or r.status in wanted_status)
                 and (wanted_kind is None or r.kind in wanted_kind)
+                and not (top_level and r.parent_run_id)
             ]
             matching.sort(key=lambda r: r.created_at, reverse=True)
             page = matching[offset:offset + limit]
             return [r.model_copy(deep=True) for r in page], len(matching)
+
+    def children(self, parent_run_id: str) -> list[RunRecord]:
+        """The runs launched by ``parent_run_id``, in execution order (oldest first)."""
+        if not self.enabled:
+            return []
+        with self._lock:
+            self._sync_path()
+            matching = [r for r in self._records.values() if r.parent_run_id == parent_run_id]
+            matching.sort(key=lambda r: r.created_at)
+            return [r.model_copy(deep=True) for r in matching]
 
     # ------------------------------------------------------------------ #
     # Internals (lock held)
