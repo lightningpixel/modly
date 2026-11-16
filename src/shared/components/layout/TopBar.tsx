@@ -4,7 +4,7 @@ import { useAgentPanelStore } from '@shared/stores/agentPanelStore'
 import MemoryIndicator from './MemoryIndicator'
 
 export default function TopBar(): JSX.Element {
-  const { patchUpdateReady, platform, showRamIndicator } = useAppStore()
+  const { patchUpdateReady, platform, showRamIndicator, showVramIndicator } = useAppStore()
   const isMac = platform === 'darwin'
   const agentOpen   = useAgentPanelStore((s) => s.open)
   const toggleAgent = useAgentPanelStore((s) => s.toggle)
@@ -46,7 +46,7 @@ export default function TopBar(): JSX.Element {
       <div className="flex-1" />
 
       {/* Memory indicator */}
-      {showRamIndicator && <MemoryIndicator />}
+      {(showRamIndicator || showVramIndicator) && <MemoryIndicator />}
 
       {/* Agent panel toggle */}
       <button

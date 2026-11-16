@@ -33,6 +33,7 @@ export interface UiSettings {
   uiScale: UiScale
   useAtkinsonFont: boolean
   showRamIndicator: boolean
+  showVramIndicator: boolean
 }
 
 export interface ToolResultBody {
@@ -69,6 +70,7 @@ export interface ClientToolDeps {
     setUiScale: (value: UiScale) => void
     setUseAtkinsonFont: (value: boolean) => void
     setShowRamIndicator: (value: boolean) => void
+    setShowVramIndicator: (value: boolean) => void
   }
   storage: {
     get: () => Promise<StorageDirs>
@@ -454,7 +456,8 @@ export const clientTools: Record<string, ClientTool> = {
       const key = args.key as keyof UiSettings
       if (key === 'uiScale') deps.ui.setUiScale(args.value as UiScale)
       else if (key === 'useAtkinsonFont') deps.ui.setUseAtkinsonFont(toBool(args.value)!)
-      else deps.ui.setShowRamIndicator(toBool(args.value)!)
+      else if (key === 'showRamIndicator') deps.ui.setShowRamIndicator(toBool(args.value)!)
+      else deps.ui.setShowVramIndicator(toBool(args.value)!)
       return `Set ${SETTING_LABELS[key]} to ${JSON.stringify(deps.ui.get()[key])}.`
     },
   }),
@@ -548,6 +551,7 @@ const SETTING_LABELS: Record<string, string> = {
   uiScale: 'the interface scale',
   useAtkinsonFont: 'the Atkinson Hyperlegible font',
   showRamIndicator: 'the RAM indicator',
+  showVramIndicator: 'the VRAM indicator',
 }
 
 const UI_SCALES: UiScale[] = ['small', 'medium', 'large', 'very-large']
@@ -752,10 +756,11 @@ export function createClientToolDeps(): ClientToolDeps {
       reload: () => wfs().load(),
     },
     ui: {
-      get: () => ({ uiScale: app().uiScale, useAtkinsonFont: app().useAtkinsonFont, showRamIndicator: app().showRamIndicator }),
+      get: () => ({ uiScale: app().uiScale, useAtkinsonFont: app().useAtkinsonFont, showRamIndicator: app().showRamIndicator, showVramIndicator: app().showVramIndicator }),
       setUiScale: (v) => app().setUiScale(v),
       setUseAtkinsonFont: (v) => app().setUseAtkinsonFont(v),
       setShowRamIndicator: (v) => app().setShowRamIndicator(v),
+      setShowVramIndicator: (v) => app().setShowVramIndicator(v),
     },
     storage: {
       get: () => window.electron.settings.get(),

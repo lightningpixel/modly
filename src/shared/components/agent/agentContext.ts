@@ -25,7 +25,7 @@ export interface AgentContextInputs {
   models: { id: string; name: string }[] | null
   /** Null when the settings could not be read. */
   storage: { modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string } | null
-  ui: { uiScale: UiScale; useAtkinsonFont: boolean; showRamIndicator: boolean }
+  ui: { uiScale: UiScale; useAtkinsonFont: boolean; showRamIndicator: boolean; showVramIndicator: boolean }
 }
 
 /** Pure assembly of the context from already-read state. */
@@ -44,7 +44,7 @@ export function assembleAgentContext(inputs: AgentContextInputs): Record<string,
     const { modelsDir, workspaceDir, workflowsDir, extensionsDir } = inputs.storage
     ctx.storage = { modelsDir, workspaceDir, workflowsDir, extensionsDir }
   }
-  ctx.ui = { uiScale: inputs.ui.uiScale, useAtkinsonFont: inputs.ui.useAtkinsonFont, showRamIndicator: inputs.ui.showRamIndicator }
+  ctx.ui = { uiScale: inputs.ui.uiScale, useAtkinsonFont: inputs.ui.useAtkinsonFont, showRamIndicator: inputs.ui.showRamIndicator, showVramIndicator: inputs.ui.showVramIndicator }
   return ctx
 }
 
@@ -84,6 +84,6 @@ export async function buildAgentContext(sources: AgentContextSources = defaultSo
     processExtensions: ext.processExtensions,
     models,
     storage,
-    ui: { uiScale: app.uiScale, useAtkinsonFont: app.useAtkinsonFont, showRamIndicator: app.showRamIndicator },
+    ui: { uiScale: app.uiScale, useAtkinsonFont: app.useAtkinsonFont, showRamIndicator: app.showRamIndicator, showVramIndicator: app.showVramIndicator },
   })
 }

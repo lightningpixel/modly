@@ -64,6 +64,7 @@ import {
   resolveExtensionPathWithinRoot,
 } from './extension-path-guard'
 import { detectGpuInfo, describeGpuInfo, torchFlavorFor, type GpuInfo } from './gpu-detect'
+import { sampleGpuMemory } from './gpu-memory'
 import { SETUP_LAUNCHER_SOURCE } from './setup-launcher'
 import {
   assertCompatibleExtensionUpdateType,
@@ -913,6 +914,10 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     const free = os.freemem()
     return { total, used: total - free, available: free }
   })
+
+  // GPU memory (VRAM) — NVIDIA only via nvidia-smi
+  // (null on macOS, without NVIDIA, or when a sample times out).
+  ipcMain.handle('system:gpuMemory', () => sampleGpuMemory())
 
   ipcMain.handle('app:info', () => ({
     version:   app.getVersion(),

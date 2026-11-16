@@ -9,7 +9,7 @@ const START_PAGE_OPTIONS: { value: StartPage; label: string }[] = [
 ]
 
 export function ApplicationSection(): JSX.Element {
-  const { showRamIndicator, setShowRamIndicator } = useAppStore()
+  const { showRamIndicator, setShowRamIndicator, showVramIndicator, setShowVramIndicator } = useAppStore()
   const [startPage, setStartPage] = useState<StartPage>(readStartPage)
 
   function changeStartPage(page: StartPage) {
@@ -31,6 +31,12 @@ export function ApplicationSection(): JSX.Element {
           description="Show live memory usage in the top bar."
         >
           <Toggle value={showRamIndicator} onChange={setShowRamIndicator} />
+        </Row>
+        <Row
+          label="VRAM indicator"
+          description="Show live GPU memory usage in the top bar. NVIDIA only; counts every app using the GPU."
+        >
+          <Toggle value={showVramIndicator} onChange={setShowVramIndicator} />
         </Row>
       </Card>
     </Section>

@@ -32,7 +32,7 @@ const inputs = (over: Partial<AgentContextInputs> = {}): AgentContextInputs => (
   processExtensions: [processExt],
   models: [{ id: 'triposr/main', name: 'TripoSR' }],
   storage: STORAGE,
-  ui: { uiScale: 'large', useAtkinsonFont: true, showRamIndicator: false },
+  ui: { uiScale: 'large', useAtkinsonFont: true, showRamIndicator: false, showVramIndicator: true },
   ...over,
 })
 
@@ -49,7 +49,7 @@ test('the context carries the page, mesh, workflows, extensions, models, storage
     ],
     models: [{ id: 'triposr/main', name: 'TripoSR' }],
     storage: STORAGE,
-    ui: { uiScale: 'large', useAtkinsonFont: true, showRamIndicator: false },
+    ui: { uiScale: 'large', useAtkinsonFont: true, showRamIndicator: false, showVramIndicator: true },
   })
 })
 
@@ -67,7 +67,7 @@ test('storage keeps only the four folders, never the HF token', () => {
 
 test('buildAgentContext reads the stores and the async sources', async () => {
   useNavStore.setState({ currentPage: 'workflows' })
-  useAppStore.setState({ currentJob: null, meshStats: null, uiScale: 'small', useAtkinsonFont: false, showRamIndicator: true })
+  useAppStore.setState({ currentJob: null, meshStats: null, uiScale: 'small', useAtkinsonFont: false, showRamIndicator: true, showVramIndicator: false })
   useWorkflowsStore.setState({ workflows: [{ id: 'w', name: 'W', description: '', nodes: [], edges: [], createdAt: '', updatedAt: '' }] })
   useExtensionsStore.setState({ modelExtensions: [modelExt], processExtensions: [] })
 
@@ -83,6 +83,6 @@ test('buildAgentContext reads the stores and the async sources', async () => {
     workflows: [{ id: 'w', name: 'W' }],
     extensions: [{ id: 'triposr/main', name: 'MAIN', input: 'image', output: 'mesh' }],
     models: [{ id: 'triposr/main', name: 'TripoSR' }],
-    ui: { uiScale: 'small', useAtkinsonFont: false, showRamIndicator: true },
+    ui: { uiScale: 'small', useAtkinsonFont: false, showRamIndicator: true, showVramIndicator: false },
   })
 })
