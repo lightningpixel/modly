@@ -4,6 +4,7 @@ import { useNavStore } from '@shared/stores/navStore'
 import { SUPPORTED_IMAGE_TYPES, saveImageToWorkspace, takePastedImage, useImageHandoff } from '@shared/utils/imageInput'
 import { mimeFromPath } from '@areas/workflows/nodes/imageUtils'
 import { fileNameOf, findByPath, sourceOf, useImageStudioStore, type StudioImage } from './imageStudioStore'
+import ImageOpsToolbar, { type ImageOpActivity, type ImageOpResult } from './ImageOpsToolbar'
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
 
@@ -38,51 +39,6 @@ async function previewUrlForPath(path: string): Promise<string> {
   const base64 = await window.electron.fs.readFileBase64(path)
   const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
   return URL.createObjectURL(new Blob([bytes], { type: mimeFromPath(path) }))
-}
-
-// ─── Image operations (slot) ──────────────────────────────────────────────────
-// Image operations (background removal, … — ticket #421) plug in here. An
-// operation reads the selected image and writes a NEW file; the page adds it
-// to the history with the selected image as its source, so the canvas shows
-// the result before/after against it. The originals are never modified.
-
-interface ImageOp {
-  id: string
-  label: string
-  icon: string
-  /** Produces a new image file from `image` and returns its absolute path. */
-  run: (image: StudioImage) => Promise<string>
-}
-
-const IMAGE_OPS: readonly ImageOp[] = []
-
-function ImageOpsToolbar({ image, onResult }: { image: StudioImage, onResult: (path: string, source: StudioImage) => Promise<void> }): JSX.Element | null {
-  const showError = useAppStore((s) => s.showError)
-  const [running, setRunning] = useState<string | null>(null)
-  if (IMAGE_OPS.length === 0) return null
-
-  async function run(op: ImageOp) {
-    setRunning(op.id)
-    try {
-      await onResult(await op.run(image), image)
-    } catch (err) {
-      showError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setRunning(null)
-    }
-  }
-
-  return (
-    <div className="flex items-center gap-1.5">
-      {IMAGE_OPS.map((op) => (
-        <button key={op.id} type="button" disabled={running !== null} onClick={() => { void run(op) }}
-          className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:border-zinc-700 hover:text-zinc-100 disabled:opacity-50">
-          <Icon d={op.icon} size={14} />
-          {running === op.id ? 'Working…' : op.label}
-        </button>
-      ))}
-    </div>
-  )
 }
 
 // ─── Canvas ───────────────────────────────────────────────────────────────────
@@ -130,12 +86,64 @@ function CompareView({ before, after }: { before: StudioImage, after: StudioImag
   )
 }
 
-function Canvas({ image, source }: { image: StudioImage, source?: StudioImage }): JSX.Element {
+/** Object URL of the mask file while `path` is set; revoked when it changes. */
+function useMaskPreview(path: string | undefined): { url: string | null, failed: boolean } {
+  const [state, setState] = useState<{ path: string, url: string | null, failed: boolean } | null>(null)
+  useEffect(() => {
+    if (!path) return
+    let cancelled = false
+    let created: string | null = null
+    previewUrlForPath(path)
+      .then((url) => {
+        if (cancelled) { URL.revokeObjectURL(url); return }
+        created = url
+        setState({ path, url, failed: false })
+      })
+      .catch(() => { if (!cancelled) setState({ path, url: null, failed: true }) })
+    return () => {
+      cancelled = true
+      if (created) URL.revokeObjectURL(created)
+    }
+  }, [path])
+  return state && state.path === path ? state : { url: null, failed: false }
+}
+
+function Canvas({ image, source, activity }: { image: StudioImage, source?: StudioImage, activity: string | null }): JSX.Element {
+  const [maskFor, setMaskFor] = useState<string | null>(null)
+  const showMask = Boolean(image.maskPath) && maskFor === image.id
+  const mask = useMaskPreview(showMask ? image.maskPath : undefined)
+
+  let content: JSX.Element
+  if (showMask) {
+    content = mask.url
+      ? <img src={mask.url} alt={`Mask of ${image.name}`} draggable={false} className="absolute inset-0 h-full w-full object-contain" />
+      : <span className="absolute inset-0 flex items-center justify-center text-xs text-zinc-500">{mask.failed ? 'Could not load the mask' : 'Loading mask…'}</span>
+  } else if (source) {
+    content = <CompareView key={image.id} before={source} after={image} />
+  } else {
+    content = <img src={image.previewUrl} alt={image.name} draggable={false} className="absolute inset-0 h-full w-full object-contain" />
+  }
+
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-zinc-800" style={CHECKERBOARD}>
-      {source
-        ? <CompareView key={image.id} before={source} after={image} />
-        : <img src={image.previewUrl} alt={image.name} draggable={false} className="absolute inset-0 h-full w-full object-contain" />}
+      {content}
+      {image.maskPath && (
+        <button type="button" aria-pressed={showMask} onClick={() => setMaskFor(showMask ? null : image.id)}
+          title={showMask ? 'Show the image' : 'Show the mask the cut-out was made from'}
+          className={`absolute right-3 bottom-3 rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors ${showMask ? 'border-accent bg-accent/20 text-accent-light' : 'border-zinc-700 bg-zinc-950/70 text-zinc-300 hover:text-zinc-100'}`}>
+          Mask
+        </button>
+      )}
+      {activity && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-zinc-950/40">
+          <span className="flex items-center gap-2 rounded-lg bg-zinc-950/80 px-3 py-1.5 text-xs font-medium text-zinc-200">
+            <svg className="animate-spin" width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true">
+              <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+            </svg>
+            {activity}
+          </span>
+        </div>
+      )}
     </div>
   )
 }
@@ -205,20 +213,27 @@ export default function ImageStudioPage(): JSX.Element {
   const { add, select, remove } = useImageStudioStore.getState()
   const [busy, setBusy] = useState(false)
   const [dragging, setDragging] = useState(false)
+  const [activity, setActivity] = useState<ImageOpActivity | null>(null)
 
   const selected = entries.find((e) => e.id === selectedId)
   const source = sourceOf(entries, selected)
 
   /** An image already on disk: used where it is, not copied. */
-  const addPath = useCallback(async (path: string, sourceImage?: StudioImage) => {
-    const existing = sourceImage ? undefined : findByPath(useImageStudioStore.getState().entries, path)
+  const addPath = useCallback(async (path: string) => {
+    const existing = findByPath(useImageStudioStore.getState().entries, path)
     if (existing) {
       select(existing.id)
       return
     }
     const previewUrl = await previewUrlForPath(path)
-    add({ path, previewUrl, name: fileNameOf(path), sourceId: sourceImage?.id })
+    add({ path, previewUrl, name: fileNameOf(path) })
   }, [add, select])
+
+  /** An image operation's output: a new entry made from `sourceImage`, selected. */
+  const addResult = useCallback(async (result: ImageOpResult, sourceImage: StudioImage) => {
+    const previewUrl = await previewUrlForPath(result.path)
+    add({ path: result.path, previewUrl, name: fileNameOf(result.path), sourceId: sourceImage.id, op: result.op, maskPath: result.maskPath })
+  }, [add])
 
   /** Image bytes with no file behind them (clipboard, browser drag): saved to the workspace first. */
   const addBlob = useCallback(async (file: File, name: string) => {
@@ -293,7 +308,7 @@ export default function ImageStudioPage(): JSX.Element {
           </p>
         </div>
 
-        {selected && <ImageOpsToolbar image={selected} onResult={addPath} />}
+        {selected && <ImageOpsToolbar entries={entries} selected={selected} onResult={addResult} onActivity={setActivity} />}
 
         <button type="button" onClick={browse} disabled={busy}
           className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:border-zinc-700 hover:text-zinc-100 disabled:opacity-50">
@@ -314,7 +329,9 @@ export default function ImageStudioPage(): JSX.Element {
         </button>
       </header>
 
-      {selected ? <Canvas image={selected} source={source} /> : <EmptyCanvas busy={busy} onBrowse={browse} />}
+      {selected
+        ? <Canvas image={selected} source={source} activity={activity?.ids.includes(selected.id) ? activity.label : null} />
+: <EmptyCanvas busy={busy} onBrowse={browse} />}
 
       {entries.length > 0 && (
         <section className="shrink-0">

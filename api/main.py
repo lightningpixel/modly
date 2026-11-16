@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from services.stdio_utf8 import ensure_utf8_stdio
 ensure_utf8_stdio()  # must run before any print/logging hits the pipe
 
-from routers import generation, model, optimize, status, settings, extensions, export, workflow_runs, agent, llm
+from routers import generation, model, optimize, status, settings, extensions, export, workflow_runs, agent, llm, image
 
 
 @asynccontextmanager
@@ -68,6 +68,7 @@ app.include_router(export.router,          prefix="/export")
 app.include_router(workflow_runs.router,   prefix="/workflow-runs")
 app.include_router(agent.router)
 app.include_router(llm.router,             prefix="/llm")
+app.include_router(image.router,           prefix="/image")
 
 # Serve generated files from workspace — dynamic so path changes take effect immediately
 @app.get("/workspace/{full_path:path}")

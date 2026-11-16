@@ -16,6 +16,10 @@ export interface StudioImage {
   name: string
   /** The image this one was produced from, when it came from an operation. */
   sourceId?: string
+  /** Id of the image operation that produced it (e.g. background removal). */
+  op?: string
+  /** Absolute path of the mask the operation wrote alongside, if any. */
+  maskPath?: string
   createdAt: number
 }
 
