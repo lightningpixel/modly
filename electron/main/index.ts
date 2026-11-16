@@ -145,7 +145,10 @@ app.whenReady().then(async () => {
     { urls: ['http://127.0.0.1/*', 'http://localhost/*'] },
     (details, callback) => {
       const port = pythonBridge?.getPort()
-      if (port !== undefined && isApiRequest(details.url, port)) {
+      // Only the app window's own requests get the token, whatever their
+      // destination: never another window or webContents in this session.
+      const fromAppWindow = mainWindow !== null && details.webContentsId === mainWindow.webContents.id
+      if (fromAppWindow && port !== undefined && isApiRequest(details.url, port)) {
         details.requestHeaders[API_TOKEN_HEADER] = getApiToken()
       }
       callback({ requestHeaders: details.requestHeaders })
