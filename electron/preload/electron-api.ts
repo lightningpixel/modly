@@ -259,6 +259,13 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         status: (workspacePath: string): Promise<AssetThumbnailStatusResult> => ipcRenderer.invoke('workspace:thumbnails:status', { workspacePath }) as Promise<AssetThumbnailStatusResult>,
         save: (request: AssetThumbnailSaveRequest): Promise<AssetThumbnailSaveResult> => ipcRenderer.invoke('workspace:thumbnails:save', request) as Promise<AssetThumbnailSaveResult>,
       },
+      // Images handed over as bytes (pasted, dropped from a browser), saved to <workspace>/Images/.
+      images: {
+        save: (request: { bytes: Uint8Array; name?: string; mime: string }): Promise<{ success: true; path: string } | { success: false; error: string }> =>
+          ipcRenderer.invoke('workspace:images:save', request) as Promise<{ success: true; path: string } | { success: false; error: string }>,
+        reveal: (path: string): Promise<{ success: boolean; error?: string }> =>
+          ipcRenderer.invoke('workspace:images:reveal', path) as Promise<{ success: boolean; error?: string }>,
+      },
     },
 
     // Extensions

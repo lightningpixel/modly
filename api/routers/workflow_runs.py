@@ -49,6 +49,10 @@ class WorkflowRunRecordIn(BaseModel):
     ended_at: Optional[float] = None
 
 
+class RunRecordChildren(BaseModel):
+    runs: list[RunRecord]
+
+
 MAX_PAGE = 200
 
 
@@ -58,10 +62,21 @@ async def list_runs(
     kind: Optional[list[RunKind]] = Query(None),
     limit: int = Query(50, ge=1, le=MAX_PAGE),
     offset: int = Query(0, ge=0),
+    top_level: bool = False,
 ):
-    """Persisted run history, newest first. ``status``/``kind`` may repeat to match any."""
-    runs, total = run_history.list(statuses=status, kinds=kind, limit=limit, offset=offset)
+    """Persisted run history, newest first. ``status``/``kind`` may repeat to match any.
+    ``top_level`` leaves out runs launched by another run (a workflow's generations);
+    fetch those with ``/{run_id}/children``. A running record carries its live steps."""
+    runs, total = run_history.list(
+        statuses=status, kinds=kind, limit=limit, offset=offset, top_level=top_level
+    )
     return RunRecordPage(runs=runs, total=total, limit=limit, offset=offset)
+
+
+@router.get("/{run_id}/children", response_model=RunRecordChildren)
+async def list_run_children(run_id: str):
+    """The runs a run launched (a workflow's generations), in execution order."""
+    return RunRecordChildren(runs=run_history.children(run_id))
 
 
 @router.put("/{run_id}", response_model=RunRecord)

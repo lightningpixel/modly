@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { create } from 'zustand'
 import axios, { AxiosInstance } from 'axios'
 import { useAppStore } from '@shared/stores/appStore'
@@ -11,9 +12,9 @@ import { assignSlotFilePaths } from './slotInputs'
 import type { SlotInputType } from './slotInputs'
 import {
   endRecordStep, finishWorkflowRunRecord, isTerminalRunStatus, newWorkflowRunRecord,
-  reopenWorkflowRunRecord, runOutputPath, startRecordStep,
+  reopenWorkflowRunRecord, runOutputPath, startRecordStep, toLiveWorkflowRun, workflowRunInputs,
 } from './workflowRunRecord'
-import type { WorkflowRunRecord } from './workflowRunRecord'
+import type { LiveWorkflowRun, WorkflowRunRecord } from './workflowRunRecord'
 import type { RunStatus } from '@shared/types/runs'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -64,6 +65,7 @@ function updateRecord(fn: (record: WorkflowRunRecord) => WorkflowRunRecord): voi
   if (!_record.current) return
   const record = fn(_record.current)
   _record.current = record
+  useWorkflowRunStore.setState({ liveRecord: record })
   const { id, ...body } = record
   const apiUrl = useAppStore.getState().apiUrl
   _recordWrites = _recordWrites
@@ -468,6 +470,7 @@ async function executeExtensionNode(
         input_kind: 'scene', input_path: inputPath,
         model_id: node.data.extensionId ?? '', collection: 'Workflows',
         params: { ...effectiveParams, ...extraParams },
+        parent_run_id: _record.current?.id ?? null,
       })
     } else {
       const fd = new FormData()
@@ -478,6 +481,8 @@ async function executeExtensionNode(
       fd.append('enable_texture', 'false')
       fd.append('texture_resolution', '1024')
       fd.append('params', JSON.stringify({ ...effectiveParams, ...extraParams }))
+      // Files this generation under the workflow run (Queue page: the run's steps).
+      if (_record.current) fd.append('parent_run_id', _record.current.id)
       submission = await client.post('/generate/from-image', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
     }
     const { data } = submission
@@ -599,6 +604,11 @@ function pushBranchSceneMesh(ctx: RunContext, waitId: string): void {
 
 interface WorkflowRunStore {
   runState:         WorkflowRunState
+  /**
+   * History record of the latest run started in this window (kept after it
+   * ends, until the next run). Read it through useLiveWorkflowRun().
+   */
+  liveRecord:       WorkflowRunRecord | null
   activeNodeId:     string | null
   activeWorkflowId: string | null
   nodeImageOutputs: Record<string, string>
@@ -694,6 +704,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
 
   return {
     runState:         IDLE,
+    liveRecord:       null,
     activeNodeId:     null,
     activeWorkflowId: null,
     nodeImageOutputs: {},
@@ -716,7 +727,7 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
       _record.current = newWorkflowRunRecord(
         crypto.randomUUID(),
         workflow,
-        overrideImageData ? { image: '(attached image)' } : appState.selectedImagePath ? { image: appState.selectedImagePath } : {},
+        workflowRunInputs(workflow, !!overrideImageData),
         nowSeconds(),
       )
       updateRecord((r) => r)
@@ -1173,3 +1184,13 @@ export const useWorkflowRunStore = create<WorkflowRunStore>((set, get) => {
     },
   }
 })
+
+/**
+ * The latest workflow run of this window with its live progress (step list,
+ * current step, elapsed-time origin), or null before the first run.
+ */
+export function useLiveWorkflowRun(): LiveWorkflowRun | null {
+  const record   = useWorkflowRunStore((s) => s.liveRecord)
+  const runState = useWorkflowRunStore((s) => s.runState)
+  return useMemo(() => (record ? toLiveWorkflowRun(record, runState) : null), [record, runState])
+}

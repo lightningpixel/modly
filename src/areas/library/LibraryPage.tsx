@@ -79,6 +79,10 @@ export default function LibraryPage(): JSX.Element {
   const setCurrentJob = useAppStore((s) => s.setCurrentJob)
   const pushMeshUrl = useAppStore((s) => s.pushMeshUrl)
   const navigate = useNavStore((s) => s.navigate)
+  const showToast = useAppStore((s) => s.showToast)
+  // Another page (Queue: "Show in Library") opened the Library on one asset.
+  const pathToSelect = useNavStore((s) => s.params?.selected ?? null)
+  const clearParams = useNavStore((s) => s.clearParams)
 
   const [entries, setEntries] = useState<ProjectedAssetLibraryEntry[]>([])
   const [loading, setLoading] = useState(true)
@@ -88,6 +92,8 @@ export default function LibraryPage(): JSX.Element {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [openingId, setOpeningId] = useState<string | null>(null)
   const [openError, setOpenError] = useState<string | null>(null)
+  const [pendingSelect, setPendingSelect] = useState<string | null>(null)
+  const [reveal, setReveal] = useState<{ id: string, key: number } | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
 
   const load = useCallback(async () => {
@@ -110,6 +116,27 @@ export default function LibraryPage(): JSX.Element {
   }, [service])
 
   useEffect(() => { void load() }, [load])
+
+  useEffect(() => {
+    if (!pathToSelect) return
+    clearParams()
+    setPendingSelect(pathToSelect)
+    // Clear the filters so the asset is in view.
+    setQuery((current) => ({ ...DEFAULT_LIBRARY_QUERY, sort: current.sort }))
+  }, [pathToSelect, clearParams])
+
+  useEffect(() => {
+    if (!pendingSelect || loading) return
+    setPendingSelect(null)
+    const entry = entries.find((e) => e.workspacePath === pendingSelect || e.source?.workspacePath === pendingSelect)
+    if (!entry) {
+      showToast('That file is not in the library anymore.')
+      return
+    }
+    setSelectedId(entry.id)
+    setOpenError(null)
+    setReveal((current) => ({ id: entry.id, key: (current?.key ?? 0) + 1 }))
+  }, [pendingSelect, loading, entries, showToast])
 
   // "/" focuses the search, as on the Extensions page.
   useEffect(() => {
@@ -301,6 +328,8 @@ export default function LibraryPage(): JSX.Element {
             openingId={openingId}
             onSelect={selectEntry}
             onOpen={(entry) => { void openEntry(entry) }}
+            revealId={reveal?.id ?? null}
+            revealKey={reveal?.key ?? 0}
           />
         </div>
       )}

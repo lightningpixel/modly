@@ -9,6 +9,8 @@ import {
   reopenWorkflowRunRecord,
   runOutputPath,
   startRecordStep,
+  toLiveWorkflowRun,
+  workflowRunInputs,
   workflowRunParams,
 } from './workflowRunRecord'
 
@@ -92,4 +94,32 @@ test('runOutputPath prefers a workspace-relative path', () => {
   assert.equal(runOutputPath(undefined, 'D:/out/a.wav'), 'D:/out/a.wav')
   assert.equal(runOutputPath('/optimize/serve-file?path=x', 'D:/x.glb'), 'D:/x.glb')
   assert.equal(runOutputPath(), undefined)
+})
+
+test("inputs record the Image nodes' files, or an attached image", () => {
+  assert.deepEqual(workflowRunInputs(workflow, false), { image: 'C:/a.png' })
+  assert.deepEqual(workflowRunInputs(workflow, true), { image: '(attached image)' })
+  const two = { ...workflow, nodes: [...workflow.nodes, { id: 'img2', type: 'imageNode', data: { params: { filePath: 'C:/b.png' } } }] }
+  assert.deepEqual(workflowRunInputs(two, false), { image: 'C:/a.png', images: ['C:/a.png', 'C:/b.png'] })
+  const none = { ...workflow, nodes: [{ id: 'img', type: 'imageNode', data: { params: {} } }] }
+  assert.deepEqual(workflowRunInputs(none, false), {})
+})
+
+test("the live run exposes the record with the current step's progress", () => {
+  let record = newWorkflowRunRecord('run-1', workflow, { image: 'C:/a.png' }, 100)
+  record = startRecordStep(record, 'TripoSG', 'gen', 101)
+  const progress = { status: 'running' as const, blockIndex: 0, blockTotal: 3, blockProgress: 40, blockStep: 'Generating…' }
+  const run = toLiveWorkflowRun(record, progress)
+  assert.equal(run.runId, 'run-1')
+  assert.equal(run.workflowName, 'Image to mesh')
+  assert.equal(run.startedAt, 100)
+  assert.equal(run.paused, false)
+  assert.deepEqual(run.current, { index: 1, total: 3, name: 'TripoSG', detail: 'Generating…', progress: 40 })
+
+  assert.equal(toLiveWorkflowRun(record, { ...progress, status: 'paused' }).paused, true)
+  const done = finishWorkflowRunRecord(record, 'done', 130, { outputPath: 'Workflows/a.glb' })
+  const ended = toLiveWorkflowRun(done, { ...progress, status: 'done' })
+  assert.equal(ended.current, null)
+  assert.equal(ended.endedAt, 130)
+  assert.equal(ended.outputPath, 'Workflows/a.glb')
 })

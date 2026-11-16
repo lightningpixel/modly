@@ -18,3 +18,4 @@ class GenerateFromArtifactRequest(BaseModel):
     model_id: str
     collection: str = "Workflows"
     params: dict[str, Any] = Field(default_factory=dict)
+    parent_run_id: Optional[str] = None   # the workflow run this generation belongs to

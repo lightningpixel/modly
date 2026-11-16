@@ -339,7 +339,7 @@ test('navigate changes page and validates it', async () => {
   const f = fake()
   assert.equal(await run('navigate', { page: 'models' }, f), 'Opened the Extensions page.')
   assert.deepEqual(f.calls, [['navigate', 'models']])
-  assert.match(await run('navigate', { page: 'nope' }, f), /^Error: page must be one of: home, generate, workflows, library, models, settings/)
+  assert.match(await run('navigate', { page: 'nope' }, f), /^Error: page must be one of: home, generate, image-studio, workflows, library, queue, models, settings/)
 })
 
 test('a throwing dependency comes back as an error text', async () => {

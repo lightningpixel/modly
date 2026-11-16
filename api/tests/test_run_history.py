@@ -7,13 +7,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 
 import routers.generation as generation
 import routers.optimize as optimize
 import routers.workflow_runs as workflow_runs
 import services.run_history as run_history_module
-from schemas.generation import JobStatus
+from schemas.generation import GenerateFromArtifactRequest, JobStatus
 from schemas.runs import RunRecord, RunStep
 from services.mesh_ops import MeshOpExecutionError, MeshOpResult
 from services.run_history import (
@@ -190,6 +190,57 @@ class RunHistoryStoreTests(_TempStoreCase):
         self.assertEqual(reloaded.get("live").status, "done")
 
 
+class ParentRunTests(_TempStoreCase):
+    def _child(self, run_id: str, parent: str, created_at: float) -> RunRecord:
+        record = _record(run_id, created_at=created_at)
+        record.parent_run_id = parent
+        return record
+
+    def test_parent_run_id_is_persisted(self) -> None:
+        self.store.begin("child", "generation", model_id="sf3d", parent_run_id="wf-run")
+        self.assertEqual(self.reopen().get("child").parent_run_id, "wf-run")
+
+    def test_old_history_without_parent_run_id_loads(self) -> None:
+        self.path.write_text(json.dumps({"version": 1, "runs": [
+            {"id": "legacy", "kind": "generation", "status": "done", "created_at": 1000.0},
+        ]}), encoding="utf-8")
+        record = self.reopen().get("legacy")
+        self.assertEqual(record.status, "done")
+        self.assertIsNone(record.parent_run_id)
+
+    def test_top_level_leaves_out_children_and_counts_accordingly(self) -> None:
+        self.store.save(_record("wf", kind="workflow", created_at=1000.0))
+        self.store.save(self._child("c1", "wf", 1001.0))
+        self.store.save(self._child("c2", "wf", 1002.0))
+        self.store.save(_record("solo", created_at=1003.0))
+        page, total = self.store.list(top_level=True)
+        self.assertEqual(([r.id for r in page], total), (["solo", "wf"], 2))
+        page, total = self.store.list()
+        self.assertEqual(total, 4)
+
+    def test_children_are_in_execution_order(self) -> None:
+        self.store.save(self._child("late", "wf", 1005.0))
+        self.store.save(self._child("early", "wf", 1001.0))
+        self.store.save(self._child("other", "wf-2", 1002.0))
+        self.store.save(_record("wf", kind="workflow"))
+        self.assertEqual([r.id for r in self.store.children("wf")], ["early", "late"])
+        self.assertEqual(self.store.children("nobody"), [])
+
+    def test_running_record_lists_its_live_steps_without_rewriting_the_file(self) -> None:
+        self.store.begin("live", "generation")
+        self.store.mark_running("live")
+        on_disk = self.path.read_text(encoding="utf-8")
+        self.store.step("live", "Loading")
+        self.store.step("live", "Sampling 3/50")
+        page, _ = self.store.list(statuses=["running"])
+        self.assertEqual([s.name for s in page[0].steps], ["Loading", "Sampling 3/50"])
+        self.assertIsNone(page[0].steps[-1].ended_at)
+        self.assertEqual(self.path.read_text(encoding="utf-8"), on_disk)
+        # The list hands out copies: a caller cannot corrupt the live record.
+        page[0].steps.clear()
+        self.assertEqual(len(self.store.get("live").steps), 2)
+
+
 class _RouterHistoryCase(_TempStoreCase):
     """Points the routers' shared store at a temp workspace for one test."""
 
@@ -221,6 +272,29 @@ class ListRunsEndpointTests(_RouterHistoryCase):
         paths = {(route.path, tuple(sorted(route.methods))) for route in workflow_runs.router.routes}
         self.assertIn(("", ("GET",)), paths)
         self.assertIn(("/{run_id}", ("PUT",)), paths)
+        self.assertIn(("/{run_id}/children", ("GET",)), paths)
+
+    def test_top_level_filter_and_children_route(self) -> None:
+        self.shared.save(_record("wf", kind="workflow", created_at=1000.0))
+        for i in range(2):
+            child = _record(f"c{i}", created_at=1001.0 + i)
+            child.parent_run_id = "wf"
+            self.shared.save(child)
+        page = asyncio.run(workflow_runs.list_runs(status=None, kind=None, limit=50, offset=0, top_level=True))
+        self.assertEqual(([r.id for r in page.runs], page.total), (["wf"], 1))
+        page = asyncio.run(workflow_runs.list_runs(status=None, kind=None, limit=50, offset=0))
+        self.assertEqual(page.total, 3)
+        self.assertEqual(page.runs[0].parent_run_id, "wf")
+        children = asyncio.run(workflow_runs.list_run_children("wf"))
+        self.assertEqual([r.id for r in children.runs], ["c0", "c1"])
+        self.assertEqual(asyncio.run(workflow_runs.list_run_children("c0")).runs, [])
+
+    def test_children_path_does_not_resolve_to_get_run(self) -> None:
+        from starlette.routing import Match
+        scope = {"type": "http", "method": "GET", "path": "/wf/children"}
+        matched = [r.endpoint for r in workflow_runs.router.routes
+                   if r.matches(scope)[0] == Match.FULL]
+        self.assertEqual(matched, [workflow_runs.list_run_children])
 
     def test_get_run_falls_back_to_history_after_purge(self) -> None:
         record = _record("old", "done")
@@ -329,6 +403,63 @@ class GenerationRecordingTests(_RouterHistoryCase):
         generation.record_job_filed("c", "demo/model", {}, {}, "Default")
         asyncio.run(generation.cancel_job("c"))
         self.assertEqual(self.reopen().get("c").status, "cancelled")
+
+
+class _FakeUpload:
+    filename = "in.png"
+    content_type = "image/png"
+
+    async def read(self) -> bytes:
+        return b"img"
+
+
+class _EndpointRegistry:
+    def get_generator(self, model_id):
+        return object()
+
+    def get_manifest(self, model_id):
+        return {"output": "mesh", "inputs": ["image", "scene"]}
+
+
+class GenerationParentRunTests(_RouterHistoryCase):
+    def setUp(self) -> None:
+        super().setUp()
+        for patcher in (patch.object(generation.registry, "WORKSPACE_DIR", self.workspace),
+                        patch.object(generation, "generator_registry", _EndpointRegistry())):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _from_image(self, **extra) -> str:
+        response = asyncio.run(generation.generate_from_image(
+            BackgroundTasks(), image=_FakeUpload(), model_id="demo/model", collection="Workflows",
+            remesh="none", enable_texture=False, texture_resolution=1024, params="{}", **extra,
+        ))
+        return response["job_id"]
+
+    def test_from_image_records_the_parent_run(self) -> None:
+        job_id = self._from_image(parent_run_id="wf-run")
+        self.assertEqual(self.reopen().get(job_id).parent_run_id, "wf-run")
+        self.assertEqual([r.id for r in self.shared.children("wf-run")], [job_id])
+
+    def test_from_image_without_or_with_blank_parent_is_top_level(self) -> None:
+        self.assertIsNone(self.shared.get(self._from_image()).parent_run_id)
+        self.assertIsNone(self.shared.get(self._from_image(parent_run_id="  ")).parent_run_id)
+
+    def test_from_image_refuses_an_oversized_parent_id(self) -> None:
+        with self.assertRaises(HTTPException) as ctx:
+            self._from_image(parent_run_id="x" * 201)
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_from_artifact_records_the_parent_run(self) -> None:
+        scene = self.workspace / "Workflows" / "room"
+        scene.mkdir(parents=True)
+        (scene / "scene-manifest.json").write_text(
+            json.dumps({"schema": "modly.scene-manifest.v1", "sceneRoot": ".", "assets": []}))
+        response = asyncio.run(generation.generate_from_artifact(GenerateFromArtifactRequest(
+            input_kind="scene", input_path="Workflows/room", model_id="demo/scene",
+            parent_run_id="wf-run",
+        ), BackgroundTasks()))
+        self.assertEqual(self.reopen().get(response["job_id"]).parent_run_id, "wf-run")
 
 
 class MeshOpRecordingTests(_RouterHistoryCase):

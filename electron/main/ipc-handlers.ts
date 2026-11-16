@@ -96,6 +96,7 @@ import {
 import { registerWorkspaceAssetLibraryIpcHandlers } from './artifact-registry-service'
 import { getThumbnailsDir } from './asset-thumbnail-protocol'
 import { registerAssetThumbnailIpcHandlers, removeThumbnails } from './asset-thumbnail-cache'
+import { registerWorkspaceImageIpcHandlers } from './workspace-images'
 import { updatesSupported } from './updater'
 import { ModelWeightOperations } from './model-weight-operations'
 import { readLocalFileBase64 } from './bounded-file-reader'
@@ -1010,6 +1011,11 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     ipcMain,
     getWorkspaceDir: () => getSettings(app.getPath('userData')).workspaceDir,
     thumbnailsDir: getThumbnailsDir(),
+  })
+  registerWorkspaceImageIpcHandlers({
+    ipcMain,
+    getWorkspaceDir: () => getSettings(app.getPath('userData')).workspaceDir,
+    showItemInFolder: (path) => shell.showItemInFolder(path),
   })
 
   ipcMain.handle('workspace:listCollections', async () => {

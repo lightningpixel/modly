@@ -50,6 +50,18 @@ export const PAGES = [
     wrapperClass: 'flex flex-1 overflow-hidden',
   },
   {
+    id: 'image-studio',
+    label: 'Image Studio',
+    group: 'create',
+    icon: [
+      ['rect', { x: 3, y: 3, width: 18, height: 18, rx: 2 }],
+      ['circle', { cx: 8.5, cy: 8.5, r: 1.5 }],
+      ['path', { d: 'M21 15l-5-5L5 21' }],
+    ],
+    load: () => import('@areas/image-studio/ImageStudioPage'),
+    wrapperClass: 'flex flex-1 overflow-hidden',
+  },
+  {
     id: 'workflows',
     label: 'Workflows',
     group: 'create',
@@ -75,6 +87,20 @@ export const PAGES = [
     ],
     load: () => import('@areas/library/LibraryPage'),
     wrapperClass: 'flex flex-1 overflow-hidden',
+  },
+  {
+    id: 'queue',
+    label: 'Queue',
+    group: 'manage',
+    icon: [
+      ['path', { d: 'M4 6h11' }],
+      ['path', { d: 'M4 12h6' }],
+      ['path', { d: 'M4 18h6' }],
+      ['circle', { cx: 17, cy: 15.5, r: 4.5 }],
+      ['path', { d: 'M17 13.5v2.2l1.4 1.1' }],
+    ],
+    load: () => import('@areas/queue/QueuePage'),
+    wrapperClass: 'flex-1 overflow-y-auto',
   },
   {
     id: 'models',

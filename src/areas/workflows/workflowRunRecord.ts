@@ -93,3 +93,90 @@ export function runOutputPath(outputUrl?: string, outputPath?: string): string |
   if (outputUrl?.startsWith('/workspace/')) return outputUrl.slice('/workspace/'.length)
   return outputPath
 }
+
+/** What `inputs.image` holds when the run got its image as data, not as a file. */
+export const ATTACHED_IMAGE_INPUT = '(attached image)'
+
+/**
+ * A run's inputs: the image file of each Image node (`image` is the first,
+ * `images` lists them all when there are several). An image handed over as
+ * data replaces those files, so it is recorded as attached.
+ */
+export function workflowRunInputs(workflow: WorkflowLike, attachedImage: boolean): Record<string, unknown> {
+  if (attachedImage) return { image: ATTACHED_IMAGE_INPUT }
+  const images: string[] = []
+  for (const node of workflow.nodes) {
+    if (node.type !== 'imageNode') continue
+    const filePath = node.data.params?.filePath
+    if (typeof filePath === 'string' && filePath.trim() !== '' && !images.includes(filePath)) images.push(filePath)
+  }
+  if (images.length === 0) return {}
+  return images.length === 1 ? { image: images[0] } : { image: images[0], images }
+}
+
+/** The step the runner is on, as the Queue page shows it ("Step 2/4 · Generate Mesh"). */
+export interface LiveRunCurrentStep {
+  /** 1-based position of the step in the current pass (main run or Wait branch). */
+  index:    number
+  /** Steps in the current pass; 0 when unknown. */
+  total:    number
+  name:     string
+  /** What the step is doing right now, e.g. "Generating…". */
+  detail:   string
+  /** 0-100. */
+  progress: number
+}
+
+/** The workflow run this window is executing, with its live progress. */
+export interface LiveWorkflowRun {
+  runId:        string
+  workflowId:   string | null
+  workflowName: string
+  status:       RunStatus
+  /** Running but waiting on the user (a Wait branch, a paused loop). */
+  paused:       boolean
+  startedAt:    number
+  endedAt:      number | null
+  inputs:       Record<string, unknown>
+  /** Steps run so far, in order; the open one is `running`. */
+  steps:        RunRecord['steps']
+  current:      LiveRunCurrentStep | null
+  outputPath:   string | null
+  error:        string | null
+}
+
+/** The runner's progress fields this needs (WorkflowRunState). */
+interface RunProgress {
+  status:        'idle' | 'running' | 'paused' | 'done' | 'error'
+  blockIndex:    number
+  blockTotal:    number
+  blockProgress: number
+  blockStep:     string
+}
+
+export function toLiveWorkflowRun(record: WorkflowRunRecord, progress: RunProgress): LiveWorkflowRun {
+  const open = record.status === 'running' ? record.steps[record.steps.length - 1] : undefined
+  const current = open && open.ended_at == null
+    ? {
+        index:    Math.max(1, progress.blockIndex + 1),
+        total:    Math.max(0, progress.blockTotal),
+        name:     open.name,
+        detail:   progress.blockStep,
+        progress: Math.max(0, Math.min(100, progress.blockProgress)),
+      }
+    : null
+  return {
+    runId:        record.id,
+    workflowId:   record.workflow_id ?? null,
+    workflowName: record.workflow_name ?? 'Workflow',
+    status:       record.status,
+    paused:       record.status === 'running' && progress.status === 'paused',
+    startedAt:    record.started_at ?? record.created_at,
+    endedAt:      record.ended_at ?? null,
+    inputs:       record.inputs,
+    steps:        record.steps,
+    current,
+    outputPath:   record.output_path ?? null,
+    error:        record.error ?? null,
+  }
+}
