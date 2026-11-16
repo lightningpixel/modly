@@ -62,7 +62,7 @@ export function formatEntryDate(entry: ProjectedAssetLibraryEntry): string | nul
 }
 
 /** The asset's thumbnail, or its capability icon until one is rendered (or if it fails to load). */
-function Thumbnail({ entry, iconSize }: { entry: ProjectedAssetLibraryEntry, iconSize: number }): JSX.Element {
+export function Thumbnail({ entry, iconSize }: { entry: ProjectedAssetLibraryEntry, iconSize: number }): JSX.Element {
   const url = useAssetThumbnailUrl(entry)
   const [failedUrl, setFailedUrl] = useState<string | null>(null)
   if (url && url !== failedUrl) {

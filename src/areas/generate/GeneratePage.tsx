@@ -1,7 +1,8 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import type { ReactNode } from 'react'
 import { useAppStore, DEFAULT_LIGHT_SETTINGS } from '@shared/stores/appStore'
-import type { GenerationJob, LightSettings, PointLight } from '@shared/stores/appStore'
+import type { LightSettings, PointLight } from '@shared/stores/appStore'
+import { showImportedMesh } from '@shared/utils/meshJob'
 import { redoDepth, undoDepth } from '@shared/stores/meshHistory'
 import { useApi } from '@shared/hooks/useApi'
 import { ColorPicker } from '@shared/components/ui'
@@ -872,17 +873,7 @@ export default function GeneratePage(): JSX.Element {
     setImporting(true)
     try {
       const { url } = await importMesh(filePath)
-      const job: GenerationJob = {
-        id: `import-${Date.now()}`,
-        imageFile: '',
-        status: 'done',
-        progress: 100,
-        outputUrl: url,
-        originalOutputUrl: url,
-        createdAt: Date.now(),
-      }
-      setCurrentJob(job)
-      pushMeshUrl(url)
+      showImportedMesh(url)
     } finally {
       setImporting(false)
     }
