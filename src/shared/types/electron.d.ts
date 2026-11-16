@@ -179,6 +179,8 @@ declare global {
       }
       system: {
         memory: () => Promise<{ total: number; used: number; available: number }>
+        /** VRAM in bytes of the largest NVIDIA GPU; null without NVIDIA, on macOS, or when a sample timed out. */
+        gpuMemory: () => Promise<{ total: number; used: number; available: number; name: string } | null>
       }
       window: {
         minimize:          () => void

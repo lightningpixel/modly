@@ -53,7 +53,7 @@ interface Fake {
   deps: ClientToolDeps
   calls: unknown[][]
   posted: ToolResultBody[]
-  ui: { uiScale: UiScale; useAtkinsonFont: boolean; showRamIndicator: boolean }
+  ui: { uiScale: UiScale; useAtkinsonFont: boolean; showRamIndicator: boolean; showVramIndicator: boolean }
   dirs: { modelsDir: string; workspaceDir: string; workflowsDir: string; extensionsDir: string }
   history: { undo: number; redo: number }
   dirItems: Record<string, string[]>
@@ -65,7 +65,7 @@ function fake(overrides: Partial<ClientToolDeps> = {}): Fake {
   const rec = (...call: unknown[]) => { calls.push(call) }
   const ok = { success: true }
   const state = {
-    ui: { uiScale: 'medium' as UiScale, useAtkinsonFont: false, showRamIndicator: true },
+    ui: { uiScale: 'medium' as UiScale, useAtkinsonFont: false, showRamIndicator: true, showVramIndicator: true },
     dirs: { modelsDir: 'C:\\Modly\\models', workspaceDir: 'C:\\Modly\\workspace', workflowsDir: 'C:\\Modly\\workflows', extensionsDir: 'C:\\Modly\\extensions' },
     history: { undo: 1, redo: 1 },
     dirItems: {} as Record<string, string[]>,
@@ -101,6 +101,7 @@ function fake(overrides: Partial<ClientToolDeps> = {}): Fake {
       setUiScale: (v) => { state.ui.uiScale = v },
       setUseAtkinsonFont: (v) => { state.ui.useAtkinsonFont = v },
       setShowRamIndicator: (v) => { state.ui.showRamIndicator = v },
+      setShowVramIndicator: (v) => { state.ui.showVramIndicator = v },
     },
     storage: {
       get: async () => state.dirs,
@@ -260,7 +261,8 @@ test('set_setting sets each UI option and validates key and value', async () => 
   assert.equal(await run('set_setting', { key: 'uiScale', value: 'large' }, f), 'Set the interface scale to "large".')
   assert.equal(await run('set_setting', { key: 'useAtkinsonFont', value: true }, f), 'Set the Atkinson Hyperlegible font to true.')
   assert.equal(await run('set_setting', { key: 'showRamIndicator', value: 'false' }, f), 'Set the RAM indicator to false.')
-  assert.deepEqual(f.ui, { uiScale: 'large', useAtkinsonFont: true, showRamIndicator: false })
+  assert.equal(await run('set_setting', { key: 'showVramIndicator', value: false }, f), 'Set the VRAM indicator to false.')
+  assert.deepEqual(f.ui, { uiScale: 'large', useAtkinsonFont: true, showRamIndicator: false, showVramIndicator: false })
 
   assert.match(await run('set_setting', { key: 'uiScale', value: 'huge' }, f), /^Error: uiScale must be one of: small, medium, large, very-large/)
   assert.match(await run('set_setting', { key: 'showRamIndicator', value: 1 }, f), /^Error: showRamIndicator must be true or false/)

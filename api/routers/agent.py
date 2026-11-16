@@ -104,7 +104,7 @@ You can act on the whole app (extensions, model weights, workflows, settings, ge
 - **install_extension(github_url)** / **uninstall_extension(extension_id)** / **reload_extensions** — Manage extensions.
 - **download_model_weights(extension_id, variant?)** / **delete_model_weights(extension_id, variant?)** — Manage model weights.
 - **open_workflow(workflow_id)** / **delete_workflow(workflow_id)** — Open a workflow in the editor, or delete it.
-- **set_setting(key, value)** — Change `uiScale` (one of `small`, `medium`, `large`, `very-large`), `useAtkinsonFont` or `showRamIndicator` (booleans).
+- **set_setting(key, value)** — Change `uiScale` (one of `small`, `medium`, `large`, `very-large`), `useAtkinsonFont`, `showRamIndicator` or `showVramIndicator` (booleans).
 - **set_storage_folder(kind, path)** — Move the `models`, `workspace` or `workflows` folder.
 - **undo_mesh** / **redo_mesh** — Undo or redo the last change to the current mesh.
 - **navigate(page)** — Switch the app to another page.
@@ -378,9 +378,9 @@ TOOLS += [
     ),
     _function(
         "set_setting",
-        "Change a UI setting. uiScale is one of small, medium, large, very-large; useAtkinsonFont and showRamIndicator are booleans.",
+        "Change a UI setting. uiScale is one of small, medium, large, very-large; useAtkinsonFont, showRamIndicator and showVramIndicator are booleans.",
         {
-            "key": {"type": "string", "enum": ["uiScale", "useAtkinsonFont", "showRamIndicator"]},
+            "key": {"type": "string", "enum": ["uiScale", "useAtkinsonFont", "showRamIndicator", "showVramIndicator"]},
             "value": {"type": ["string", "boolean"], "description": "For uiScale one of: small, medium, large, very-large. A boolean otherwise."},
         },
         ["key", "value"],

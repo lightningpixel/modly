@@ -64,6 +64,7 @@ import {
   resolveExtensionPathWithinRoot,
 } from './extension-path-guard'
 import { detectGpuInfo, describeGpuInfo, torchFlavorFor, type GpuInfo } from './gpu-detect'
+import { sampleGpuMemory } from './gpu-memory'
 import { SETUP_LAUNCHER_SOURCE } from './setup-launcher'
 import {
   assertCompatibleExtensionUpdateType,
@@ -915,27 +916,8 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   })
 
   // GPU memory (VRAM) — NVIDIA only via nvidia-smi
-  ipcMain.handle('system:gpuMemory', async () => {
-    if (process.platform === 'darwin' && process.arch === 'arm64') {
-      // Apple Silicon: unified memory, no separate VRAM
-      return null
-    }
-    try {
-      const { stdout } = await pExecFile('nvidia-smi', [
-        '--query-gpu=memory.total,memory.used',
-        '--format=csv,noheader,nounits'
-      ])
-      const line = stdout.trim().split('\n')[0].trim()
-      const [totalMiB, usedMiB] = line.split(',').map(s => parseInt(s.trim(), 10))
-      if (isNaN(totalMiB) || isNaN(usedMiB) || totalMiB === 0) return null
-      const total = totalMiB * 1024 * 1024
-      const used = usedMiB * 1024 * 1024
-      const available = total - used
-      return { total, used, available }
-    } catch {
-      return null
-    }
-  })
+  // (null on macOS, without NVIDIA, or when a sample times out).
+  ipcMain.handle('system:gpuMemory', () => sampleGpuMemory())
 
   ipcMain.handle('app:info', () => ({
     version:   app.getVersion(),

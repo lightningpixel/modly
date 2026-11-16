@@ -34,7 +34,7 @@ export function ApplicationSection(): JSX.Element {
         </Row>
         <Row
           label="VRAM indicator"
-          description="Show live GPU memory usage in the top bar (NVIDIA only)."
+          description="Show live GPU memory usage in the top bar. NVIDIA only; counts every app using the GPU."
         >
           <Toggle value={showVramIndicator} onChange={setShowVramIndicator} />
         </Row>
