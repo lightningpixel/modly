@@ -323,6 +323,11 @@ declare global {
           status: (workspacePath: string) => Promise<AssetThumbnailStatusResult>
           save: (request: AssetThumbnailSaveRequest) => Promise<AssetThumbnailSaveResult>
         }
+        /** Saves image bytes (PNG/JPEG/WebP, max 40 MB) to <workspace>/Images/ and returns the new file's absolute path. */
+        images: {
+          save: (request: { bytes: Uint8Array; name?: string; mime: string }) => Promise<{ success: true; path: string } | { success: false; error: string }>
+          reveal: (path: string) => Promise<{ success: boolean; error?: string }>
+        }
       }
       setup: {
         check:        () => Promise<{ needed: boolean; defaultDataDir: string; platform: string; arch: string }>

@@ -14,7 +14,7 @@ import { useWaitButton } from '@areas/workflows/useWaitButton'
 import { buildAllWorkflowExtensions, getWorkflowExtension } from '@areas/workflows/mockExtensions'
 import { validateWorkflowPreflight } from '@areas/workflows/preflight'
 import { mimeFromPath } from '@areas/workflows/nodes/imageUtils'
-import { SUPPORTED_IMAGE_TYPES, useImageHandoff } from '@shared/utils/imageInput'
+import { SUPPORTED_IMAGE_TYPES, saveImageToWorkspace, takePastedImage, useImageHandoff } from '@shared/utils/imageInput'
 import type { WorkflowExtension } from '@areas/workflows/mockExtensions'
 import type { Workflow, WFNode, WFEdge, ParamSchema } from '@shared/types/electron.d'
 import { PICKER_LABELS, openParamPicker, resolvePickerIntent } from '@shared/utils/paramPicker'
@@ -160,7 +160,13 @@ async function readImageParams(path: string): Promise<{ filePath: string, previe
   return { filePath: path, preview: `data:${mimeFromPath(path)};base64,${base64}` }
 }
 
-function ImageParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: FlowNode[]; onPatch: PatchFn }) {
+function ImageParamRow({ nodeId, nodes, onPatch, pasteTarget = false }: {
+  nodeId: string
+  nodes: FlowNode[]
+  onPatch: PatchFn
+  /** Takes images pasted with Ctrl+V (only one row of the panel does). */
+  pasteTarget?: boolean
+}) {
   const node     = nodes.find((n) => n.id === nodeId)
   const data     = node?.data as { params: Record<string, unknown> } | undefined
   const preview  = data?.params.preview as string | undefined
@@ -182,6 +188,23 @@ function ImageParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: Flow
   const browse = useCallback(async () => {
     await applyImagePath(await window.electron.fs.selectImage())
   }, [applyImagePath])
+
+  // Ctrl+V outside text fields: the clipboard image is saved to the workspace
+  // (the node needs a file path), then loaded like a browsed one.
+  const applyRef = useRef(applyImagePath)
+  applyRef.current = applyImagePath
+  useEffect(() => {
+    if (!pasteTarget) return
+    const onPaste = (event: ClipboardEvent) => {
+      const file = takePastedImage(event)
+      if (!file) return
+      saveImageToWorkspace(file, 'pasted-image')
+        .then((path) => applyRef.current(path))
+        .catch((err: unknown) => showToast(err instanceof Error ? err.message : 'Unable to paste the image'))
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+  }, [pasteTarget, showToast])
 
   return (
     <div
@@ -219,6 +242,7 @@ function ImageParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: Flow
             <polyline points="21 15 16 10 5 21"/>
           </svg>
           <span className="text-[10px] text-zinc-500">Browse image…</span>
+          {pasteTarget && <span className="text-[9px] text-zinc-600">or paste with Ctrl+V</span>}
         </button>
       )}
     </div>
@@ -526,6 +550,8 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
   // An image handed over by another page (Home) goes into the first image input
   // shown here, exactly as if it had been browsed in this panel.
   const pendingImage = useImageHandoff((s) => s.pendingPath)
+  // Ctrl+V goes to the same input.
+  const pasteTargetId = paramNodes.find((n) => n.type === 'imageNode')?.id
   useEffect(() => {
     const path = useImageHandoff.getState().take()
     if (!path) return
@@ -567,7 +593,7 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
           const isLast = i === paramNodes.length - 1
           return (
             <div key={node.id}>
-              {node.type === 'imageNode' && <ImageParamRow nodeId={node.id} nodes={nodes} onPatch={patchNode} />}
+              {node.type === 'imageNode' && <ImageParamRow nodeId={node.id} nodes={nodes} onPatch={patchNode} pasteTarget={node.id === pasteTargetId} />}
               {node.type === 'textNode'  && <TextParamRow  nodeId={node.id} nodes={nodes} onPatch={patchNode} />}
               {node.type === 'meshNode'  && <MeshParamRow  nodeId={node.id} nodes={nodes} onPatch={patchNode} />}
               {node.type === 'waitNode'  && <WaitParamRow  nodeId={node.id} />}
