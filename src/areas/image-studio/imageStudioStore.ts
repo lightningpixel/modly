@@ -5,7 +5,7 @@ import { create } from 'zustand'
 // level, and survives navigation (not app restarts).
 //
 // An image made from another one (an image operation, e.g. background
-// removal) records it as `sourceId`; the studio compares the two before/after.
+// removal) records it as `sourceId`, so re-running the op starts from the original.
 
 export interface StudioImage {
   id: string
@@ -16,6 +16,10 @@ export interface StudioImage {
   name: string
   /** The image this one was produced from, when it came from an operation. */
   sourceId?: string
+  /** Id of the image operation that produced it (e.g. background removal). */
+  op?: string
+  /** Absolute path of the mask the operation wrote alongside, if any. */
+  maskPath?: string
   createdAt: number
 }
 
@@ -37,7 +41,7 @@ export function addToHistory(history: StudioHistory, entry: StudioImage, max = M
 
 /**
  * Drops entries from the history. Images made from a dropped one lose their
- * source (nothing to compare with any more); the selection moves to the
+ * source (a re-run then starts from them); the selection moves to the
  * neighbour of the removed image.
  */
 export function withoutEntries(history: StudioHistory, ids: readonly string[]): { history: StudioHistory, dropped: StudioImage[] } {

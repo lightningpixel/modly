@@ -17,9 +17,12 @@ export interface SseEvent {
   paused?:          boolean
 }
 
-/** Reads one SSE `data: {...}` frame at a time and calls `onEvent` for each. */
-export async function consumeSse(url: string, onEvent: (data: SseEvent) => void, signal?: AbortSignal): Promise<void> {
-  const res = await fetch(url, { signal })
+/**
+ * Reads one SSE `data: {...}` frame at a time and calls `onEvent` for each.
+ * `init` sets the method/body for streams opened with a POST.
+ */
+export async function consumeSse(url: string, onEvent: (data: SseEvent) => void, signal?: AbortSignal, init?: RequestInit): Promise<void> {
+  const res = await fetch(url, { ...init, signal })
   if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
