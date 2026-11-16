@@ -9,6 +9,7 @@ import * as tar from 'tar'
 import * as os from 'os'
 import { promisify } from 'util'
 import { PythonBridge, apiBaseUrl } from './python-bridge'
+import { apiClient } from './api-auth'
 import {
   isModelDownloaded,
   listDownloadedModels,
@@ -221,7 +222,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   async function unloadForRemoval(modelIds: string[]) {
     for (const id of modelIds) {
       try {
-        const response = await axios.post(
+        const response = await apiClient.post(
           `${apiBaseUrl()}/model/unload/${encodeURIComponent(id)}`, {}, { timeout: 40_000 },
         )
         if (response.data?.unloaded !== true) throw new Error('Model unload was not confirmed; weights were preserved')
@@ -235,7 +236,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   async function unloadExtensionForRemoval(extensionId: string) {
     let modelIds: string[]
     try {
-      const { data } = await axios.get<{ id: string }[]>(`${apiBaseUrl()}/model/all`, { timeout: 10_000 })
+      const { data } = await apiClient.get<{ id: string }[]>(`${apiBaseUrl()}/model/all`, { timeout: 10_000 })
       modelIds = data.map((model) => model.id).filter((id) => id.startsWith(`${extensionId}/`))
     } catch (err) {
       if (backendUnreachable(err)) return
@@ -428,7 +429,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   ipcMain.handle('model:unloadAll', async (): Promise<{ success: boolean; error?: string }> => {
     try {
-      await axios.post(`${apiBaseUrl()}/model/unload-all`, {}, { timeout: 10_000 })
+      await apiClient.post(`${apiBaseUrl()}/model/unload-all`, {}, { timeout: 10_000 })
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -781,7 +782,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       const targetId = active?.currentTargetId
       if (!active || !targetId) return { success: false, error: 'No active download target' }
       active.stopRequested = 'pause'
-      await axios.post(`${apiBaseUrl()}/model/hf-download/pause`, null, {
+      await apiClient.post(`${apiBaseUrl()}/model/hf-download/pause`, null, {
         params: { model_id: targetId },
         timeout: 5000,
       })
@@ -796,7 +797,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       const active = activeDownloads.get(modelId)
       if (active) active.stopRequested = 'cancel'
       if (active?.currentTargetId) {
-        await axios.post(`${apiBaseUrl()}/model/hf-download/cancel`, null, {
+        await apiClient.post(`${apiBaseUrl()}/model/hf-download/cancel`, null, {
           params: { model_id: active.currentTargetId },
           timeout: 5000,
         })
@@ -848,7 +849,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     if (result.canceled || !result.filePath) return { success: false }
 
     try {
-      const response = await axios.get(
+      const response = await apiClient.get(
         `${apiBaseUrl()}/export/${format}?path=${encodeURIComponent(meshPath)}`,
         { responseType: 'arraybuffer' }
       )
@@ -964,7 +965,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       // subprocesses spawned by ExtensionProcess._build_env() pick it up
       // without requiring a full app restart.
       try {
-        await axios.post(`${apiBaseUrl()}/settings/hf-token`, { token: hfToken }, { timeout: 3000 })
+        await apiClient.post(`${apiBaseUrl()}/settings/hf-token`, { token: hfToken }, { timeout: 3000 })
       } catch { /* FastAPI may not be running yet — ignore */ }
     }
     return { ...getSettings(app.getPath('userData')), hfToken: getHfToken() }
@@ -1361,7 +1362,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
     let payload: unknown
     try {
-      const response = await axios.post(
+      const response = await apiClient.post(
         `${apiBaseUrl()}/extensions/reload`,
         validationCapability ? { validationCapability } : {},
         { timeout: 10_000 },
@@ -1384,7 +1385,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
     let payload: unknown
     try {
-      const response = await axios.post(
+      const response = await apiClient.post(
         `${apiBaseUrl()}/extensions/reload`,
         {},
         { timeout: 10_000 },
@@ -1947,7 +1948,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       }
       // Hot-reload Python so it stops using the deleted model extension
       try {
-        await axios.post(`${apiBaseUrl()}/extensions/reload`, {}, { timeout: 10_000 })
+        await apiClient.post(`${apiBaseUrl()}/extensions/reload`, {}, { timeout: 10_000 })
       } catch { /* ignore if Python is not running */ }
       return { success: true }
     } catch (err) {
@@ -2180,7 +2181,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   ipcMain.handle('extensions:reload', async () => {
     terminateAllProcessRunners()
     try {
-      const res = await axios.post(`${apiBaseUrl()}/extensions/reload`, {}, { timeout: 10_000 })
+      const res = await apiClient.post(`${apiBaseUrl()}/extensions/reload`, {}, { timeout: 10_000 })
       return { success: true, errors: (res.data as { errors?: Record<string, string> }).errors ?? {} }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -2251,7 +2252,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       if (patch.modelsDir !== undefined && weightOperations.busy) {
         throw new Error('Cannot change model storage while model weights are busy')
       }
-      await axios.post(`${apiBaseUrl()}/settings/paths`, {
+      await apiClient.post(`${apiBaseUrl()}/settings/paths`, {
         models_dir:     patch.modelsDir,
         workspace_dir:  patch.workspaceDir,
         extensions_dir: patch.extensionsDir,

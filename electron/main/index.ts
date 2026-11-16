@@ -9,6 +9,7 @@ import { syncBuiltinExtensions } from './builtin-sync'
 import { reconcileInterruptedExtensionInstalls } from './extension-install-recovery'
 import { getSettings } from './settings-store'
 import { handleThumbnailProtocol, registerThumbnailScheme } from './asset-thumbnail-protocol'
+import { API_TOKEN_HEADER, getApiToken, isApiRequest, isAppNavigation } from './api-auth'
 
 let mainWindow: BrowserWindow | null = null
 let pythonBridge: PythonBridge | null = null
@@ -68,6 +69,17 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
+  // The window only ever shows Modly's own pages: any other page loaded here
+  // would get the API token from the request hook. Links open in the browser.
+  const rendererUrl = is.dev ? process.env['ELECTRON_RENDERER_URL'] : undefined
+  const keepOnApp = (event: Electron.Event, url: string) => {
+    if (isAppNavigation(url, rendererUrl)) return
+    event.preventDefault()
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
+  }
+  mainWindow.webContents.on('will-navigate', keepOnApp)
+  mainWindow.webContents.on('will-redirect', keepOnApp)
+
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
     mainWindow.webContents.openDevTools()
@@ -122,6 +134,23 @@ app.whenReady().then(async () => {
   pythonBridge.setWindowGetter(() => mainWindow)
   setupIpcHandlers(pythonBridge, () => mainWindow)
   initAutoUpdater(() => mainWindow)
+
+  // The backend rejects requests without this launch's token. Adding it here
+  // covers every request of the session (axios, fetch, SSE, three.js loaders,
+  // downloads) with no change in the renderer. The filter has no port, which
+  // matches any port; the backend's port is checked per request because it is
+  // only settled once the bridge starts and may change on a restart.
+  // A session takes a single onBeforeSendHeaders listener: this is the only one.
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: ['http://127.0.0.1/*', 'http://localhost/*'] },
+    (details, callback) => {
+      const port = pythonBridge?.getPort()
+      if (port !== undefined && isApiRequest(details.url, port)) {
+        details.requestHeaders[API_TOKEN_HEADER] = getApiToken()
+      }
+      callback({ requestHeaders: details.requestHeaders })
+    },
+  )
 
   createWindow()
 

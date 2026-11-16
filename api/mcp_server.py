@@ -16,7 +16,9 @@ Configuration in Claude Desktop (~/.config/claude/claude_desktop_config.json):
   }
 
 Requires Modly to be running. Its API is found through MODLY_API_URL, else the
-port the app writes to <userData>/api-port, else http://127.0.0.1:8765.
+port the app writes to <userData>/api-port, else http://127.0.0.1:8765. Calls
+carry the X-Modly-Token the app writes to <userData>/api-token (else env
+MODLY_API_TOKEN; none for a tokenless standalone backend).
 """
 
 import asyncio
@@ -50,6 +52,22 @@ def resolve_api_url() -> str:
         return f"http://127.0.0.1:{port}"
     except (OSError, ValueError):
         return "http://127.0.0.1:8765"
+
+
+def resolve_api_token() -> str | None:
+    """The running app's token from <userData>/api-token, else MODLY_API_TOKEN."""
+    try:
+        token = (_modly_user_data() / "api-token").read_text().strip()
+        if token:
+            return token
+    except OSError:
+        pass
+    return (os.environ.get("MODLY_API_TOKEN") or "").strip() or None
+
+
+def api_headers() -> dict[str, str]:
+    token = resolve_api_token()
+    return {"X-Modly-Token": token} if token else {}
 
 server = Server("modly")
 
@@ -253,7 +271,8 @@ async def list_tools() -> list[Tool]:
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     api_url = resolve_api_url()  # per call: the app may restart on another port
-    async with httpx.AsyncClient(base_url=api_url, timeout=60.0) as client:
+    # Token per call too: it changes on every app launch.
+    async with httpx.AsyncClient(base_url=api_url, timeout=60.0, headers=api_headers()) as client:
         try:
             result = await _dispatch(client, name, arguments)
         except httpx.ConnectError:

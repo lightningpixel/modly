@@ -148,6 +148,14 @@ class BuildEnvTests(unittest.TestCase):
             {"base": str(Path("/tmp/models/ext/_shared/base"))},
         )
 
+    def test_passes_the_api_token_so_extensions_can_call_the_api(self) -> None:
+        from unittest import mock
+        from services import api_auth
+
+        with mock.patch.object(api_auth, "API_TOKEN", "f" * 64):
+            env = _make_proc()._build_env()
+        self.assertEqual(env["MODLY_API_TOKEN"], "f" * 64)
+
 
 class MissingModuleExtractionTests(unittest.TestCase):
     def test_extracts_module_name_from_message(self) -> None:

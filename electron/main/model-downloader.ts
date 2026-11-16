@@ -6,6 +6,7 @@ import { existsSync, readdirSync, statSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { getHfToken } from './hf-token'
 import { apiBaseUrl } from './python-bridge'
+import { apiAuthHeaders } from './api-auth'
 import type { ModelSource } from './model-sources'
 
 export interface DownloadProgress {
@@ -133,7 +134,9 @@ export async function downloadModelFromHF(
   // python-bridge pipes that into runtime.log, and `log:readAll` hands that file
   // to the user for bug reports. The token used to ride all the way there.
   const hfToken = getHfToken()   // decrypted cache — settings.json holds the ciphertext
-  const res = await net.fetch(url, hfToken ? { headers: { 'X-HF-Token': hfToken } } : undefined)
+  const headers: Record<string, string> = apiAuthHeaders()
+  if (hfToken) headers['X-HF-Token'] = hfToken
+  const res = await net.fetch(url, { headers })
   if (!res.ok) throw new Error(`HuggingFace download failed: HTTP ${res.status}`)
   await consumeDownloadStream(res, onProgress)
 }
@@ -145,7 +148,7 @@ export async function downloadModelSourcesFromHF(
   onProgress: ProgressCallback,
 ): Promise<void> {
   const { net } = require('electron')
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', ...apiAuthHeaders() }
   const hfToken = getHfToken()
   if (hfToken) headers.Authorization = `Bearer ${hfToken}`
   const url = `${pythonApiUrl()}/model/hf-download-sources?model_id=${encodeURIComponent(modelId)}`

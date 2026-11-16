@@ -569,6 +569,75 @@ class ServeConfigTests(unittest.TestCase):
             self.assertTrue(cmd[0].endswith("python.exe"))
             self.assertIn("PYTHONUNBUFFERED", env)
 
+    def test_resolve_serve_config_starts_a_tokenless_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            api_dir = Path(td) / "api"
+            api_dir.mkdir()
+            (api_dir / "main.py").write_text("# api")
+            python = Path(td) / "python.exe"
+            python.write_text("# python")
+            args = SimpleNamespace(api_dir=str(api_dir), python=str(python), host="127.0.0.1", port=8765,
+                                   models_dir=None, workspace_dir=None, extensions_dir=None, model=None, hf_token=None)
+            locked = {"MODLY_API_TOKEN": "a" * 64, "MODLY_ALLOWED_ORIGINS": "null"}
+            with patch.dict(os.environ, locked), \
+                    patch.object(agent, "_load_modly_settings", return_value={}):
+                _api_dir, _python, env, _cmd, _url = agent._resolve_serve_config(args)
+            self.assertNotIn("MODLY_API_TOKEN", env)
+            self.assertNotIn("MODLY_ALLOWED_ORIGINS", env)
+
+
+class ApiTokenTests(unittest.TestCase):
+    def _user_data(self, td: str, token: str | None) -> Path:
+        folder = Path(td)
+        if token is not None:
+            (folder / "api-token").write_text(token)
+        return folder
+
+    def test_reads_the_token_the_app_wrote_next_to_api_port(self) -> None:
+        with tempfile.TemporaryDirectory() as td, \
+                patch.object(agent, "_modly_user_data", return_value=self._user_data(td, "abc123\n")), \
+                patch.dict(os.environ, {"MODLY_API_TOKEN": "from-env"}):
+            self.assertEqual(agent.resolve_api_token(), "abc123")
+
+    def test_falls_back_to_env_then_none(self) -> None:
+        with tempfile.TemporaryDirectory() as td, \
+                patch.object(agent, "_modly_user_data", return_value=self._user_data(td, None)):
+            with patch.dict(os.environ, {"MODLY_API_TOKEN": "from-env"}):
+                self.assertEqual(agent.resolve_api_token(), "from-env")
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertIsNone(agent.resolve_api_token())
+                self.assertEqual(agent._auth_headers("http://127.0.0.1:8765/health"), {})
+
+    def test_token_is_only_sent_to_the_local_app(self) -> None:
+        with patch.object(agent, "resolve_api_token", return_value="secret"):
+            self.assertEqual(agent._auth_headers("http://127.0.0.1:8765/x"), {"X-Modly-Token": "secret"})
+            self.assertEqual(agent._auth_headers("http://localhost:8765/x"), {"X-Modly-Token": "secret"})
+            self.assertEqual(agent._auth_headers("http://[::1]:8765/x"), {"X-Modly-Token": "secret"})
+            self.assertEqual(agent._auth_headers("http://192.168.1.20:8765/x"), {})
+            self.assertEqual(agent._auth_headers("https://modly.example.test/x"), {})
+
+    def test_requests_and_downloads_send_the_token_header(self) -> None:
+        seen: list[object] = []
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(req, timeout):
+            seen.append(req)
+            return _Resp(b"{}")
+
+        with tempfile.TemporaryDirectory() as td, \
+                patch.object(agent, "_modly_user_data", return_value=self._user_data(td, "tok")), \
+                patch.object(agent.urllib.request, "urlopen", fake_urlopen):
+            agent._request_json("GET", "http://127.0.0.1:8765/model/all", timeout=1, headers={"Accept": "x"})
+            agent._download("http://127.0.0.1:8765/workspace/a.glb", Path(td) / "out" / "a.glb", timeout=1)
+        self.assertEqual([r.get_header("X-modly-token") for r in seen], ["tok", "tok"])
+        self.assertEqual(seen[0].get_header("Accept"), "x")
+
 
 class ParserTests(unittest.TestCase):
     def test_canonical_dev_experimental_and_legacy_subcommands_parse(self) -> None:

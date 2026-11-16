@@ -1,3 +1,4 @@
+import axios from 'axios'
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import type { ReactNode } from 'react'
 import { useAppStore, DEFAULT_LIGHT_SETTINGS } from '@shared/stores/appStore'
@@ -15,7 +16,7 @@ import { commitSculpt, useSculptStore } from './sculpt/sculptStore'
 import { sculptKeyAction } from './sculpt/sculptLogic'
 import { getDefaultAssetLibraryService } from './assetLibraryService'
 import { requestLibraryThumbnails } from '@shared/thumbnails/assetThumbnailService'
-import { buildOrcaSlicerDeepLink, canOpenInOrcaSlicer } from './orcaSlicerLink'
+import { SLICER_FORMAT, canOpenInOrcaSlicer, orcaSlicerDeepLink, orcaSlicerSourcePath } from './orcaSlicerLink'
 import type { ProjectedAssetLibraryEntry } from './assetLibraryProjection'
 import { useNavStore } from '@shared/stores/navStore'
 import {
@@ -852,7 +853,13 @@ export default function GeneratePage(): JSX.Element {
     const outputUrl = await committedMeshUrl()
     if (!outputUrl) return
     try {
-      const link = buildOrcaSlicerDeepLink(apiUrl, outputUrl)
+      const sourcePath = orcaSlicerSourcePath(outputUrl)
+      if (!sourcePath) throw new Error('This model cannot be opened in OrcaSlicer.')
+      // OrcaSlicer fetches the mesh without the API token: the backend signs the URL.
+      const { data } = await axios.get<{ url_path: string }>(`${apiUrl}/export/slicer-link`, {
+        params: { fmt: SLICER_FORMAT, path: sourcePath },
+      })
+      const link = orcaSlicerDeepLink(apiUrl, data.url_path)
       const result = await window.electron.slicer.open(link)
       if (!result.success) {
         // Deliberately not "make sure it is installed": the main process cannot

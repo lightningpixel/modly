@@ -242,6 +242,10 @@ WORKSPACE_DIR=$HOME/.modly/workspace \
 > Optional: `export HF_TOKEN=hf_...` before launching to avoid HuggingFace rate-limits
 > on the one-time ~4 GB weight download.
 
+> Started this way (no `MODLY_API_TOKEN`), the API is tokenless: no `X-Modly-Token`
+> header is needed and it logs `API token disabled` once. Set `MODLY_API_TOKEN` to require
+> that header on every request except `GET /health`.
+
 Check it (from the Jetson, or from another machine using the Jetson's IP):
 
 ```bash

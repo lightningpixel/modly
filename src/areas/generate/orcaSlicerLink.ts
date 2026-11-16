@@ -7,6 +7,12 @@
 // query string, and the whole thing must be percent-encoded. OrcaSlicer cannot
 // import GLB, so we point at the backend's slicer-export route which converts to
 // STL on the fly.
+//
+// OrcaSlicer is an external app: it fetches that URL without the API token, so
+// the URL carries a signature of the source path instead. Only the backend can
+// sign (the renderer never sees the token): ask `GET /export/slicer-link` for
+// the `url_path` of `orcaSlicerSourcePath(outputUrl)`, then build the deeplink
+// with `orcaSlicerDeepLink`. Links stop working when Modly restarts.
 
 /** Format handed to OrcaSlicer. STL is universal and OrcaSlicer auto-repairs it. */
 export const SLICER_FORMAT = 'stl'
@@ -20,14 +26,6 @@ const SERVE_FILE_PREFIX = '/optimize/serve-file?path='
  */
 const SLICEABLE_SOURCE = /\.(glb|gltf|obj|stl)$/i
 
-/** URL-safe base64 (no padding) of a UTF-8 string — matches the API's token decode. */
-export function encodeWorkspacePathToken(workspacePath: string): string {
-  const bytes = new TextEncoder().encode(workspacePath)
-  let binary = ''
-  for (const b of bytes) binary += String.fromCharCode(b)
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
-
 /**
  * The source path the slicer route should convert, or `undefined` when the
  * output cannot be sliced.
@@ -37,7 +35,7 @@ export function encodeWorkspacePathToken(workspacePath: string): string {
  * from elsewhere on disk). Both are sliceable — the API accepts the absolute
  * path of an import because it recorded that the user picked it themselves.
  */
-function sliceableSourcePath(outputUrl: string | undefined): string | undefined {
+export function orcaSlicerSourcePath(outputUrl: string | undefined): string | undefined {
   if (!outputUrl) return undefined
 
   if (outputUrl.startsWith('/workspace/')) {
@@ -59,21 +57,18 @@ function sliceableSourcePath(outputUrl: string | undefined): string | undefined 
  * user-selected import.
  */
 export function canOpenInOrcaSlicer(outputUrl: string | undefined): boolean {
-  return sliceableSourcePath(outputUrl) !== undefined
+  return orcaSlicerSourcePath(outputUrl) !== undefined
 }
 
 /**
- * Build the `orcaslicer://open?file=...` deeplink for a generated mesh.
+ * The `orcaslicer://open?file=...` deeplink for a signed slicer URL.
  *
- * @param apiUrl    Modly backend origin, e.g. `http://localhost:8765`
- * @param outputUrl workspace or serve-file URL of the mesh
- * @throws if `outputUrl` is not sliceable — guard with {@link canOpenInOrcaSlicer}
+ * @param apiUrl  Modly backend origin, e.g. `http://localhost:8765`
+ * @param urlPath `url_path` returned by `GET /export/slicer-link`
+ *                (`/export/slicer/stl/<signed token>/model.stl`)
  */
-export function buildOrcaSlicerDeepLink(apiUrl: string, outputUrl: string): string {
-  const sourcePath = sliceableSourcePath(outputUrl)
-  if (!sourcePath) throw new Error(`Not sliceable: ${outputUrl}`)
-  const token = encodeWorkspacePathToken(sourcePath)
+export function orcaSlicerDeepLink(apiUrl: string, urlPath: string): string {
   const base = apiUrl.replace(/\/+$/, '')
-  const modelUrl = `${base}/export/slicer/${SLICER_FORMAT}/${token}/model.${SLICER_FORMAT}`
-  return `orcaslicer://open?file=${encodeURIComponent(modelUrl)}`
+  const path = urlPath.startsWith('/') ? urlPath : `/${urlPath}`
+  return `orcaslicer://open?file=${encodeURIComponent(`${base}${path}`)}`
 }

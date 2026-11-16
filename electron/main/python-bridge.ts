@@ -12,6 +12,7 @@ import {
   DEFAULT_API_PORT, findPortHolder, isModlyBackend, isPortFree, killListener, osAssignedPort,
   pickPort, removePortFile, writePortFile,
 } from './api-port'
+import { allowedOrigins, getApiToken, removeTokenFile, writeTokenFile } from './api-auth'
 
 const API_HOST = '127.0.0.1'
 // 8765 unless another program holds it; chosen again at every start.
@@ -75,6 +76,9 @@ export class PythonBridge {
       logger.python(msg)
     }
 
+    // Tools outside the app need the token as soon as the backend answers.
+    writeTokenFile(app.getPath('userData'), getApiToken())
+
     try {
       this.process = spawn(pythonExecutable, ['-m', 'uvicorn', 'main:app', '--host', API_HOST, '--port', String(apiPort)], {
         cwd: apiDir,
@@ -100,6 +104,10 @@ export class PythonBridge {
           HF_TOKEN:               this.resolveHfToken(),
           // The port is not fixed: the API and the extensions it runs call back here.
           MODLY_API_URL:          apiBaseUrl(),
+          // Every request but /health must carry this token (see api-auth.ts),
+          // and CORS only lets the app's own pages in.
+          MODLY_API_TOKEN:        getApiToken(),
+          MODLY_ALLOWED_ORIGINS:  allowedOrigins(process.env['ELECTRON_RENDERER_URL']).join(','),
         },
         // On Unix, put the bridge in its own process group so every subprocess
         // it spawns (extension runners, etc.) inherits that group. On shutdown
@@ -171,6 +179,7 @@ export class PythonBridge {
     this.process = null
     this.ready = false
     removePortFile(app.getPath('userData'))
+    removeTokenFile(app.getPath('userData'))
     if (process.platform === 'win32') {
       const { execSync } = require('child_process')
       try { execSync(`taskkill /PID ${proc.pid} /T /F`) } catch {}
@@ -216,6 +225,7 @@ export class PythonBridge {
     for (let i = 0; i < maxRetries; i++) {
       if (!this.process) throw await this.startupError()
       try {
+        // /health is open, and no token here: it may be some other program.
         await axios.get(`${apiBaseUrl()}/health`, { timeout: 2000 })
         this.ready = true
         writePortFile(app.getPath('userData'), apiPort)

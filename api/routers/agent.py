@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from services import llm_server
+from services import api_auth, llm_server
 from services import ollama_health as ollama_health_service
 from services.llm_server import llama_pool
 from services.mesh_ops import MeshOp, MeshOpNotFoundError, MeshOpsRegistry, mesh_ops_registry
@@ -589,7 +589,8 @@ async def execute_tool(
     action_payload carries data the frontend needs to react (e.g. new mesh URL).
     has_image: the user's last message carries an image (generate_from_image).
     """
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    # Every call here goes back into this API, which may be token-locked.
+    async with httpx.AsyncClient(timeout=timeout, headers=api_auth.auth_headers()) as client:
         try:
             op = _agent_op(name)
             if op is not None:

@@ -48,13 +48,16 @@ function fixture(t) {
     },
   }
   const stub = new Proxy({}, { get: () => () => {} })
+  const axios = {
+    post: (...args) => hooks.unload(...args),
+    get: (...args) => hooks.listModels(...args),
+    isAxiosError: (err) => Boolean(err?.isAxiosError),
+  }
   const deps = (name) => {
     if (name === 'electron') return { ipcMain: { handle: (id, fn) => handlers.set(id, fn), on: () => {} }, app: { getPath: () => root, on: () => {} } }
-    if (name === 'axios') return {
-      post: (...args) => hooks.unload(...args),
-      get: (...args) => hooks.listModels(...args),
-      isAxiosError: (err) => Boolean(err?.isAxiosError),
-    }
+    if (name === 'axios') return axios
+    // Backend calls go through the token-adding client.
+    if (name === './api-auth') return { apiClient: axios }
     if (name === './model-sources') return realSources
     if (name === './model-download-plan') return realPlan
     if (name === './extension-path-guard') return realGuard

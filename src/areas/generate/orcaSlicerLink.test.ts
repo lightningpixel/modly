@@ -3,39 +3,41 @@ import test from 'node:test'
 
 import {
   SLICER_FORMAT,
-  buildOrcaSlicerDeepLink,
   canOpenInOrcaSlicer,
-  encodeWorkspacePathToken,
+  orcaSlicerDeepLink,
+  orcaSlicerSourcePath,
 } from './orcaSlicerLink.ts'
 
+// A url_path as returned by GET /export/slicer-link (token = signed source path).
+const URL_PATH = '/export/slicer/stl/V29ya2Zsb3dzL2hlcm8uZ2xi.c2lnbmF0dXJl/model.stl'
+
 test('builds an orcaslicer://open deeplink whose file= is a percent-encoded, query-less URL ending in model.stl', () => {
-  const link = buildOrcaSlicerDeepLink('http://localhost:8765', '/workspace/Workflows/checkpoints/hero.glb')
+  const link = orcaSlicerDeepLink('http://localhost:8765', URL_PATH)
   assert.ok(link.startsWith('orcaslicer://open?file='))
   const modelUrl = decodeURIComponent(link.slice('orcaslicer://open?file='.length))
   // OrcaSlicer derives the import format from the URL's final path segment, so
   // it must end in the real extension and carry no query string.
   assert.ok(!modelUrl.includes('?'), 'model URL must not contain a query string')
   assert.ok(modelUrl.endsWith('/model.stl'), 'model URL must end in model.stl')
-  assert.equal(
-    modelUrl,
-    `http://localhost:8765/export/slicer/stl/${encodeWorkspacePathToken('Workflows/checkpoints/hero.glb')}/model.stl`,
-  )
+  assert.equal(modelUrl, `http://localhost:8765${URL_PATH}`)
 })
 
-test('token round-trips a workspace path through url-safe base64 (matches the API decode)', () => {
-  const path = 'Workflows/checkpoints/hero model (v2).glb'
-  const token = encodeWorkspacePathToken(path)
-  assert.ok(!/[+/=]/.test(token), 'token must be url-safe with no padding')
-  // Decode the way the Python API does: restore padding, then urlsafe-decode.
-  const padded = token + '='.repeat((4 - (token.length % 4)) % 4)
-  const decoded = Buffer.from(padded.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf-8')
-  assert.equal(decoded, path)
+test('strips a trailing slash from the api origin and tolerates a path without a leading slash', () => {
+  const a = decodeURIComponent(orcaSlicerDeepLink('http://localhost:8765/', URL_PATH).slice('orcaslicer://open?file='.length))
+  const b = decodeURIComponent(orcaSlicerDeepLink('http://localhost:8765', URL_PATH.slice(1)).slice('orcaslicer://open?file='.length))
+  assert.equal(a, `http://localhost:8765${URL_PATH}`)
+  assert.equal(b, `http://localhost:8765${URL_PATH}`)
 })
 
-test('strips a trailing slash from the api origin', () => {
-  const link = buildOrcaSlicerDeepLink('http://localhost:8765/', '/workspace/a.glb')
-  const modelUrl = decodeURIComponent(link.slice('orcaslicer://open?file='.length))
-  assert.equal(modelUrl, `http://localhost:8765/export/slicer/stl/${encodeWorkspacePathToken('a.glb')}/model.stl`)
+test('orcaSlicerSourcePath: workspace meshes give their workspace-relative path', () => {
+  assert.equal(orcaSlicerSourcePath('/workspace/Workflows/checkpoints/hero.glb'), 'Workflows/checkpoints/hero.glb')
+  assert.equal(orcaSlicerSourcePath('/workspace/Foo/scan.splat'), undefined)
+  assert.equal(orcaSlicerSourcePath(undefined), undefined)
+})
+
+test('orcaSlicerSourcePath: an imported mesh gives its decoded absolute path', () => {
+  const absolute = String.raw`C:\Users\Me\Downloads\mage_v2.glb`
+  assert.equal(orcaSlicerSourcePath(`/optimize/serve-file?path=${encodeURIComponent(absolute)}`), absolute)
 })
 
 test('canOpenInOrcaSlicer accepts sliceable workspace meshes and rejects splats and empty', () => {
@@ -58,23 +60,6 @@ test('canOpenInOrcaSlicer accepts an imported mesh served from outside the works
   assert.equal(canOpenInOrcaSlicer('/optimize/serve-file?path=%2Ftmp%2Fx.glb'), true)
   assert.equal(canOpenInOrcaSlicer('/optimize/serve-file?path=C%3A%5CUsers%5CMe%5Cmage.glb'), true)
   assert.equal(canOpenInOrcaSlicer('/optimize/serve-file?path=%2Ftmp%2Fscan.splat'), false)
-})
-
-test('deeplink for an imported mesh tokenises the decoded absolute path', () => {
-  const absolute = String.raw`C:\Users\Me\Downloads\mage_v2.glb`
-  const outputUrl = `/optimize/serve-file?path=${encodeURIComponent(absolute)}`
-  const modelUrl = decodeURIComponent(
-    buildOrcaSlicerDeepLink('http://localhost:8765', outputUrl).slice('orcaslicer://open?file='.length),
-  )
-  assert.equal(
-    modelUrl,
-    `http://localhost:8765/export/slicer/stl/${encodeWorkspacePathToken(absolute)}/model.stl`,
-  )
-  assert.ok(!modelUrl.includes('?'), 'model URL must not contain a query string')
-})
-
-test('buildOrcaSlicerDeepLink refuses an output it cannot slice', () => {
-  assert.throws(() => buildOrcaSlicerDeepLink('http://localhost:8765', '/workspace/Foo/scan.splat'))
 })
 
 test('SLICER_FORMAT is a format OrcaSlicer can import', () => {

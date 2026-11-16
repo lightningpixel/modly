@@ -93,6 +93,12 @@ class ExtensionProcess:
         env["MODLY_API_DIR"] = str(Path(__file__).parent.parent)
         # Lets extensions call back into the Modly API (e.g. /llm/chat for the shared LLM).
         env.setdefault("MODLY_API_URL", "http://127.0.0.1:8765")
+        # The API is locked to the app: an extension calling it must send
+        # `X-Modly-Token: $MODLY_API_TOKEN`. Inherited already; explicit so it
+        # survives any future env scrubbing. Absent in tokenless mode.
+        from services import api_auth
+        if api_auth.API_TOKEN:
+            env[api_auth.TOKEN_ENV] = api_auth.API_TOKEN
         # Force the worker's Python stdio to UTF-8 so it matches the UTF-8
         # pipe readers below regardless of the OS locale (cp1252/cp932).
         env["PYTHONUTF8"] = "1"

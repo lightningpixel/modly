@@ -14,7 +14,7 @@ metadata:
 
 ## Overview
 
-Modly exposes a local API at `http://127.0.0.1:8765` while the official desktop app is running. If another program holds that port, the app uses the next free one and writes it to `api-port` in its user data folder (`%APPDATA%/Modly`, `~/Library/Application Support/Modly`, `~/.config/Modly`); the CLI reads it, and `MODLY_API_URL` overrides both. The stdlib-only CLI at `tools/modly-cli/agent.py` is an agent helper over the canonical automation contract:
+Modly exposes a local API at `http://127.0.0.1:8765` while the official desktop app is running. If another program holds that port, the app uses the next free one and writes it to `api-port` in its user data folder (`%APPDATA%/Modly`, `~/Library/Application Support/Modly`, `~/.config/Modly`); the CLI reads it, and `MODLY_API_URL` overrides both. The app also locks its API with a per-launch token, written to `api-token` in the same folder; the CLI sends it as `X-Modly-Token` on every request (falling back to `MODLY_API_TOKEN`), so raw `curl` calls to the app's API need that header too. A backend started with `dev serve-api`/`dev ensure-server --start` is tokenless. The stdlib-only CLI at `tools/modly-cli/agent.py` is an agent helper over the canonical automation contract:
 
 - `health`
 - `model`

@@ -21,6 +21,14 @@ pip install -r requirements.txt
 uvicorn main:app --host 127.0.0.1 --port 8765 --reload
 ```
 
+Run like this, the API is **tokenless**: it accepts every request (CORS `*`) and logs
+`API token disabled` once at startup. The desktop app instead starts it with
+`MODLY_API_TOKEN` (per launch) and `MODLY_ALLOWED_ORIGINS`; every request must then send
+`X-Modly-Token: <token>` or get a 401. `GET /health` and the OrcaSlicer route
+`/export/slicer/...` (HMAC-signed links from `GET /export/slicer-link`) are exempt. The app
+writes the token to `api-token` next to `api-port` in its user data folder for local tools
+(MCP server, modly-cli); extensions get it as `MODLY_API_TOKEN`.
+
 ## Key endpoints
 
 | Method | Path | Description |

@@ -61,6 +61,33 @@ def resolve_base_url() -> str:
         return "http://127.0.0.1:8765"
 
 
+def resolve_api_token() -> str | None:
+    """The running app's API token from api-token (next to api-port), else
+    MODLY_API_TOKEN. None for a tokenless backend (e.g. `dev serve`).
+
+    Read per request: the app writes a fresh token on every launch.
+    """
+    try:
+        token = (_modly_user_data() / "api-token").read_text().strip()
+        if token:
+            return token
+    except OSError:
+        pass
+    return (os.environ.get("MODLY_API_TOKEN") or "").strip() or None
+
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _auth_headers(url: str) -> dict[str, str]:
+    """X-Modly-Token for the local app only: the token is never sent to a
+    remote --base-url (it would hand that host the user's local API)."""
+    if (urllib.parse.urlsplit(url).hostname or "").lower() not in _LOOPBACK_HOSTS:
+        return {}
+    token = resolve_api_token()
+    return {"X-Modly-Token": token} if token else {}
+
+
 DEFAULT_BASE_URL = resolve_base_url()
 DEFAULT_TIMEOUT_SECONDS = _int_env("MODLY_CLI_TIMEOUT", "MODLY_AGENT_TIMEOUT", 1800)
 DEFAULT_POLL_SECONDS = _float_env("MODLY_CLI_POLL_SECONDS", "MODLY_AGENT_POLL_SECONDS", 2.0)
@@ -94,7 +121,7 @@ def _request_json(
     data: bytes | None = None,
     headers: dict[str, str] | None = None,
 ) -> Any:
-    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+    req = urllib.request.Request(url, data=data, method=method, headers={**_auth_headers(url), **(headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
@@ -112,7 +139,8 @@ def _request_json(
 def _download(url: str, dest: Path, *, timeout: float) -> int:
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp, dest.open("wb") as fh:
+        req = urllib.request.Request(url, headers=_auth_headers(url))
+        with urllib.request.urlopen(req, timeout=timeout) as resp, dest.open("wb") as fh:
             total = 0
             while True:
                 chunk = resp.read(1024 * 1024)
@@ -361,6 +389,10 @@ def _resolve_serve_config(args: argparse.Namespace) -> tuple[Path, Path, dict[st
     # Like Electron's cleanPythonEnv(): variables from the caller's own Python setup (a conda env,
     # an activated venv) would point Modly's venv interpreter at foreign site-packages.
     env = {k: v for k, v in os.environ.items() if k not in _FOREIGN_PYTHON_ENV}
+    # A dev backend is tokenless (open API, no X-Modly-Token): never inherit the
+    # app's lock from a shell that runs inside a Modly extension.
+    env.pop("MODLY_API_TOKEN", None)
+    env.pop("MODLY_ALLOWED_ORIGINS", None)
     hf_token =getattr(args, "hf_token", None) or settings.get("hfToken") or os.environ.get("HF_TOKEN", "")
     env.update({
         "PYTHONUNBUFFERED": "1",

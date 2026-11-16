@@ -8,7 +8,7 @@ import trimesh
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response, FileResponse
 
-from services import imported_sources
+from services import api_auth, imported_sources
 # Import the module (not the name) so WORKSPACE_DIR is read at call time: the
 # settings endpoint rebinds it when the user moves the workspace.
 import services.generator_registry as registry
@@ -91,8 +91,13 @@ def _normalize_print_scale(mesh: "trimesh.Trimesh") -> bool:
     return True
 
 
-def _resolve_slicer_source(token: str) -> tuple[Path, str]:
+def _resolve_slicer_source(token: str, fmt: str) -> tuple[Path, str]:
     """Decode ``token`` into an existing source file and its ORIGINAL suffix.
+
+    ``token`` is ``<b64url(path)>[.<b64url(hmac)>]``. OrcaSlicer cannot send the
+    X-Modly-Token header, so when the API is locked the signature (an HMAC of
+    ``fmt`` + path keyed by the API token, see ``api_auth.sign_slicer_source``)
+    is what proves the link came from the app; a missing or wrong one is a 403.
 
     Two kinds of source are accepted:
 
@@ -105,11 +110,14 @@ def _resolve_slicer_source(token: str) -> tuple[Path, str]:
     The returned suffix is the format the user actually supplied — for an import
     that is the pre-conversion extension, which is what decides the up-axis.
     """
+    encoded, signature = api_auth.split_slicer_token(token)
     try:
-        padded = token + "=" * (-len(token) % 4)
+        padded = encoded + "=" * (-len(encoded) % 4)
         decoded = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
     except (binascii.Error, UnicodeDecodeError, ValueError):
         raise HTTPException(400, "Malformed source token")
+    if not api_auth.slicer_signature_valid(fmt, decoded, signature):
+        raise HTTPException(403, "Invalid slicer link signature")
 
     candidate = Path(decoded)
     if candidate.is_absolute():
@@ -144,8 +152,9 @@ def export_for_slicer(fmt: str, token: str, filename: str):
     format — from the URL's FINAL path segment, so a query string (``?path=...``)
     would corrupt the parsed extension and the model would silently fail to
     import. ``token`` is the url-safe-base64 of the source path — workspace-
-    relative, or absolute for a file the user imported this session (see
-    ``_resolve_slicer_source``); ``filename`` (e.g. ``model.stl``) is what
+    relative, or absolute for a file the user imported this session — plus,
+    when the API is locked, ``.<signature>`` (see ``_resolve_slicer_source``;
+    get it from ``GET /export/slicer-link``); ``filename`` (e.g. ``model.stl``) is what
     OrcaSlicer names the download.
     """
     fmt = fmt.lower()
@@ -154,7 +163,7 @@ def export_for_slicer(fmt: str, token: str, filename: str):
     if not filename.lower().endswith(f".{fmt}"):
         raise HTTPException(400, "Filename must end with the requested format extension")
 
-    full_path, source_suffix = _resolve_slicer_source(token)
+    full_path, source_suffix = _resolve_slicer_source(token, fmt)
 
     mesh = _to_single_mesh(trimesh.load(str(full_path)))
     # glTF/GLB is Y-up; OrcaSlicer's world is Z-up. Rotate +90° about X so the
@@ -176,6 +185,22 @@ def export_for_slicer(fmt: str, token: str, filename: str):
         # of the response header. OrcaSlicer names the file from the URL anyway.
         headers={"Content-Disposition": f'attachment; filename="model.{fmt}"'},
     )
+
+
+@router.get("/slicer-link")
+def slicer_link(path: str, fmt: str = "stl"):
+    """The OrcaSlicer URL path for a source mesh, signed for this launch.
+
+    The renderer cannot sign links itself (it never sees the API token), so it
+    asks here — an authenticated call — and hands OrcaSlicer
+    ``<api origin><url_path>``. ``path`` is what the slicer route accepts:
+    workspace-relative, or the absolute path of a file imported this session.
+    """
+    fmt = fmt.lower()
+    if fmt not in SLICER_FORMATS:
+        raise HTTPException(400, f"Unsupported slicer format: {fmt}. Supported: {', '.join(sorted(SLICER_FORMATS))}")
+    token = api_auth.sign_slicer_source(fmt, path)
+    return {"token": token, "url_path": f"/export/slicer/{fmt}/{token}/model.{fmt}"}
 
 
 @router.get("/{fmt}")

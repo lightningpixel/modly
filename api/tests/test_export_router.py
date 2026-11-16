@@ -204,5 +204,93 @@ class ImportedSourceSlicerTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 404)
 
 
+@unittest.skipUnless(HAVE_TRIMESH, "trimesh not installed")
+class SignedSlicerLinkTests(unittest.TestCase):
+    """With an API token, OrcaSlicer links must carry the app's HMAC signature."""
+
+    def setUp(self) -> None:
+        from unittest import mock
+        from services import api_auth
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name).resolve()
+        self._orig_workspace = export_router.registry.WORKSPACE_DIR
+        export_router.registry.WORKSPACE_DIR = self.workspace
+        self.rel = "Workflows/hero.glb"
+        (self.workspace / "Workflows").mkdir(parents=True, exist_ok=True)
+        trimesh.creation.box(extents=[0.3, 1.0, 0.3]).export(str(self.workspace / self.rel))
+        self._patch = mock.patch.object(api_auth, "API_TOKEN", "a" * 64)
+        self._patch.start()
+
+    def tearDown(self) -> None:
+        self._patch.stop()
+        export_router.registry.WORKSPACE_DIR = self._orig_workspace
+        self._tmp.cleanup()
+
+    def _signed(self, fmt: str = "stl", path: str | None = None) -> str:
+        return export_router.slicer_link(path or self.rel, fmt)["token"]
+
+    def test_slicer_link_returns_a_signed_path_only_url(self) -> None:
+        link = export_router.slicer_link(self.rel, "STL")
+        self.assertIn(".", link["token"])
+        self.assertTrue(link["token"].startswith(_token(self.rel) + "."))
+        self.assertEqual(link["url_path"], f"/export/slicer/stl/{link['token']}/model.stl")
+        self.assertNotIn("?", link["url_path"])
+
+    def test_signed_link_is_served(self) -> None:
+        resp = export_router.export_for_slicer("stl", self._signed(), "model.stl")
+        self.assertGreater(len(_load_stl(resp).faces), 0)
+
+    def test_unsigned_link_is_refused(self) -> None:
+        with self.assertRaises(HTTPException) as ctx:
+            export_router.export_for_slicer("stl", _token(self.rel), "model.stl")
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_tampered_signature_is_refused(self) -> None:
+        encoded, sig = self._signed().split(".")
+        bad = encoded + "." + ("A" if sig[0] != "A" else "B") + sig[1:]
+        with self.assertRaises(HTTPException) as ctx:
+            export_router.export_for_slicer("stl", bad, "model.stl")
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_signature_does_not_transfer_to_another_path(self) -> None:
+        other = "Workflows/other.glb"
+        trimesh.creation.box().export(str(self.workspace / other))
+        sig = self._signed().split(".")[1]
+        with self.assertRaises(HTTPException) as ctx:
+            export_router.export_for_slicer("stl", f"{_token(other)}.{sig}", "model.stl")
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_signature_does_not_transfer_to_another_format(self) -> None:
+        with self.assertRaises(HTTPException) as ctx:
+            export_router.export_for_slicer("obj", self._signed("stl"), "model.obj")
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_signature_from_another_launch_is_refused(self) -> None:
+        from unittest import mock
+        from services import api_auth
+
+        with mock.patch.object(api_auth, "API_TOKEN", "b" * 64):
+            stale = self._signed()
+        with self.assertRaises(HTTPException) as ctx:
+            export_router.export_for_slicer("stl", stale, "model.stl")
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_slicer_link_rejects_unsupported_format(self) -> None:
+        with self.assertRaises(HTTPException) as ctx:
+            export_router.slicer_link(self.rel, "glb")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_tokenless_link_is_the_bare_path_token(self) -> None:
+        from unittest import mock
+        from services import api_auth
+
+        with mock.patch.object(api_auth, "API_TOKEN", None):
+            link = export_router.slicer_link(self.rel, "stl")
+            self.assertEqual(link["token"], _token(self.rel))
+            resp = export_router.export_for_slicer("stl", link["token"], "model.stl")
+        self.assertGreater(len(_load_stl(resp).faces), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
