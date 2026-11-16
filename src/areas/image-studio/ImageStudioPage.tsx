@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useState, type CSSProperties } from 'react'
 import { useAppStore } from '@shared/stores/appStore'
 import { useNavStore } from '@shared/stores/navStore'
 import { SUPPORTED_IMAGE_TYPES, saveImageToWorkspace, takePastedImage, useImageHandoff } from '@shared/utils/imageInput'
 import { mimeFromPath } from '@areas/workflows/nodes/imageUtils'
-import { fileNameOf, findByPath, sourceOf, useImageStudioStore, type StudioImage } from './imageStudioStore'
+import { fileNameOf, findByPath, useImageStudioStore, type StudioImage } from './imageStudioStore'
 import ImageOpsToolbar, { type ImageOpActivity, type ImageOpResult } from './ImageOpsToolbar'
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
@@ -43,49 +43,6 @@ async function previewUrlForPath(path: string): Promise<string> {
 
 // ─── Canvas ───────────────────────────────────────────────────────────────────
 
-function CompareView({ before, after }: { before: StudioImage, after: StudioImage }): JSX.Element {
-  const [position, setPosition] = useState(50)
-  const box = useRef<HTMLDivElement>(null)
-
-  const moveTo = (clientX: number) => {
-    const rect = box.current?.getBoundingClientRect()
-    if (!rect || rect.width === 0) return
-    setPosition(Math.min(100, Math.max(0, ((clientX - rect.left) / rect.width) * 100)))
-  }
-
-  return (
-    <div
-      ref={box}
-      className="relative h-full w-full cursor-ew-resize select-none touch-none"
-      onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); moveTo(event.clientX) }}
-      onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) moveTo(event.clientX) }}
-      role="slider"
-      aria-label="Before / after"
-      aria-valuemin={0}
-      aria-valuemax={100}
-      aria-valuenow={Math.round(position)}
-      tabIndex={0}
-      onKeyDown={(event) => {
-        if (event.key === 'ArrowLeft') setPosition((p) => Math.max(0, p - 5))
-        if (event.key === 'ArrowRight') setPosition((p) => Math.min(100, p + 5))
-      }}
-    >
-      <img src={after.previewUrl} alt={after.name} draggable={false} className="absolute inset-0 h-full w-full object-contain" />
-      <img src={before.previewUrl} alt={before.name} draggable={false} className="absolute inset-0 h-full w-full object-contain"
-        style={{ clipPath: `inset(0 ${100 - position}% 0 0)` }} />
-      <div className="pointer-events-none absolute inset-y-0 w-px bg-white/80 shadow-[0_0_0_1px_rgba(0,0,0,0.3)]" style={{ left: `${position}%` }}>
-        <span className="absolute top-1/2 left-1/2 flex h-7 w-7 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-white/70 bg-zinc-900/80 text-white">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="m9 6-6 6 6 6M15 6l6 6-6 6" />
-          </svg>
-        </span>
-      </div>
-      <span className="pointer-events-none absolute top-3 left-3 rounded-md bg-zinc-950/70 px-2 py-0.5 text-[11px] font-medium text-zinc-300">Before</span>
-      <span className="pointer-events-none absolute top-3 right-3 rounded-md bg-zinc-950/70 px-2 py-0.5 text-[11px] font-medium text-zinc-300">After</span>
-    </div>
-  )
-}
-
 /** Object URL of the mask file while `path` is set; revoked when it changes. */
 function useMaskPreview(path: string | undefined): { url: string | null, failed: boolean } {
   const [state, setState] = useState<{ path: string, url: string | null, failed: boolean } | null>(null)
@@ -108,7 +65,7 @@ function useMaskPreview(path: string | undefined): { url: string | null, failed:
   return state && state.path === path ? state : { url: null, failed: false }
 }
 
-function Canvas({ image, source, activity }: { image: StudioImage, source?: StudioImage, activity: string | null }): JSX.Element {
+function Canvas({ image, activity }: { image: StudioImage, activity: string | null }): JSX.Element {
   const [maskFor, setMaskFor] = useState<string | null>(null)
   const showMask = Boolean(image.maskPath) && maskFor === image.id
   const mask = useMaskPreview(showMask ? image.maskPath : undefined)
@@ -118,8 +75,6 @@ function Canvas({ image, source, activity }: { image: StudioImage, source?: Stud
     content = mask.url
       ? <img src={mask.url} alt={`Mask of ${image.name}`} draggable={false} className="absolute inset-0 h-full w-full object-contain" />
       : <span className="absolute inset-0 flex items-center justify-center text-xs text-zinc-500">{mask.failed ? 'Could not load the mask' : 'Loading mask…'}</span>
-  } else if (source) {
-    content = <CompareView key={image.id} before={source} after={image} />
   } else {
     content = <img src={image.previewUrl} alt={image.name} draggable={false} className="absolute inset-0 h-full w-full object-contain" />
   }
@@ -216,7 +171,6 @@ export default function ImageStudioPage(): JSX.Element {
   const [activity, setActivity] = useState<ImageOpActivity | null>(null)
 
   const selected = entries.find((e) => e.id === selectedId)
-  const source = sourceOf(entries, selected)
 
   /** An image already on disk: used where it is, not copied. */
   const addPath = useCallback(async (path: string) => {
@@ -330,7 +284,7 @@ export default function ImageStudioPage(): JSX.Element {
       </header>
 
       {selected
-        ? <Canvas image={selected} source={source} activity={activity?.ids.includes(selected.id) ? activity.label : null} />
+        ? <Canvas image={selected} activity={activity?.ids.includes(selected.id) ? activity.label : null} />
 : <EmptyCanvas busy={busy} onBrowse={browse} />}
 
       {entries.length > 0 && (
