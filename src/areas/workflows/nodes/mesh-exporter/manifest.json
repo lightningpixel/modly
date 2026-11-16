@@ -31,7 +31,7 @@
           "label": "Output Path",
           "type": "string",
           "default": "",
-          "tooltip": "Destination folder or filename with the selected format's extension. Relative paths use the workspace folder. Leave empty to save in the workspace Exports folder."
+          "tooltip": "Destination folder or filename with the selected format's extension. Relative paths use the workspace folder. An existing file with that name is replaced. Leave empty to save in the workspace Exports folder."
         }
       ]
     }
