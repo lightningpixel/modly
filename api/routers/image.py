@@ -136,7 +136,7 @@ async def _run_prepare(op: ImageOp, state: _PrepareState) -> None:
         _broadcast({"error": str(exc)})
 
 
-@router.api_route("/op/{op_name}/prepare", methods=["POST", "GET"])
+@router.post("/op/{op_name}/prepare")
 async def prepare_image_operation(op_name: str):
     """Install what the op is missing, streaming progress. Idempotent: an op
     that is already ready gets a single `done` frame; a call while a prepare is
