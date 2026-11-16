@@ -50,6 +50,18 @@ export const PAGES = [
     wrapperClass: 'flex flex-1 overflow-hidden',
   },
   {
+    id: 'image-studio',
+    label: 'Image Studio',
+    group: 'create',
+    icon: [
+      ['rect', { x: 3, y: 3, width: 18, height: 18, rx: 2 }],
+      ['circle', { cx: 8.5, cy: 8.5, r: 1.5 }],
+      ['path', { d: 'M21 15l-5-5L5 21' }],
+    ],
+    load: () => import('@areas/image-studio/ImageStudioPage'),
+    wrapperClass: 'flex flex-1 overflow-hidden',
+  },
+  {
     id: 'workflows',
     label: 'Workflows',
     group: 'create',
