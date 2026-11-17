@@ -1,4 +1,4 @@
-import { Component, Suspense, useEffect, useMemo, useState } from 'react'
+import { Component, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { Environment, Lightformer, OrbitControls, useGLTF } from '@react-three/drei'
@@ -17,7 +17,6 @@ import {
   CUSTOM_PRINTER_ID,
   MAX_VOLUME_MM,
   MIN_VOLUME_MM,
-  MM_PER_M,
   PRINTER_PRESETS,
   checkFit,
   createLatestGuard,
@@ -25,14 +24,16 @@ import {
   errorForModel,
   isGlbUrl,
   formatVolume,
-  isCalibrated,
   modelSizeMm,
+  parsePrintScale,
   parsePrinterChoice,
   resolveBuildVolume,
   type BuildVolume,
   type ModelError,
+  type PrintScale,
   type PrinterChoice,
 } from './printBed'
+import { slicerSourceToken } from '@areas/generate/orcaSlicerLink'
 import { usePrintStore } from './printStore'
 import { disposeObject, groundPlacement } from '@shared/three/meshScene'
 
@@ -42,11 +43,8 @@ function readStoredPrinter(): PrinterChoice {
   try { return parsePrinterChoice(localStorage.getItem(PRINTER_STORAGE_KEY)) } catch { return parsePrinterChoice(null) }
 }
 
-interface Measured {
-  /** Size in millimetres, glTF units read as metres. */
-  size: BuildVolume
-  calibrated: boolean
-}
+/** A model's bounding-box size, in its own (glTF) units. */
+type Size3 = { x: number, y: number, z: number }
 
 // ─── 3D scene (millimetres) ──────────────────────────────────────────────────
 
@@ -104,15 +102,20 @@ function BuildPlate({ volume, fits }: { volume: BuildVolume, fits: boolean }): J
   )
 }
 
-/** The model at its real size, centred on the plate and resting on it. */
-function PlacedModel({ url, onMeasured }: { url: string, onMeasured: (measured: Measured) => void }): JSX.Element {
+/** The model at its printed size, centred on the plate and resting on it. */
+function PlacedModel({ url, mmPerUnit, onSize }: {
+  url: string
+  mmPerUnit: number
+  onSize: (size: Size3) => void
+}): JSX.Element {
   const { scene } = useGLTF(url)
 
   const placement = useMemo(() => groundPlacement(scene), [scene])
 
   useEffect(() => {
-    onMeasured({ size: modelSizeMm(placement.size), calibrated: isCalibrated(scene.userData) })
-  }, [placement, scene, onMeasured])
+    const { x, y, z } = placement.size
+    onSize({ x, y, z })
+  }, [placement, onSize])
 
   // Free the loader cache and GPU memory when the model changes, as Generate does.
   useEffect(() => () => {
@@ -121,7 +124,7 @@ function PlacedModel({ url, onMeasured }: { url: string, onMeasured: (measured: 
   }, [url, scene])
 
   return (
-    <group scale={MM_PER_M}>
+    <group scale={mmPerUnit}>
       <group position={placement.offset}>
         <primitive object={scene} />
       </group>
@@ -142,11 +145,13 @@ class ModelBoundary extends Component<{ children: ReactNode, resetKey: string, o
   render(): ReactNode { return this.state.failed ? null : this.props.children }
 }
 
-function PlateScene({ volume, modelUrl, fits, onMeasured, onError }: {
+function PlateScene({ volume, modelUrl, mmPerUnit, fits, onSize, onError }: {
   volume: BuildVolume
   modelUrl: string | null
+  /** Null until the print scale is known: the model is not placed before. */
+  mmPerUnit: number | null
   fits: boolean
-  onMeasured: (measured: Measured) => void
+  onSize: (size: Size3) => void
   onError: () => void
 }): JSX.Element {
   const span = Math.max(volume.width, volume.depth, volume.height)
@@ -166,10 +171,10 @@ function PlateScene({ volume, modelUrl, fits, onMeasured, onError }: {
       </Environment>
 
       <BuildPlate volume={volume} fits={fits} />
-      {modelUrl && (
+      {modelUrl && mmPerUnit !== null && (
         <ModelBoundary resetKey={modelUrl} onError={onError}>
           <Suspense fallback={null}>
-            <PlacedModel key={modelUrl} url={modelUrl} onMeasured={onMeasured} />
+            <PlacedModel key={modelUrl} url={modelUrl} mmPerUnit={mmPerUnit} onSize={onSize} />
           </Suspense>
         </ModelBoundary>
       )}
@@ -226,7 +231,9 @@ export default function PrintPage(): JSX.Element {
 
   const [printer, setPrinter] = useState<PrinterChoice>(readStoredPrinter)
   const [assets, setAssets] = useState<ProjectedAssetLibraryEntry[]>([])
-  const [measured, setMeasured] = useState<Measured | null>(null)
+  // Both are kept with the model they belong to, so a stale one never shows.
+  const [modelSize, setModelSize] = useState<{ modelUrl: string, size: Size3 } | null>(null)
+  const [scale, setScale] = useState<{ modelUrl: string, value: PrintScale } | null>(null)
   const [error, setError] = useState<ModelError | null>(null)
   // A library asset opens asynchronously: only the latest choice may apply.
   const [sourceGuard] = useState(createLatestGuard)
@@ -268,7 +275,36 @@ export default function PrintPage(): JSX.Element {
     setSource({ kind: 'library', id: entry.id, name: entry.displayName, url: result.selection.job.outputUrl ?? '' })
   }
 
-  useEffect(() => { setMeasured(null) }, [modelUrl])
+  // The print scale comes from the backend's slicer rule, so the size on the
+  // plate is the size OrcaSlicer receives, calibrated or not.
+  useEffect(() => {
+    if (!modelUrl) return
+    const token = slicerSourceToken(sourceUrl ?? undefined)
+    if (!token) {
+      setError({ modelUrl, message: 'This model cannot be sized for printing.' })
+      return
+    }
+    let cancelled = false
+    fetch(`${apiUrl}/export/print-scale/${token}`)
+      .then(async (response) => (response.ok ? parsePrintScale(await response.json()) : null))
+      .catch(() => null)
+      .then((value) => {
+        if (cancelled) return
+        if (value) setScale({ modelUrl, value })
+        else setError({ modelUrl, message: 'The print size of this model could not be read.' })
+      })
+    return () => { cancelled = true }
+  }, [apiUrl, sourceUrl, modelUrl])
+
+  const onSize = useCallback((size: Size3) => {
+    if (modelUrl) setModelSize({ modelUrl, size })
+  }, [modelUrl])
+
+  const printScale = scale?.modelUrl === modelUrl ? scale.value : null
+  const sizeUnits = modelSize?.modelUrl === modelUrl ? modelSize.size : null
+  const measured = printScale && sizeUnits
+    ? { size: modelSizeMm(sizeUnits, printScale.mmPerUnit), calibrated: printScale.calibrated }
+    : null
 
   const volume = resolveBuildVolume(printer)
   const fit = measured ? checkFit(measured.size, volume) : null
@@ -278,7 +314,7 @@ export default function PrintPage(): JSX.Element {
       <aside className="flex w-72 shrink-0 flex-col gap-5 overflow-y-auto border-r border-zinc-800 bg-surface-400/60 px-4 py-5">
         <div>
           <h1 className="text-[17px] font-semibold tracking-tight text-zinc-100">Print</h1>
-          <p className="mt-0.5 text-[11px] text-zinc-500">See the model on your printer's build plate at its real size.</p>
+          <p className="mt-0.5 text-[11px] text-zinc-500">See the model on your printer's build plate at the size the slicer gets.</p>
         </div>
 
         <Section title="Model">
@@ -339,8 +375,8 @@ export default function PrintPage(): JSX.Element {
               </p>
             )}
             {!measured.calibrated && (
-              <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-200">
-                No real size declared yet: shown as if one unit were a metre. Use <b>Set Real Size</b> in Generate's Edit panel to say how big it is.
+              <p role="note" className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-200">
+                <b>Provisional size.</b> This model has no real size yet, so it is shown at the size the slicer would get. Set a real size with <b>Set Real Size</b> in Generate's Edit panel.
               </p>
             )}
           </Section>
@@ -351,8 +387,9 @@ export default function PrintPage(): JSX.Element {
         <PlateScene
           volume={volume}
           modelUrl={modelUrl}
+          mmPerUnit={printScale?.mmPerUnit ?? null}
           fits={fit?.fits ?? true}
-          onMeasured={setMeasured}
+          onSize={onSize}
           onError={() => setError({ modelUrl, message: 'The model could not be loaded.' })}
         />
         {!modelUrl && (

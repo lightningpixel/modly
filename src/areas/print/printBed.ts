@@ -76,16 +76,6 @@ export function resolveBuildVolume(choice: PrinterChoice): BuildVolume {
   return (PRINTER_PRESETS.find((p) => p.id === choice.presetId) ?? PRINTER_PRESETS[0]).volume
 }
 
-/**
- * Whether a loaded GLB declares its real size (T-H1): the backend's
- * set_real_scale op writes `scenes[n].extras.modly.real_scale = { unit: 'm' }`,
- * which three's GLTFLoader puts on the scene's userData.
- */
-export function isCalibrated(userData: unknown): boolean {
-  const modly = (userData as { modly?: { real_scale?: { unit?: unknown } } } | null)?.modly
-  return modly?.real_scale?.unit === 'm'
-}
-
 /** A viewer mesh URL (/workspace/… or /optimize/serve-file?path=…) that points at a GLB. */
 export function isGlbUrl(url: string): boolean {
   let path = url
@@ -116,9 +106,29 @@ export function createLatestGuard(): { take: () => number, isLatest: (ticket: nu
   return { take: () => ++latest, isLatest: (ticket) => ticket === latest }
 }
 
-/** A model's size in millimetres, from its glTF bounding box (metres, Y up). */
-export function modelSizeMm(size: { x: number, y: number, z: number }): BuildVolume {
-  return { width: size.x * MM_PER_M, depth: size.z * MM_PER_M, height: size.y * MM_PER_M }
+/**
+ * A model's printed size in millimetres, from its glTF bounding box (Y up).
+ * `mmPerUnit` is the backend's print scale (GET /export/print-scale): 1000 for
+ * a calibrated asset (metres), and for an uncalibrated one the provisional
+ * scale the slicer hand-off applies, so the plate and the slicer agree.
+ */
+export function modelSizeMm(size: { x: number, y: number, z: number }, mmPerUnit: number = MM_PER_M): BuildVolume {
+  return { width: size.x * mmPerUnit, depth: size.z * mmPerUnit, height: size.y * mmPerUnit }
+}
+
+/** GET /export/print-scale/{token}: how the slicer hand-off sizes a mesh. */
+export interface PrintScale {
+  calibrated: boolean
+  mmPerUnit: number
+}
+
+/** The backend's answer, or null when it is not a usable scale. */
+export function parsePrintScale(body: unknown): PrintScale | null {
+  const value = body as { calibrated?: unknown, mm_per_unit?: unknown } | null
+  if (!value || typeof value.calibrated !== 'boolean') return null
+  const mmPerUnit = value.mm_per_unit
+  if (typeof mmPerUnit !== 'number' || !Number.isFinite(mmPerUnit) || mmPerUnit <= 0) return null
+  return { calibrated: value.calibrated, mmPerUnit }
 }
 
 export type VolumeSide = keyof BuildVolume

@@ -10,9 +10,9 @@ import {
   describeOverflow,
   errorForModel,
   formatVolume,
-  isCalibrated,
   isGlbUrl,
   modelSizeMm,
+  parsePrintScale,
   parsePrinterChoice,
   resolveBuildVolume,
 } from './printBed'
@@ -48,11 +48,23 @@ test('a model sized exactly to the plate fits despite float noise', () => {
   assert.ok(checkFit(size, PLATE_256).fits)
 })
 
-test('the calibration marker is read from the scene userData', () => {
-  assert.ok(isCalibrated({ modly: { real_scale: { unit: 'm' } } }))
-  assert.ok(!isCalibrated({}))
-  assert.ok(!isCalibrated(null))
-  assert.ok(!isCalibrated({ modly: { real_scale: { unit: 'cm' } } }))
+test('an uncalibrated model is shown, and checked, at the provisional size the slicer gets', () => {
+  // GET /export/print-scale for unit-sized AI output: longest side to 50 mm.
+  const scale = parsePrintScale({ calibrated: false, mm_per_unit: 25 })
+  assert.deepEqual(scale, { calibrated: false, mmPerUnit: 25 })
+  const size = modelSizeMm({ x: 2, y: 1, z: 0.5 }, scale!.mmPerUnit)
+  assert.deepEqual(size, { width: 50, depth: 12.5, height: 25 })
+  assert.ok(checkFit(size, PLATE_256).fits)
+  // The same mesh read as metres would wrongly be flagged as 2 m wide.
+  assert.ok(!checkFit(modelSizeMm({ x: 2, y: 1, z: 0.5 }), PLATE_256).fits)
+})
+
+test('an unusable print scale answer is rejected', () => {
+  assert.deepEqual(parsePrintScale({ calibrated: true, mm_per_unit: 1000 }), { calibrated: true, mmPerUnit: 1000 })
+  assert.equal(parsePrintScale(null), null)
+  assert.equal(parsePrintScale({ calibrated: true }), null)
+  assert.equal(parsePrintScale({ calibrated: false, mm_per_unit: 0 }), null)
+  assert.equal(parsePrintScale({ mm_per_unit: 25 }), null)
 })
 
 test('a stored custom printer is restored and clamped', () => {
