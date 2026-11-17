@@ -93,7 +93,28 @@ export function isGlbUrl(url: string): boolean {
   return /\.(glb|gltf)$/i.test(path)
 }
 
-const MM_PER_M = 1000
+/** glTF units are metres; the plate is drawn in millimetres. */
+export const MM_PER_M = 1000
+
+/** A load error, kept with the model it is about. */
+export interface ModelError {
+  modelUrl: string | null
+  message: string
+}
+
+/** The error to show for the model on screen: one about another model is stale. */
+export function errorForModel(error: ModelError | null, modelUrl: string | null): string | null {
+  return error && error.modelUrl === modelUrl ? error.message : null
+}
+
+/**
+ * Orders async choices: each one takes a ticket, and only the latest ticket
+ * may apply its result, so a slow answer never overrides a newer choice.
+ */
+export function createLatestGuard(): { take: () => number, isLatest: (ticket: number) => boolean } {
+  let latest = 0
+  return { take: () => ++latest, isLatest: (ticket) => ticket === latest }
+}
 
 /** A model's size in millimetres, from its glTF bounding box (metres, Y up). */
 export function modelSizeMm(size: { x: number, y: number, z: number }): BuildVolume {

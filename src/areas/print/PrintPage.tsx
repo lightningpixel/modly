@@ -17,9 +17,12 @@ import {
   CUSTOM_PRINTER_ID,
   MAX_VOLUME_MM,
   MIN_VOLUME_MM,
+  MM_PER_M,
   PRINTER_PRESETS,
   checkFit,
+  createLatestGuard,
   describeOverflow,
+  errorForModel,
   isGlbUrl,
   formatVolume,
   isCalibrated,
@@ -27,12 +30,13 @@ import {
   parsePrinterChoice,
   resolveBuildVolume,
   type BuildVolume,
+  type ModelError,
   type PrinterChoice,
 } from './printBed'
 import { usePrintStore } from './printStore'
+import { disposeObject, groundPlacement } from '@shared/three/meshScene'
 
 const PRINTER_STORAGE_KEY = 'modly.print.printer'
-const MM_PER_M = 1000
 
 function readStoredPrinter(): PrinterChoice {
   try { return parsePrinterChoice(localStorage.getItem(PRINTER_STORAGE_KEY)) } catch { return parsePrinterChoice(null) }
@@ -104,36 +108,21 @@ function BuildPlate({ volume, fits }: { volume: BuildVolume, fits: boolean }): J
 function PlacedModel({ url, onMeasured }: { url: string, onMeasured: (measured: Measured) => void }): JSX.Element {
   const { scene } = useGLTF(url)
 
-  const offset = useMemo(() => {
-    scene.position.set(0, 0, 0)
-    scene.rotation.set(0, 0, 0)
-    scene.scale.set(1, 1, 1)
-    scene.updateMatrixWorld(true)
-    const box = new THREE.Box3().setFromObject(scene)
-    const center = box.getCenter(new THREE.Vector3())
-    const size = box.getSize(new THREE.Vector3())
-    return { center, minY: box.min.y, size }
-  }, [scene])
+  const placement = useMemo(() => groundPlacement(scene), [scene])
 
   useEffect(() => {
-    onMeasured({ size: modelSizeMm(offset.size), calibrated: isCalibrated(scene.userData) })
-  }, [offset, scene, onMeasured])
+    onMeasured({ size: modelSizeMm(placement.size), calibrated: isCalibrated(scene.userData) })
+  }, [placement, scene, onMeasured])
 
   // Free the loader cache and GPU memory when the model changes, as Generate does.
   useEffect(() => () => {
     useGLTF.clear(url)
-    scene.traverse((child) => {
-      if (child instanceof THREE.Mesh) {
-        child.geometry.dispose()
-        const materials = Array.isArray(child.material) ? child.material : [child.material]
-        materials.forEach((m: THREE.Material) => m.dispose())
-      }
-    })
+    disposeObject(scene)
   }, [url, scene])
 
   return (
     <group scale={MM_PER_M}>
-      <group position={[-offset.center.x, -offset.minY, -offset.center.z]}>
+      <group position={placement.offset}>
         <primitive object={scene} />
       </group>
     </group>
@@ -238,7 +227,9 @@ export default function PrintPage(): JSX.Element {
   const [printer, setPrinter] = useState<PrinterChoice>(readStoredPrinter)
   const [assets, setAssets] = useState<ProjectedAssetLibraryEntry[]>([])
   const [measured, setMeasured] = useState<Measured | null>(null)
-  const [loadError, setLoadError] = useState<string | null>(null)
+  const [error, setError] = useState<ModelError | null>(null)
+  // A library asset opens asynchronously: only the latest choice may apply.
+  const [sourceGuard] = useState(createLatestGuard)
 
   useEffect(() => {
     let cancelled = false
@@ -257,22 +248,25 @@ export default function PrintPage(): JSX.Element {
     try { localStorage.setItem(PRINTER_STORAGE_KEY, JSON.stringify(next)) } catch { /* private mode / quota */ }
   }
 
-  async function chooseSource(value: string) {
-    setLoadError(null)
-    if (value === 'current') { setSource({ kind: 'current' }); return }
-    const entry = assets.find((a) => a.id === value)
-    if (!entry) return
-    const result = await openAssetLibraryEntry(service, entry)
-    if (!result.success) { setLoadError(result.message); return }
-    setSource({ kind: 'library', id: entry.id, name: entry.displayName, url: result.selection.job.outputUrl ?? '' })
-  }
-
   // GLB only: splats have no plate size, and imports are converted to GLB.
   const currentUrl = currentJob?.status === 'done' && currentJob.outputUrl && isGlbUrl(currentJob.outputUrl)
     ? currentJob.outputUrl
     : null
   const sourceUrl = source.kind === 'library' ? source.url : currentUrl
   const modelUrl = sourceUrl ? `${apiUrl}${sourceUrl}` : null
+  const loadError = errorForModel(error, modelUrl)
+
+  async function chooseSource(value: string) {
+    const ticket = sourceGuard.take()
+    setError(null)
+    if (value === 'current') { setSource({ kind: 'current' }); return }
+    const entry = assets.find((a) => a.id === value)
+    if (!entry) return
+    const result = await openAssetLibraryEntry(service, entry)
+    if (!sourceGuard.isLatest(ticket)) return
+    if (!result.success) { setError({ modelUrl, message: result.message }); return }
+    setSource({ kind: 'library', id: entry.id, name: entry.displayName, url: result.selection.job.outputUrl ?? '' })
+  }
 
   useEffect(() => { setMeasured(null) }, [modelUrl])
 
@@ -359,7 +353,7 @@ export default function PrintPage(): JSX.Element {
           modelUrl={modelUrl}
           fits={fit?.fits ?? true}
           onMeasured={setMeasured}
-          onError={() => setLoadError('The model could not be loaded.')}
+          onError={() => setError({ modelUrl, message: 'The model could not be loaded.' })}
         />
         {!modelUrl && (
           <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 text-center">

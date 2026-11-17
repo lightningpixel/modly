@@ -15,6 +15,7 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast
 import SplatViewer, { type SplatViewerHandle } from './SplatViewer'
 import { useGeneration } from '@shared/hooks/useGeneration'
 import { useAppStore } from '@shared/stores/appStore'
+import { disposeObject, groundPlacement } from '@shared/three/meshScene'
 import { ViewerToolbar, type ViewMode } from './ViewerToolbar'
 import type { LightSettings, PointLight } from '@shared/stores/appStore'
 import { DEFAULT_LIGHT_SETTINGS } from '@shared/stores/appStore'
@@ -256,13 +257,7 @@ function SceneMeshModel({
       } else {
         useGLTF.clear(url)
       }
-      scene.traverse((child) => {
-        if (child instanceof THREE.Mesh) {
-          child.geometry.dispose()
-          const materials = Array.isArray(child.material) ? child.material : [child.material]
-          materials.forEach((m: THREE.Material) => m.dispose())
-        }
-      })
+      disposeObject(scene)
     }
   }, [loaderType, scene, url])
 
@@ -289,15 +284,9 @@ function SceneMeshModel({
   // Centre the mesh on the grid. Runs only on first load / model change — never
   // on plain re-renders, so a live gizmo transform is not silently overwritten.
   useEffect(() => {
-    // Clear any cached transform before measuring (useGLTF may reuse a scene
+    // Clears any cached transform before measuring (useGLTF may reuse a scene
     // that still carries an earlier gizmo pose).
-    scene.position.set(0, 0, 0)
-    scene.rotation.set(0, 0, 0)
-    scene.scale.set(1, 1, 1)
-    const box = new THREE.Box3().setFromObject(scene)
-    const center = new THREE.Vector3()
-    box.getCenter(center)
-    scene.position.set(-center.x, -box.min.y, -center.z)
+    scene.position.copy(groundPlacement(scene).offset)
 
     // Compute stats
     let vertices = 0

@@ -6,7 +6,9 @@ import {
   MAX_VOLUME_MM,
   MIN_VOLUME_MM,
   checkFit,
+  createLatestGuard,
   describeOverflow,
+  errorForModel,
   formatVolume,
   isCalibrated,
   isGlbUrl,
@@ -69,6 +71,27 @@ test('an unknown or unreadable stored printer falls back to the default', () => 
 test('presets and formatting', () => {
   assert.deepEqual(resolveBuildVolume({ ...DEFAULT_PRINTER_CHOICE, presetId: 'prusa-mk4' }), { width: 250, depth: 210, height: 220 })
   assert.equal(formatVolume({ width: 256, depth: 42.25, height: 7.5 }), '256 × 42.3 × 7.50 mm')
+})
+
+test('a load error disappears once another model is shown', () => {
+  const error = { modelUrl: 'http://api/workspace/a.glb', message: 'The model could not be loaded.' }
+  assert.equal(errorForModel(error, 'http://api/workspace/a.glb'), 'The model could not be loaded.')
+  assert.equal(errorForModel(error, 'http://api/workspace/b.glb'), null)
+  assert.equal(errorForModel(error, null), null)
+  assert.equal(errorForModel(null, 'http://api/workspace/a.glb'), null)
+})
+
+test('a slow source choice never overrides a newer one', async () => {
+  const guard = createLatestGuard()
+  let shown = 'current'
+  const choose = async (name: string, delay: number) => {
+    const ticket = guard.take()
+    await new Promise((resolve) => setTimeout(resolve, delay))
+    if (guard.isLatest(ticket)) shown = name
+  }
+  // The first library asset answers after the user picked a second one.
+  await Promise.all([choose('slow', 30), choose('fast', 0)])
+  assert.equal(shown, 'fast')
 })
 
 test('only GLB meshes are shown on the plate', () => {
