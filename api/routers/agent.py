@@ -195,7 +195,10 @@ TOOLS = [
                     "unit": {
                         "type": "string",
                         "enum": ["m", "cm", "mm"],
-                        "description": "normalize_scale only: unit of `size`. Default m.",
+                        "description": (
+                            "normalize_scale only: unit of `size`, when the user gave a real size. "
+                            "Omit it for a size in model units: the mesh is then not marked as real-sized."
+                        ),
                     },
                     "dimension": {
                         "type": "string",

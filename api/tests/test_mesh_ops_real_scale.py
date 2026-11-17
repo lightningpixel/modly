@@ -1,9 +1,11 @@
+import asyncio
 import base64
 import io
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.parse import quote, unquote
 
 import numpy as np
 import trimesh
@@ -11,6 +13,7 @@ import trimesh
 import routers.export as export_router
 import routers.optimize as optimize_router
 from services.mesh_ops import MeshOp, MeshOpContext, MeshOpResult, MeshOpsRegistry, mesh_ops_registry
+from services import imported_sources
 from services.mesh_ops import real_scale
 from services.mesh_ops.real_scale import (
     is_calibrated,
@@ -259,11 +262,118 @@ class RealScaleEndToEndTests(unittest.TestCase):
         self.assertTrue(is_calibrated(self.workspace / "scaled.glb"))
         self.assertAlmostEqual(float(max(self._slicer_extents("scaled.glb"))), 120.0, places=3)
 
+    def test_normalize_scale_in_model_units_declares_nothing(self) -> None:
+        # The default unit, as the Edit panel and the agent send it.
+        self._run("normalize_scale", "raw.glb", "units.glb", size=3)
+        self.assertFalse(is_calibrated(self.workspace / "units.glb"))
+        self.assertAlmostEqual(float(max(_extents(self.workspace / "units.glb"))), 3.0, places=6)
+
+    def test_arrange_marks_only_a_real_unit(self) -> None:
+        for params, calibrated in (({"size": 3}, False), ({"size": 30, "unit": "cm"}, True)):
+            with self.subTest(params=params):
+                result = optimize_router.arrange_mesh(optimize_router.ArrangeRequest(
+                    path="raw.glb", steps=["normalize_scale"], params={"normalize_scale": params},
+                ))
+                self.assertEqual(is_calibrated(self.workspace / result["path"]), calibrated)
+
     def test_prepare_for_printing_reaches_the_slicer_at_the_requested_size(self) -> None:
         self._run("prepare_for_printing", "raw.glb", "print.glb", size_mm=100)
 
         self.assertTrue(is_calibrated(self.workspace / "print.glb"))
         self.assertAlmostEqual(float(max(self._slicer_extents("print.glb"))), 100.0, places=3)
+
+
+class PrintScaleAndImportTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._directory.name).resolve()
+        self._original = export_router.registry.WORKSPACE_DIR
+        export_router.registry.WORKSPACE_DIR = self.workspace
+        imported_sources.clear()
+
+    def tearDown(self) -> None:
+        export_router.registry.WORKSPACE_DIR = self._original
+        imported_sources.clear()
+        self._directory.cleanup()
+
+    @staticmethod
+    def _token(path: str) -> str:
+        return base64.urlsafe_b64encode(path.encode()).decode("ascii").rstrip("=")
+
+    def _slicer_extents(self, path: str) -> np.ndarray:
+        return _stl_extents(export_router.export_for_slicer("stl", self._token(path), "model.stl").body)
+
+    def test_the_print_page_scale_is_the_slicer_scale(self) -> None:
+        cases = {
+            "ai.glb": (trimesh.creation.box(extents=[2.0, 1.0, 0.5]), False),     # unit-sized AI output
+            "part.glb": (trimesh.creation.box(extents=[40.0, 180.0, 40.0]), False),  # already in mm
+            "real.glb": (trimesh.creation.box(extents=[0.1, 0.3, 0.2]), True),    # calibrated
+        }
+        for name, (box, calibrated) in cases.items():
+            with self.subTest(name=name):
+                box.export(str(self.workspace / name))
+                if calibrated:
+                    write_real_scale(self.workspace / name)
+
+                scale = export_router.print_scale(self._token(name))
+
+                self.assertEqual(scale["calibrated"], calibrated)
+                # The page multiplies the model's size by mm_per_unit: the slicer
+                # must receive exactly that size.
+                expected = float(max(box.extents)) * scale["mm_per_unit"]
+                self.assertAlmostEqual(float(max(self._slicer_extents(name))), expected, places=3)
+        self.assertAlmostEqual(export_router.print_scale(self._token("ai.glb"))["mm_per_unit"], 25.0)
+
+    def test_an_imported_stl_is_converted_to_metres_y_up_and_calibrated(self) -> None:
+        # 10 × 20 mm footprint, 30 mm tall along Z, as a slicer would save it.
+        source = self.workspace / "bracket.stl"
+        trimesh.creation.box(extents=[10.0, 20.0, 30.0]).export(str(source))
+
+        result = asyncio.run(optimize_router.import_mesh_by_path(optimize_router.ImportByPathRequest(path=str(source))))
+
+        served = Path(unquote(result["url"].split("path=", 1)[1]))
+        self.assertTrue(is_calibrated(served))
+        # Metres, and the height is now Y.
+        np.testing.assert_allclose(_stored_extents(served), [0.01, 0.03, 0.02], atol=1e-9)
+        # Back to the slicer: millimetres and Z-up again, at its real size.
+        np.testing.assert_allclose(self._slicer_extents(str(served)), [10, 20, 30], atol=1e-3)
+        self.assertEqual(export_router.print_scale(self._token(str(served)))["mm_per_unit"], 1000.0)
+
+    def test_an_imported_obj_and_ply_are_converted_too(self) -> None:
+        for suffix in ("obj", "ply"):
+            with self.subTest(suffix=suffix):
+                source = self.workspace / f"part.{suffix}"
+                trimesh.creation.box(extents=[10.0, 20.0, 30.0]).export(str(source))
+                result = asyncio.run(optimize_router.import_mesh_by_path(optimize_router.ImportByPathRequest(path=str(source))))
+                served = Path(unquote(result["url"].split("path=", 1)[1]))
+                self.assertTrue(is_calibrated(served))
+                np.testing.assert_allclose(_stored_extents(served), [0.01, 0.03, 0.02], atol=1e-9)
+
+    def test_an_imported_glb_is_left_alone(self) -> None:
+        source = self.workspace / "model.glb"
+        trimesh.creation.box(extents=[2.0, 1.0, 0.5]).export(str(source))
+
+        result = asyncio.run(optimize_router.import_mesh_by_path(optimize_router.ImportByPathRequest(path=str(source))))
+
+        self.assertIn(quote(str(source)), result["url"])
+        self.assertFalse(is_calibrated(source))
+
+    def test_a_calibrated_asset_exports_obj_and_ply_in_millimetres(self) -> None:
+        trimesh.creation.box(extents=[0.1, 0.3, 0.2]).export(str(self.workspace / "real.glb"))
+        write_real_scale(self.workspace / "real.glb")
+        trimesh.creation.box(extents=[0.1, 0.3, 0.2]).export(str(self.workspace / "raw.glb"))
+
+        for fmt in ("obj", "ply"):
+            with self.subTest(fmt=fmt):
+                for body in (
+                    export_router.export_mesh(fmt, "real.glb").body,
+                    optimize_router.export_mesh(path="real.glb", format=fmt).body,
+                ):
+                    extents = trimesh.load(io.BytesIO(body), file_type=fmt, force="mesh").extents
+                    np.testing.assert_allclose(extents, [100, 300, 200], atol=1e-3)
+                raw = export_router.export_mesh(fmt, "raw.glb").body
+                extents = trimesh.load(io.BytesIO(raw), file_type=fmt, force="mesh").extents
+                np.testing.assert_allclose(extents, [0.1, 0.3, 0.2], atol=1e-6)
 
 
 if __name__ == "__main__":

@@ -115,10 +115,15 @@ def carry_real_scale(input_path: Path, output_path: Optional[Path]) -> None:
         pass
 
 
+# Formats with no unit of their own: by convention they hold millimetres
+# (slicers, CAD), the same convention imports read them with.
+MM_FORMATS = {"stl", "obj", "ply"}
+
+
 def export_scale(path: Path, fmt: str) -> float:
     """Factor from the GLB's units to an export format's units.
 
-    A calibrated asset's STL is written in millimetres; everything else keeps
-    the file's own units (metres for a calibrated GLB, arbitrary otherwise).
+    A calibrated asset is written in millimetres to STL, OBJ and PLY, like the
+    slicer hand-off; GLB keeps metres, and an uncalibrated asset its own units.
     """
-    return MM_PER_M if fmt.lower() == "stl" and is_calibrated(path) else 1.0
+    return MM_PER_M if fmt.lower() in MM_FORMATS and is_calibrated(path) else 1.0

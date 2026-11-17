@@ -15,7 +15,9 @@ from .types import (
 
 
 # glTF's unit is the metre.
-UNIT_SCALE = {"m": 1.0, "cm": 0.01, "mm": 0.001}
+UNIT_SCALE = {"m": 1.0, "cm": 0.01, "mm": 0.001, "units": 1.0}
+# "units" sizes the mesh in its own units: numerically metres, but no real size.
+REAL_UNITS = ("m", "cm", "mm")
 DIMENSION_AXES = {"x": 0, "y": 1, "z": 2}
 DIMENSION_NAMES = {"longest": "longest side", "x": "width", "y": "height", "z": "depth"}
 # Steps always run in this order, whatever order they were requested in:
@@ -160,8 +162,9 @@ def apply_transforms(
     # vertices so every reader sees the transformed geometry.
     loaded = bake_transforms(loaded, trimesh)
     loaded.export(str(output_path))
-    # Scaling to a size in a unit is a statement of the real size.
-    if "normalize_scale" in requested and output_path.suffix.lower() == ".glb":
+    # Scaling to a size in a real unit is a statement of the real size.
+    scale = requested.get("normalize_scale")
+    if scale and scale.get("unit") in REAL_UNITS and output_path.suffix.lower() == ".glb":
         write_real_scale(output_path)
 
     result = _world_mesh(loaded, trimesh)

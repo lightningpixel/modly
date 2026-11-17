@@ -139,13 +139,17 @@ NORMALIZE_SCALE_PARAMS = (
         "id": "unit",
         "label": "Unit",
         "type": "select",
-        "default": "m",
+        "default": "units",
         "options": [
+            {"value": "units", "label": "Model units (no real size)"},
             {"value": "m", "label": "Metres"},
             {"value": "cm", "label": "Centimetres"},
             {"value": "mm", "label": "Millimetres"},
         ],
-        "tooltip": "glTF stores metres: 20 cm is written as 0.2 units.",
+        "tooltip": (
+            "glTF stores metres: 20 cm is written as 0.2 units. A real unit also "
+            "marks the mesh as real-sized, for the Print page and exports."
+        ),
     },
     {
         "id": "dimension",
