@@ -16,6 +16,7 @@ import SplatViewer, { type SplatViewerHandle } from './SplatViewer'
 import { useGeneration } from '@shared/hooks/useGeneration'
 import { useAppStore } from '@shared/stores/appStore'
 import { disposeObject, groundPlacement } from '@shared/three/meshScene'
+import { viewScaleFor } from '@shared/three/viewScale'
 import { ViewerToolbar, type ViewMode } from './ViewerToolbar'
 import type { LightSettings, PointLight } from '@shared/stores/appStore'
 import { DEFAULT_LIGHT_SETTINGS } from '@shared/stores/appStore'
@@ -139,6 +140,35 @@ function CanvasCapture({
 }
 
 // ---------------------------------------------------------------------------
+// CameraRig — reframes the default view when the model's scale changes
+// ---------------------------------------------------------------------------
+
+const DEFAULT_CAMERA_POSITION = new THREE.Vector3(0, 1.5, 4)
+const DEFAULT_NEAR = 0.1
+const DEFAULT_FAR = 1000
+
+function CameraRig({ viewScale }: { viewScale: number }): null {
+  const camera = useThree((s) => s.camera)
+  const controls = useThree((s) => s.controls) as { target?: THREE.Vector3, update?: () => void } | null
+  const applied = useRef(1)
+
+  useEffect(() => {
+    // Only on a change of scale: swapping between unit-sized meshes keeps the
+    // user's camera, as before.
+    if (viewScale === applied.current) return
+    applied.current = viewScale
+    camera.position.copy(DEFAULT_CAMERA_POSITION).multiplyScalar(viewScale)
+    camera.near = DEFAULT_NEAR * viewScale
+    camera.far = DEFAULT_FAR * viewScale
+    camera.updateProjectionMatrix()
+    controls?.target?.set(0, 0, 0)
+    controls?.update?.()
+  }, [viewScale, camera, controls])
+
+  return null
+}
+
+// ---------------------------------------------------------------------------
 // ModelErrorBoundary — catches useGLTF load failures (e.g. 404)
 // ---------------------------------------------------------------------------
 
@@ -201,6 +231,8 @@ interface MeshModelProps {
   /** Sculpt mode: clicks paint instead of selecting. */
   sculpting: boolean
   onStats: (stats: { vertices: number; triangles: number }) => void
+  /** Longest side of the model, in scene units: frames the view. */
+  onSize: (longestSide: number) => void
   onSelect: () => void
   onObject: (obj: THREE.Object3D | null) => void
 }
@@ -232,6 +264,7 @@ function SceneMeshModel({
   selected,
   sculpting,
   onStats,
+  onSize,
   onSelect,
   onObject,
   scene,
@@ -286,7 +319,9 @@ function SceneMeshModel({
   useEffect(() => {
     // Clears any cached transform before measuring (useGLTF may reuse a scene
     // that still carries an earlier gizmo pose).
-    scene.position.copy(groundPlacement(scene).offset)
+    const placement = groundPlacement(scene)
+    scene.position.copy(placement.offset)
+    onSize(Math.max(placement.size.x, placement.size.y, placement.size.z))
 
     // Compute stats
     let vertices = 0
@@ -945,6 +980,9 @@ export default function Viewer3D({
   const splatRef = useRef<SplatViewerHandle | null>(null)
 
   const [meshObject, setMeshObject] = useState<THREE.Object3D | null>(null)
+  // Camera, grid and zoom limits follow the model's size (see viewScaleFor).
+  const [viewScale, setViewScale] = useState(1)
+  const handleModelSize = useCallback((longestSide: number) => setViewScale(viewScaleFor(longestSide)), [])
 
   const sculpting = useSculptStore((s) => s.active)
   const sculptStatus = useSculptStore((s) => s.status)
@@ -1127,7 +1165,8 @@ export default function Viewer3D({
             <Lightformer intensity={0.3 * (lightSettings.envIntensity ?? DEFAULT_LIGHT_SETTINGS.envIntensity)} position={[4, 1, -4]} scale={6} />
           </Environment>
 
-          <gridHelper args={[10, 20, '#3f3f46', '#27272a']} />
+          <gridHelper args={[10, 20, '#3f3f46', '#27272a']} scale={viewScale} />
+          <CameraRig viewScale={viewScale} />
 
           {modelUrl && currentJob ? (
             <Selection enabled={selected}>
@@ -1143,6 +1182,7 @@ export default function Viewer3D({
                   selected={selected}
                   sculpting={sculpting}
                   onStats={setStoreMeshStats}
+                  onSize={handleModelSize}
                   onSelect={handleMeshSelect}
                   onObject={setMeshObject}
                 />
@@ -1182,8 +1222,8 @@ export default function Viewer3D({
             enablePan
             enableZoom
             enableRotate
-            minDistance={0.5}
-            maxDistance={20}
+            minDistance={0.5 * viewScale}
+            maxDistance={20 * viewScale}
             autoRotate={autoRotate}
             autoRotateSpeed={1.5}
             enableDamping
