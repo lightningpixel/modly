@@ -109,6 +109,23 @@ class FramingOpsTests(unittest.TestCase):
         result = image_ops_registry.run("crop", photo, {"top": 20}, self.context)
         self.assertEqual(_open(result.path).mode, "RGBA")
 
+    def test_colour_key_transparency_is_honoured(self) -> None:
+        # RGB and L PNGs can carry their transparency as a tRNS colour key.
+        for mode, key in (("RGB", (0, 0, 0)), ("L", 0)):
+            with self.subTest(mode=mode):
+                keyed = Image.new(mode, (40, 20), key)
+                keyed.paste((200, 30, 30) if mode == "RGB" else 200, (25, 2, 35, 12))
+                path = self.workspace / f"keyed-{mode}.png"
+                keyed.save(path, transparency=key)
+                self.assertIn("transparency", _open(path).info)
+
+                cropped = _open(image_ops_registry.run("crop", path, {"left": 10}, self.context).path)
+                self.assertEqual(cropped.mode, "RGBA")
+                self.assertEqual(cropped.getpixel((0, 0))[3], 0)
+
+                framed = _open(image_ops_registry.run("auto_frame", path, {"margin": 0, "size": 512}, self.context).path)
+                self.assertEqual(_visible_box(framed), (0, 0, 512, 512))
+
     def test_crop_edges_are_clamped(self) -> None:
         self.assertEqual(image_ops_registry.resolve_params("crop", {"left": 90})["left"], 45)
 
@@ -140,6 +157,9 @@ class FramingOpsTests(unittest.TestCase):
         opaque = self._save(Image.new("RGB", (16, 16), (9, 9, 9)), "photo.jpg")
         with self.assertRaisesRegex(ImageOpInputError, "remove the background"):
             image_ops_registry.run("auto_frame", opaque, {}, self.context)
+        pasted = self._save(Image.new("RGBA", (16, 16), (9, 9, 9, 255)), "pasted.png")
+        with self.assertRaisesRegex(ImageOpInputError, "remove the background"):
+            image_ops_registry.run("auto_frame", pasted, {}, self.context)
         clear = self._save(Image.new("RGBA", (16, 16), (9, 9, 9, 0)), "clear.png")
         with self.assertRaisesRegex(ImageOpInputError, "no subject"):
             image_ops_registry.run("auto_frame", clear, {}, self.context)

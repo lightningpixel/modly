@@ -23,11 +23,23 @@ def load_image(path: Path) -> Image.Image:
         raise ImageOpInputError(f"Cannot read image {path.name}: {exc}") from exc
 
 
+def _has_alpha(image: Image.Image) -> bool:
+    """Whether the image can hold transparency: an alpha channel, or a palette /
+    colour-key entry (PNG tRNS on P, RGB or L images). Reads no pixels."""
+    return image.mode in ("RGBA", "LA", "PA", "RGBa", "La") or "transparency" in image.info
+
+
+def _alpha_u8(image: Image.Image) -> np.ndarray | None:
+    """The input's own alpha channel (uint8), None when it has no transparency."""
+    if not _has_alpha(image):
+        return None
+    return np.asarray(image.convert("RGBA").getchannel("A"))
+
+
 def _source_alpha(image: Image.Image) -> np.ndarray | None:
     """The input's own transparency in [0, 1], if it has any."""
-    if image.mode in ("RGBA", "LA", "PA") or (image.mode == "P" and "transparency" in image.info):
-        return np.asarray(image.convert("RGBA").getchannel("A"), dtype=np.float32) / 255.0
-    return None
+    alpha = _alpha_u8(image)
+    return None if alpha is None else alpha.astype(np.float32) / 255.0
 
 
 def remove_background(input_path: Path, params: Mapping[str, Any], context: ImageOpContext) -> ImageOpResult:
@@ -101,7 +113,7 @@ def _edge_param(param_id: str, label: str) -> dict[str, Any]:
 
 def crop(input_path: Path, params: Mapping[str, Any], context: ImageOpContext) -> ImageOpResult:
     image = load_image(input_path)
-    image = image.convert("RGBA" if _source_alpha(image) is not None else "RGB")
+    image = image.convert("RGBA" if _has_alpha(image) else "RGB")
     box = framing.crop_box(
         image.width, image.height,
         params.get("left", 0), params.get("top", 0), params.get("right", 0), params.get("bottom", 0),
@@ -126,10 +138,12 @@ CROP = ImageOp(
 
 def auto_frame(input_path: Path, params: Mapping[str, Any], context: ImageOpContext) -> ImageOpResult:
     image = load_image(input_path)
-    alpha = _source_alpha(image)
-    if alpha is None:
+    alpha = _alpha_u8(image)
+    # An alpha channel with no transparent pixel (clipboard pastes, screenshots)
+    # is an opaque photo: framing it would only letterbox the whole picture.
+    if alpha is None or not (alpha <= framing.SUBJECT_ALPHA_THRESHOLD).any():
         raise ImageOpInputError("Auto-frame needs a transparent background: remove the background first.")
-    bbox = framing.subject_bbox(birefnet.to_uint8(alpha))
+    bbox = framing.subject_bbox(alpha)
     if bbox is None:
         raise ImageOpInputError("Auto-frame found no subject: the image is fully transparent.")
     size = int(params.get("size", 1024))
