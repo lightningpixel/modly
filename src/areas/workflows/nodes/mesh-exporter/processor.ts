@@ -38,6 +38,27 @@ function extractPrimitives(doc: any): PrimGeometry[] {
   return result
 }
 
+// ─── Real-world scale ──────────────────────────────────────────────────────
+
+/** STL, OBJ and PLY carry no unit: by convention they hold millimetres. */
+const MM_PER_M = 1000
+
+/**
+ * Whether the GLB declares its real size: Modly's set_real_scale writes
+ * `scenes[n].extras.modly.real_scale = { unit: 'm' }` (api/services/mesh_ops/real_scale.py).
+ */
+function isCalibrated(doc: any): boolean {
+  const scene = doc.getRoot().getDefaultScene?.() ?? doc.getRoot().listScenes?.()[0]
+  const extras = scene?.getExtras?.() as { modly?: { real_scale?: { unit?: unknown } } } | undefined
+  return extras?.modly?.real_scale?.unit === 'm'
+}
+
+/** A calibrated asset is written in millimetres, like the API's exports. */
+function scalePrimitives(prims: PrimGeometry[], factor: number): PrimGeometry[] {
+  if (factor === 1) return prims
+  return prims.map((p) => ({ ...p, positions: p.positions.map((v) => v * factor) }))
+}
+
 // ─── STL (binary) ─────────────────────────────────────────────────────────────
 
 function faceNormal(p: Float32Array, i0: number, i1: number, i2: number): [number, number, number] {
@@ -225,8 +246,10 @@ const processor = async (
   if (format === 'glb') {
     await io.write(outPath, doc)
   } else {
-    const prims = extractPrimitives(doc)
+    const calibrated = isCalibrated(doc)
+    const prims = scalePrimitives(extractPrimitives(doc), calibrated ? MM_PER_M : 1)
     if (prims.length === 0) throw new Error('mesh-exporter: no mesh data found in input')
+    if (calibrated) context.log('Real-size asset: written in millimetres')
     if      (format === 'stl') writeSTL(prims, outPath)
     else if (format === 'obj') writeOBJ(prims, outPath)
     else if (format === 'ply') writePLY(prims, outPath)
