@@ -6,7 +6,7 @@ from typing import Any, Mapping
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from . import birefnet
+from . import birefnet, framing
 from .outputs import png_bytes, sanitize_stem, write_new_files
 from .requirements import BIREFNET_LITE, ONNXRUNTIME
 from .types import ImageOp, ImageOpContext, ImageOpExecutionError, ImageOpInputError, ImageOpResult
@@ -85,4 +85,88 @@ REMOVE_BACKGROUND = ImageOp(
     requirements=(ONNXRUNTIME, BIREFNET_LITE),
 )
 
-BUILTIN_IMAGE_OPS = (REMOVE_BACKGROUND,)
+
+def _edge_param(param_id: str, label: str) -> dict[str, Any]:
+    return {
+        "id": param_id,
+        "label": label,
+        "type": "int",
+        "default": 0,
+        "min": 0,
+        "max": 45,
+        "step": 1,
+        "tooltip": f"Percentage of the image cut off the {param_id} edge.",
+    }
+
+
+def crop(input_path: Path, params: Mapping[str, Any], context: ImageOpContext) -> ImageOpResult:
+    image = load_image(input_path)
+    image = image.convert("RGBA" if _source_alpha(image) is not None else "RGB")
+    box = framing.crop_box(
+        image.width, image.height,
+        params.get("left", 0), params.get("top", 0), params.get("right", 0), params.get("bottom", 0),
+    )
+    cropped = image.crop(box)
+    (out_path,) = write_new_files(context.images_dir, sanitize_stem(input_path.name), [("crop", png_bytes(cropped))])
+    return ImageOpResult(path=out_path, details={"width": cropped.width, "height": cropped.height, "box": list(box)})
+
+
+CROP = ImageOp(
+    id="crop",
+    label="Crop",
+    params_schema=(
+        _edge_param("left", "Left %"),
+        _edge_param("top", "Top %"),
+        _edge_param("right", "Right %"),
+        _edge_param("bottom", "Bottom %"),
+    ),
+    fn=crop,
+)
+
+
+def auto_frame(input_path: Path, params: Mapping[str, Any], context: ImageOpContext) -> ImageOpResult:
+    image = load_image(input_path)
+    alpha = _source_alpha(image)
+    if alpha is None:
+        raise ImageOpInputError("Auto-frame needs a transparent background: remove the background first.")
+    bbox = framing.subject_bbox(birefnet.to_uint8(alpha))
+    if bbox is None:
+        raise ImageOpInputError("Auto-frame found no subject: the image is fully transparent.")
+    size = int(params.get("size", 1024))
+    framed = framing.frame_square(image, bbox, size, float(params.get("margin", 10)))
+    (out_path,) = write_new_files(context.images_dir, sanitize_stem(input_path.name), [("framed", png_bytes(framed))])
+    return ImageOpResult(path=out_path, details={"width": size, "height": size, "subject_box": list(bbox)})
+
+
+AUTO_FRAME = ImageOp(
+    id="auto_frame",
+    label="Auto-frame",
+    params_schema=(
+        {
+            "id": "margin",
+            "label": "Margin %",
+            "type": "int",
+            "default": 10,
+            "min": 0,
+            "max": 40,
+            "step": 1,
+            "tooltip": "Empty space kept around the subject on every side, as a percentage of the square.",
+        },
+        {
+            "id": "size",
+            "label": "Resolution",
+            "type": "select",
+            "default": 1024,
+            "options": [
+                {"value": 512, "label": "512 × 512"},
+                {"value": 768, "label": "768 × 768"},
+                {"value": 1024, "label": "1024 × 1024"},
+                {"value": 2048, "label": "2048 × 2048"},
+            ],
+            "tooltip": "Size of the square image written, and sent to Generate as is.",
+        },
+    ),
+    fn=auto_frame,
+)
+
+BUILTIN_IMAGE_OPS = (CROP, REMOVE_BACKGROUND, AUTO_FRAME)
