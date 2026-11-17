@@ -30,6 +30,7 @@ class MeshOpsRegistryTests(unittest.TestCase):
                 "drop_to_ground",
                 "auto_orient",
                 "normalize_scale",
+                "set_real_scale",
                 "prepare_for_printing",
                 "prepare_for_game",
                 "prepare_for_web",

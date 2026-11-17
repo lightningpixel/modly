@@ -12,11 +12,8 @@ from typing import Any, Mapping, Optional
 from .geometry import merged_geometry, scene_meshes
 from .operations import _output_path, decimate_mesh
 from .repair import auto_repair_mesh
-from .transforms import UNIT_SCALE, _trimesh, apply_transforms
+from .transforms import DIMENSION_NAMES, UNIT_SCALE, _trimesh, apply_transforms
 from .types import MeshOpContext, MeshOpExecutionError, MeshOpResult
-
-
-DIMENSION_NAMES = {"longest": "longest side", "x": "width", "y": "height", "z": "depth"}
 
 
 def _stage(

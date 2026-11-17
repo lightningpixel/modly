@@ -26,6 +26,8 @@ from services.mesh_ops import (
     mesh_ops_registry,
 )
 from services.mesh_ops.glb_patch import GlbPatchError, VertexPatch, patch_glb_file
+from services.mesh_ops.geometry import bake_transforms, single_mesh
+from services.mesh_ops.real_scale import MM_PER_M, export_scale, write_real_scale
 from services.mesh_ops.transforms import apply_transforms, transform_file
 from schemas.runs import RunRecord
 from services.run_history import run_history, workspace_relative
@@ -465,14 +467,31 @@ async def import_mesh_by_path(body: ImportByPathRequest):
 
     # Mesh ply / obj / stl: convert to GLB in a temp directory (not the workspace)
     tmp_dir = tempfile.mkdtemp(prefix="modly_import_")
-    output_path = os.path.join(tmp_dir, "mesh.glb")
-    loaded = trimesh.load(str(file_path))
-    loaded.export(output_path)
-    # Remember the ORIGINAL extension: this conversion changes the container but
-    # not the axes, so a .stl imported here still holds Z-up data despite the
-    # .glb suffix, and must not be rotated as if it were glTF.
-    imported_sources.register(output_path, file_path)
-    return {"url": f"/optimize/serve-file?path={quote(output_path)}"}
+    output_path = Path(tmp_dir) / "mesh.glb"
+    convert_print_mesh_to_gltf(file_path, output_path)
+    # The result is a real glTF now (Y-up, metres): the slicer route rotates it
+    # back to Z-up and sends it in millimetres, like any calibrated GLB.
+    imported_sources.register(output_path, output_path)
+    return {"url": f"/optimize/serve-file?path={quote(str(output_path))}"}
+
+
+# STL, OBJ and PLY carry no unit and no up axis; by convention (slicers, CAD)
+# they are millimetres and Z-up.
+_Z_UP_TO_Y_UP = trimesh.transformations.rotation_matrix(-np.pi / 2, [1, 0, 0])
+_MM_TO_M = trimesh.transformations.scale_matrix(1.0 / MM_PER_M)
+
+
+def convert_print_mesh_to_gltf(source: Path, output_path: Path) -> Path:
+    """Convert an STL/OBJ/PLY to a GLB in metres and Y-up, marked at real size.
+
+    Their size is known (millimetres), so the GLB is calibrated: the Print page
+    shows it at its real size and exports give it back in millimetres.
+    """
+    loaded = trimesh.load(str(source))
+    loaded.apply_transform(_MM_TO_M @ _Z_UP_TO_Y_UP)
+    bake_transforms(loaded, trimesh).export(str(output_path))
+    write_real_scale(output_path)
+    return output_path
 
 
 _SERVE_MEDIA_TYPES = {
@@ -531,12 +550,14 @@ def export_mesh(path: str, format: str):
     if not input_path.exists():
         raise HTTPException(404, f"File not found: {path}")
 
-    loaded = trimesh.load(str(input_path))
-    if isinstance(loaded, trimesh.Scene):
-        geoms = list(loaded.geometry.values())
-        mesh = trimesh.util.concatenate(geoms) if len(geoms) > 1 else geoms[0]
-    else:
-        mesh = loaded
+    # Flatten to a single mesh in world space (node transforms applied).
+    try:
+        mesh = single_mesh(trimesh.load(str(input_path)), trimesh)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    scale = export_scale(input_path, format)
+    if scale != 1.0:
+        mesh.apply_scale(scale)
 
     data = mesh.export(file_type=format)
     stem = input_path.stem

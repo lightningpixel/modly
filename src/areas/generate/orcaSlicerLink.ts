@@ -54,6 +54,15 @@ function sliceableSourcePath(outputUrl: string | undefined): string | undefined 
 }
 
 /**
+ * The source token the slicer routes take (`/export/slicer/…`, `/export/print-scale/…`)
+ * for a viewer mesh URL, or `undefined` when it cannot be sliced.
+ */
+export function slicerSourceToken(outputUrl: string | undefined): string | undefined {
+  const sourcePath = sliceableSourcePath(outputUrl)
+  return sourcePath ? encodeWorkspacePathToken(sourcePath) : undefined
+}
+
+/**
  * Whether a generation output can be opened in OrcaSlicer: it must be a mesh in
  * a format the slicer route converts, served either from the workspace or as a
  * user-selected import.
@@ -70,9 +79,8 @@ export function canOpenInOrcaSlicer(outputUrl: string | undefined): boolean {
  * @throws if `outputUrl` is not sliceable — guard with {@link canOpenInOrcaSlicer}
  */
 export function buildOrcaSlicerDeepLink(apiUrl: string, outputUrl: string): string {
-  const sourcePath = sliceableSourcePath(outputUrl)
-  if (!sourcePath) throw new Error(`Not sliceable: ${outputUrl}`)
-  const token = encodeWorkspacePathToken(sourcePath)
+  const token = slicerSourceToken(outputUrl)
+  if (!token) throw new Error(`Not sliceable: ${outputUrl}`)
   const base = apiUrl.replace(/\/+$/, '')
   const modelUrl = `${base}/export/slicer/${SLICER_FORMAT}/${token}/model.${SLICER_FORMAT}`
   return `orcaslicer://open?file=${encodeURIComponent(modelUrl)}`

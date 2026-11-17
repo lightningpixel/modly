@@ -18,12 +18,12 @@ const compiled = buildSync({
   packages: 'external',
 }).outputFiles[0].text
 
-function loadProcessor() {
+function loadProcessor(doc = {}) {
   // Exercise the real destination creation and file writing without needing
   // glTF dependencies or a generated mesh for these export-path regressions.
   class NodeIO {
     registerExtensions() { return this }
-    async read() { return {} }
+    async read() { return doc }
     async write(filePath) { writeFileSync(filePath, 'exported mesh') }
   }
   const module = { exports: {} }
@@ -91,3 +91,48 @@ test('a filename cannot silently use a different export format', async () => {
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+// One triangle, 0.1 m along X and 0.2 m along Y, with or without the real-size marker.
+function triangleDoc(extras) {
+  const prim = {
+    getAttribute: (name) => (name === 'POSITION' ? { getArray: () => new Float32Array([0, 0, 0, 0.1, 0, 0, 0, 0.2, 0]) } : null),
+    getIndices: () => null,
+  }
+  return {
+    getRoot: () => ({
+      listMeshes: () => [{ listPrimitives: () => [prim] }],
+      getDefaultScene: () => ({ getExtras: () => extras }),
+    }),
+  }
+}
+
+function objVertices(text) {
+  return text.split('\n').filter((line) => line.startsWith('v ')).map((line) => line.split(' ').slice(1).map(Number))
+}
+
+for (const scenario of [
+  { name: 'a real-size asset is written in millimetres', extras: { modly: { real_scale: { unit: 'm' } } }, factor: 1000 },
+  { name: 'an asset without a real size keeps its units', extras: {}, factor: 1 },
+]) {
+  test(scenario.name, async () => {
+    const root = mkdtempSync(join(tmpdir(), 'modly-export-'))
+    try {
+      const context = { workspaceDir: join(root, 'workspace'), log() {}, progress() {} }
+      const obj = await loadProcessor(triangleDoc(scenario.extras))(
+        { filePath: join(root, 'input.glb') }, { export_format: 'obj', output_path: 'part.obj' }, context,
+      )
+      const vertices = objVertices(readFileSync(obj.filePath, 'utf8'))
+      assert.deepEqual(vertices[1].map((v) => Number(v.toFixed(3))), [0.1 * scenario.factor, 0, 0].map((v) => Number(v.toFixed(3))))
+      assert.equal(Number(vertices[2][1].toFixed(3)), Number((0.2 * scenario.factor).toFixed(3)))
+
+      const stl = await loadProcessor(triangleDoc(scenario.extras))(
+        { filePath: join(root, 'input.glb') }, { export_format: 'stl', output_path: 'part.stl' }, context,
+      )
+      const data = readFileSync(stl.filePath)
+      // Binary STL: 84-byte header, then normal (12 bytes) and three vertices.
+      assert.ok(Math.abs(data.readFloatLE(84 + 12 + 12) - 0.1 * scenario.factor) < 1e-3)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+}

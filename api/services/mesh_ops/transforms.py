@@ -3,8 +3,9 @@
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .geometry import merged_geometry, scene_meshes
+from .geometry import bake_transforms, merged_geometry, scene_meshes
 from .operations import _output_path
+from .real_scale import CALIBRATED, MM_PER_M, write_real_scale
 from .types import (
     MeshOpContext,
     MeshOpExecutionError,
@@ -14,8 +15,11 @@ from .types import (
 
 
 # glTF's unit is the metre.
-UNIT_SCALE = {"m": 1.0, "cm": 0.01, "mm": 0.001}
+UNIT_SCALE = {"m": 1.0, "cm": 0.01, "mm": 0.001, "units": 1.0}
+# "units" sizes the mesh in its own units: numerically metres, but no real size.
+REAL_UNITS = ("m", "cm", "mm")
 DIMENSION_AXES = {"x": 0, "y": 1, "z": 2}
+DIMENSION_NAMES = {"longest": "longest side", "x": "width", "y": "height", "z": "depth"}
 # Steps always run in this order, whatever order they were requested in:
 # orienting or scaling after grounding would lift the mesh off the ground again.
 CANONICAL_ORDER = ("auto_orient", "normalize_scale", "recenter", "drop_to_ground")
@@ -116,7 +120,7 @@ def transform_file(input_path: Path, matrix, output_path: Path) -> Path:
     loaded = trimesh.load(str(input_path))
     loaded.apply_transform(matrix)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    loaded.export(str(output_path))
+    bake_transforms(loaded, trimesh).export(str(output_path))
     return output_path
 
 
@@ -154,7 +158,14 @@ def apply_transforms(
 
     context.progress(85, "Exporting…")
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Scene.apply_transform only moves the base frame: bake it into the
+    # vertices so every reader sees the transformed geometry.
+    loaded = bake_transforms(loaded, trimesh)
     loaded.export(str(output_path))
+    # Scaling to a size in a real unit is a statement of the real size.
+    scale = requested.get("normalize_scale")
+    if scale and scale.get("unit") in REAL_UNITS and output_path.suffix.lower() == ".glb":
+        write_real_scale(output_path)
 
     result = _world_mesh(loaded, trimesh)
     context.log(f"Applied {', '.join(ordered)} → {output_path}")
@@ -193,3 +204,31 @@ recenter = _single_step_op("recenter")
 drop_to_ground = _single_step_op("drop_to_ground")
 auto_orient = _single_step_op("auto_orient")
 normalize_scale = _single_step_op("normalize_scale")
+
+
+def set_real_scale(
+    input_path: Path,
+    params: Mapping[str, Any],
+    context: MeshOpContext,
+) -> MeshOpResult:
+    """"This object is 30 cm": rescale the mesh to that size and mark it calibrated."""
+    # normalize_scale turns "size in a unit along a dimension" into metres and
+    # writes the real-scale declaration.
+    result = apply_transforms(
+        input_path,
+        [("normalize_scale", params)],
+        _output_path(context, "set-real-scale"),
+        context,
+    )
+    dimensions = [float(value) for value in result.details["dimensions"]]
+    side = DIMENSION_NAMES[params["dimension"]]
+    summary = f"Declared the {side} as {params['size']:g} {params['unit']}: the mesh is now at real size."
+    return MeshOpResult(
+        file_path=result.file_path,
+        details={
+            "steps": [{"op": "set_real_scale", **params, "summary": summary}],
+            "real_scale": dict(CALIBRATED),
+            "dimensions": dimensions,
+            "dimensions_mm": [value * MM_PER_M for value in dimensions],
+        },
+    )

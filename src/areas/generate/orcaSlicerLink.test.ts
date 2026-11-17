@@ -6,6 +6,7 @@ import {
   buildOrcaSlicerDeepLink,
   canOpenInOrcaSlicer,
   encodeWorkspacePathToken,
+  slicerSourceToken,
 } from './orcaSlicerLink.ts'
 
 test('builds an orcaslicer://open deeplink whose file= is a percent-encoded, query-less URL ending in model.stl', () => {
@@ -79,4 +80,12 @@ test('buildOrcaSlicerDeepLink refuses an output it cannot slice', () => {
 
 test('SLICER_FORMAT is a format OrcaSlicer can import', () => {
   assert.equal(SLICER_FORMAT, 'stl')
+})
+
+test('the Print page sizes a mesh with the same source token as the slicer link', () => {
+  const imported = '/optimize/serve-file?path=' + encodeURIComponent('C:\\models\\part.glb')
+  assert.equal(slicerSourceToken('/workspace/Workflows/a.glb'), encodeWorkspacePathToken('Workflows/a.glb'))
+  assert.equal(slicerSourceToken(imported), encodeWorkspacePathToken('C:\\models\\part.glb'))
+  assert.equal(slicerSourceToken('/workspace/Workflows/splat.ply'), undefined)
+  assert.equal(slicerSourceToken(undefined), undefined)
 })
