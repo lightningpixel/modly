@@ -61,6 +61,8 @@ function useMaskPreview(path: string | undefined): { url: string | null, failed:
     return () => {
       cancelled = true
       if (created) URL.revokeObjectURL(created)
+      // Forget the revoked URL: showing the same mask again must load it anew.
+      setState(null)
     }
   }, [path])
   return state && state.path === path ? state : { url: null, failed: false }
