@@ -178,7 +178,8 @@ function ImageOpControl({ op, entries, selected, onResult, onActivity }: Toolbar
         values={params}
         onChange={(id, value) => setParams((current) => ({ ...current, [id]: value }))}
         disabled={running}
-        className="flex w-52 flex-col gap-1"
+        // Crop's four edges sit in two columns to keep the header short.
+        className={op.params_schema.length > 2 ? 'grid w-80 grid-cols-2 gap-x-3 gap-y-1' : 'flex w-52 flex-col gap-1'}
       />
       <button type="button" onClick={() => { void start() }} disabled={busy} aria-busy={running} className={BUTTON_CLASS}>
         {running ? <><Spinner /> {copy.running}</> : <><WandIcon /> {op.label}</>}

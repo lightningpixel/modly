@@ -5,6 +5,7 @@ import { SUPPORTED_IMAGE_TYPES, saveImageToWorkspace, takePastedImage, useImageH
 import { mimeFromPath } from '@areas/workflows/nodes/imageUtils'
 import { fileNameOf, findByPath, useImageStudioStore, type StudioImage } from './imageStudioStore'
 import ImageOpsToolbar, { type ImageOpActivity, type ImageOpResult } from './ImageOpsToolbar'
+import { modelViewCaption } from './imageOps'
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
 
@@ -65,8 +66,30 @@ function useMaskPreview(path: string | undefined): { url: string | null, failed:
   return state && state.path === path ? state : { url: null, failed: false }
 }
 
+/**
+ * What the model sees: the file exactly as Generate uploads it, at its own
+ * resolution (never enlarged), with its edges outlined so the margins show.
+ */
+function ModelView({ image }: { image: StudioImage }): JSX.Element {
+  const [size, setSize] = useState<{ url: string, width: number, height: number } | null>(null)
+  const known = size?.url === image.previewUrl ? size : null
+  return (
+    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-zinc-950 px-4 pt-4 pb-10">
+      <div className="flex min-h-0 w-full flex-1 items-center justify-center">
+        {/* max-width/max-height keep the aspect ratio, so the outline is the image's edge. */}
+        <img src={image.previewUrl} alt={`${image.name} as the model sees it`} draggable={false}
+          onLoad={(e) => setSize({ url: image.previewUrl, width: e.currentTarget.naturalWidth, height: e.currentTarget.naturalHeight })}
+          className="max-h-full max-w-full outline outline-1 outline-accent/70"
+          style={CHECKERBOARD} />
+      </div>
+      {known && <span className="shrink-0 text-[11px] text-zinc-400">{modelViewCaption(known.width, known.height)}</span>}
+    </div>
+  )
+}
+
 function Canvas({ image, activity }: { image: StudioImage, activity: string | null }): JSX.Element {
   const [maskFor, setMaskFor] = useState<string | null>(null)
+  const [modelView, setModelView] = useState(false)
   const showMask = Boolean(image.maskPath) && maskFor === image.id
   const mask = useMaskPreview(showMask ? image.maskPath : undefined)
 
@@ -75,6 +98,8 @@ function Canvas({ image, activity }: { image: StudioImage, activity: string | nu
     content = mask.url
       ? <img src={mask.url} alt={`Mask of ${image.name}`} draggable={false} className="absolute inset-0 h-full w-full object-contain" />
       : <span className="absolute inset-0 flex items-center justify-center text-xs text-zinc-500">{mask.failed ? 'Could not load the mask' : 'Loading mask…'}</span>
+  } else if (modelView) {
+    content = <ModelView image={image} />
   } else {
     content = <img src={image.previewUrl} alt={image.name} draggable={false} className="absolute inset-0 h-full w-full object-contain" />
   }
@@ -82,6 +107,11 @@ function Canvas({ image, activity }: { image: StudioImage, activity: string | nu
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-zinc-800" style={CHECKERBOARD}>
       {content}
+      <button type="button" aria-pressed={modelView} onClick={() => setModelView(!modelView)}
+        title={modelView ? 'Show the image fitted to the canvas' : 'Show the image exactly as Generate sends it to the model'}
+        className={`absolute left-3 bottom-3 rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors ${modelView ? 'border-accent bg-accent/20 text-accent-light' : 'border-zinc-700 bg-zinc-950/70 text-zinc-300 hover:text-zinc-100'}`}>
+        What the model sees
+      </button>
       {image.maskPath && (
         <button type="button" aria-pressed={showMask} onClick={() => setMaskFor(showMask ? null : image.id)}
           title={showMask ? 'Show the image' : 'Show the mask the cut-out was made from'}

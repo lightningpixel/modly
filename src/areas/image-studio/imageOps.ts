@@ -123,6 +123,8 @@ interface OpCopy {
 
 const OP_COPY: Record<string, OpCopy> = {
   remove_background: { noun: 'Background removal', running: 'Removing background…', note: 'It runs on your CPU, no GPU needed.' },
+  crop: { noun: 'Crop', running: 'Cropping…' },
+  auto_frame: { noun: 'Auto-frame', running: 'Framing…' },
 }
 
 export function opCopy(op: Pick<ImageOpDescriptor, 'id' | 'label'>): OpCopy {
@@ -135,6 +137,19 @@ export function setupMessage(op: Pick<ImageOpDescriptor, 'id' | 'label'>, downlo
   const size = approxSize(downloadBytes)
   const first = `${copy.noun} needs a one-time download${size ? ` (${size})` : ''}.`
   return copy.note ? `${first} ${copy.note}` : first
+}
+
+// ─── Model view ───────────────────────────────────────────────────────────────
+
+/**
+ * Caption of the "what the model sees" view. Generate uploads the file's
+ * bytes unchanged, so its own size is what the generator receives; a
+ * non-square image is then cropped or padded by each generator its own way.
+ */
+export function modelViewCaption(width: number, height: number): string {
+  const size = `${width} × ${height} px`
+  if (width === height) return `${size} · sent to Generate as is`
+  return `${size} · not square: each generator crops or pads it its own way. Auto-frame makes it square.`
 }
 
 // ─── API errors ───────────────────────────────────────────────────────────────
