@@ -8,6 +8,7 @@ import {
   HIDDEN_CARD,
   applyPrepareEvent,
   cardForStatus,
+  createRunLock,
   failInstall,
   opCopy,
   runInputFor,
@@ -15,6 +16,7 @@ import {
   startInstall,
   stepLabel,
   type ImageOpDescriptor,
+  type RunLock,
   type SetupCard,
 } from './imageOps'
 import { ImageOpNotReadyError, getImageOpStatus, listImageOps, prepareImageOp, runImageOp } from './imageOpsApi'
@@ -66,6 +68,8 @@ function WandIcon(): JSX.Element {
 export default function ImageOpsToolbar(props: ToolbarProps): JSX.Element | null {
   const apiUrl = useAppStore((s) => s.apiUrl)
   const [ops, setOps] = useState<ImageOpDescriptor[]>([])
+  const [runningOp, setRunningOp] = useState<string | null>(null)
+  const [lock] = useState(() => createRunLock(setRunningOp))
 
   useEffect(() => {
     if (!apiUrl) { setOps([]); return }
@@ -79,13 +83,22 @@ export default function ImageOpsToolbar(props: ToolbarProps): JSX.Element | null
   if (ops.length === 0) return null
   return (
     <div className="flex flex-wrap items-center gap-3">
-      {ops.map((op) => <ImageOpControl key={op.id} op={op} {...props} />)}
+      {ops.map((op) => (
+        <ImageOpControl key={op.id} op={op} lock={lock} blocked={runningOp !== null && runningOp !== op.id} {...props} />
+      ))}
     </div>
   )
 }
 
-function ImageOpControl({ op, entries, selected, onResult, onActivity }: ToolbarProps & { op: ImageOpDescriptor }): JSX.Element {
+function ImageOpControl({ op, lock, blocked, entries, selected, onResult, onActivity }: ToolbarProps & {
+  op: ImageOpDescriptor
+  /** Shared by all the ops: one runs at a time. */
+  lock: RunLock
+  /** Another op is running. */
+  blocked: boolean
+}): JSX.Element {
   const showError = useAppStore((s) => s.showError)
+  const showToast = useAppStore((s) => s.showToast)
   const [params, setParams] = useState<Record<string, unknown>>(() => defaultParamValues(op.params_schema))
   const [card, setCard] = useState<SetupCard>(HIDDEN_CARD)
   const [running, setRunning] = useState(false)
@@ -96,6 +109,10 @@ function ImageOpControl({ op, entries, selected, onResult, onActivity }: Toolbar
   const copy = opCopy(op)
 
   async function run(input: StudioImage, selectedId: string) {
+    if (!lock.claim(op.id)) {
+      showToast('Wait for the current image operation to finish')
+      return
+    }
     setRunning(true)
     onActivity({ ids: [selectedId, input.id], label: copy.running })
     try {
@@ -112,6 +129,7 @@ function ImageOpControl({ op, entries, selected, onResult, onActivity }: Toolbar
     } finally {
       setRunning(false)
       onActivity(null)
+      lock.release(op.id)
     }
   }
 
@@ -169,7 +187,7 @@ function ImageOpControl({ op, entries, selected, onResult, onActivity }: Toolbar
     if (target) await run(target.input, target.selectedId)
   }
 
-  const busy = running || card.phase === 'checking' || card.phase === 'installing'
+  const busy = running || blocked || card.phase === 'checking' || card.phase === 'installing'
 
   return (
     <div className="relative flex items-center gap-2">

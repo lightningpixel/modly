@@ -5,6 +5,7 @@ import {
   applyPrepareEvent,
   approxSize,
   cardForStatus,
+  createRunLock,
   failInstall,
   modelViewCaption,
   notReadyMissing,
@@ -154,4 +155,19 @@ test('crop and auto-frame have their own running label', () => {
 test('modelViewCaption states the size sent, and warns when it is not square', () => {
   assert.equal(modelViewCaption(1024, 1024), '1024 × 1024 px · sent to Generate as is')
   assert.match(modelViewCaption(800, 600), /^800 × 600 px · not square/)
+})
+
+// ─── Run lock ─────────────────────────────────────────────────────────────────
+
+test('one op at a time: a second op cannot run, nor free the lock of the first', () => {
+  const changes: (string | null)[] = []
+  const lock = createRunLock((holder) => changes.push(holder))
+  assert.equal(lock.claim(OP), true)
+  assert.equal(lock.claim('crop'), false)
+  lock.release('crop')
+  assert.equal(lock.holder(), OP)
+  lock.release(OP)
+  assert.equal(lock.holder(), null)
+  assert.equal(lock.claim('crop'), true)
+  assert.deepEqual(changes, [OP, null, 'crop'])
 })

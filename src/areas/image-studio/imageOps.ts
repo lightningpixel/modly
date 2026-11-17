@@ -39,6 +39,38 @@ export function runInputFor(entries: readonly StudioImage[], selected: StudioIma
   return selected
 }
 
+// ─── One op at a time ─────────────────────────────────────────────────────────
+
+/**
+ * The toolbar runs one op at a time: they share the canvas's busy overlay, so
+ * a second op finishing first would clear it while the other still runs.
+ */
+export interface RunLock {
+  /** Takes the lock for `opId`; false while another op holds it. */
+  claim: (opId: string) => boolean
+  /** Frees the lock if `opId` holds it. */
+  release: (opId: string) => void
+  holder: () => string | null
+}
+
+export function createRunLock(onChange: (holder: string | null) => void = () => {}): RunLock {
+  let holder: string | null = null
+  return {
+    claim: (opId) => {
+      if (holder !== null) return false
+      holder = opId
+      onChange(holder)
+      return true
+    },
+    release: (opId) => {
+      if (holder !== opId) return
+      holder = null
+      onChange(holder)
+    },
+    holder: () => holder,
+  }
+}
+
 // ─── Setup card ───────────────────────────────────────────────────────────────
 
 export type SetupCard =
