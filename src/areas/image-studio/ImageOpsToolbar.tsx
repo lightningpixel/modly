@@ -100,6 +100,9 @@ function ImageOpControl({ op, lock, blocked, entries, selected, onResult, onActi
   const showError = useAppStore((s) => s.showError)
   const showToast = useAppStore((s) => s.showToast)
   const [params, setParams] = useState<Record<string, unknown>>(() => defaultParamValues(op.params_schema))
+  /** The params as they are now: a run that waits for the setup download reads them when it starts, not when Download was clicked. */
+  const paramsRef = useRef(params)
+  paramsRef.current = params
   const [card, setCard] = useState<SetupCard>(HIDDEN_CARD)
   const [running, setRunning] = useState(false)
   /** Set once the op answered ready, so later clicks skip the status check. */
@@ -116,7 +119,7 @@ function ImageOpControl({ op, lock, blocked, entries, selected, onResult, onActi
     setRunning(true)
     onActivity({ ids: [selectedId, input.id], label: copy.running })
     try {
-      const result = await runImageOpOnFile(op.id, input.path, params)
+      const result = await runImageOpOnFile(op.id, input.path, paramsRef.current)
       await onResult({ op: op.id, path: result.path, maskPath: result.maskPath }, input)
     } catch (err) {
       if (err instanceof ImageOpNotReadyError) {
