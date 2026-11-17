@@ -186,6 +186,15 @@ export function modelViewCaption(width: number, height: number): string {
 
 // ─── API errors ───────────────────────────────────────────────────────────────
 
+/** Whether the error is a 403 `{detail:{code:'outside_workspace'}}`: the input must be copied into the workspace first. */
+export function isOutsideWorkspace(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false
+  const response = (err as { response?: { status?: number, data?: { detail?: unknown } } }).response
+  if (response?.status !== 403) return false
+  const detail = response.data?.detail
+  return Boolean(detail && typeof detail === 'object' && (detail as { code?: unknown }).code === 'outside_workspace')
+}
+
 /** The missing steps of a 409 `{detail:{code:'not_ready', missing}}`, or null for any other error. */
 export function notReadyMissing(err: unknown): SetupStep[] | null {
   if (!err || typeof err !== 'object') return null

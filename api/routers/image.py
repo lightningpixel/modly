@@ -178,15 +178,21 @@ async def prepare_image_operation(op_name: str):
 # ─── Run ──────────────────────────────────────────────────────────────────────
 
 def _resolve_image_path(raw_path: str) -> Path:
+    """The input file, which must be inside the workspace.
+
+    Absolute or workspace-relative; checked once fully resolved, so `..` and
+    symlinks pointing out of the workspace are refused too. The Image Studio
+    copies an image from elsewhere into <workspace>/Images before running an
+    op on it (it reads the 403 code `outside_workspace`).
+    """
     if not raw_path or not raw_path.strip():
         raise HTTPException(400, "path is required")
     candidate = Path(raw_path)
-    if candidate.is_absolute():
-        resolved = candidate.resolve()
-    else:
-        resolved = (registry.WORKSPACE_DIR / raw_path).resolve()
-        if not registry.is_within_workspace(resolved):
-            raise HTTPException(400, "Invalid path")
+    if not candidate.is_absolute():
+        candidate = registry.WORKSPACE_DIR / candidate
+    resolved = candidate.resolve()
+    if not registry.is_within_workspace(resolved):
+        raise HTTPException(403, {"code": "outside_workspace", "message": "The image must be inside the workspace folder."})
     if resolved.suffix.lower() not in IMAGE_EXTENSIONS:
         raise HTTPException(400, f"Unsupported image type {resolved.suffix or '(none)'}: use png, jpg, jpeg or webp")
     if not resolved.is_file():

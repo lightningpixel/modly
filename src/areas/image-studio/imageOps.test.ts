@@ -7,6 +7,7 @@ import {
   cardForStatus,
   createRunLock,
   failInstall,
+  isOutsideWorkspace,
   modelViewCaption,
   notReadyMissing,
   opCopy,
@@ -170,4 +171,13 @@ test('one op at a time: a second op cannot run, nor free the lock of the first',
   assert.equal(lock.holder(), null)
   assert.equal(lock.claim('crop'), true)
   assert.deepEqual(changes, [OP, null, 'crop'])
+})
+
+// ─── 403 outside_workspace ────────────────────────────────────────────────────
+
+test('isOutsideWorkspace recognises only the 403 outside_workspace', () => {
+  assert.equal(isOutsideWorkspace({ response: { status: 403, data: { detail: { code: 'outside_workspace' } } } }), true)
+  assert.equal(isOutsideWorkspace({ response: { status: 403, data: { detail: 'Forbidden' } } }), false)
+  assert.equal(isOutsideWorkspace({ response: { status: 400, data: { detail: { code: 'outside_workspace' } } } }), false)
+  assert.equal(isOutsideWorkspace(new Error('boom')), false)
 })

@@ -19,7 +19,7 @@ import {
   type RunLock,
   type SetupCard,
 } from './imageOps'
-import { ImageOpNotReadyError, getImageOpStatus, listImageOps, prepareImageOp, runImageOp } from './imageOpsApi'
+import { ImageOpNotReadyError, getImageOpStatus, listImageOps, prepareImageOp, runImageOpOnFile } from './imageOpsApi'
 
 // Image operations served by the backend (GET /image/ops: background removal,
 // …). A run reads an image and writes a NEW file; the page adds it to the
@@ -116,7 +116,7 @@ function ImageOpControl({ op, lock, blocked, entries, selected, onResult, onActi
     setRunning(true)
     onActivity({ ids: [selectedId, input.id], label: copy.running })
     try {
-      const result = await runImageOp(op.id, input.path, params)
+      const result = await runImageOpOnFile(op.id, input.path, params)
       await onResult({ op: op.id, path: result.path, maskPath: result.maskPath }, input)
     } catch (err) {
       if (err instanceof ImageOpNotReadyError) {
