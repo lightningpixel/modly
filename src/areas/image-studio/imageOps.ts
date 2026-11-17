@@ -14,7 +14,15 @@ export interface ImageOpDescriptor {
   id: string
   label: string
   params_schema: MeshOpParamSchema[]
-  requirements: string[]
+  requirements: ImageOpRequirement[]
+}
+
+/** One entry of an op's `requirements` (ImageOp.describe() on the backend). */
+export interface ImageOpRequirement {
+  kind: SetupStep
+  /** e.g. "onnxruntime", "birefnet-lite" */
+  id: string
+  label: string
 }
 
 /** GET /image/op/{op}/status */
