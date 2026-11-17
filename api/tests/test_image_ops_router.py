@@ -108,11 +108,44 @@ class ImageRouterTests(unittest.TestCase):
         self.runtime.ready = self.model.ready = True
         other = self.workspace / "model.glb"
         other.write_bytes(b"glb")
-        cases = [(str(other), 400), ("../outside.png", 400), ("", 400), (str(self.workspace / "gone.png"), 404)]
+        cases = [(str(other), 400), ("", 400), (str(self.workspace / "gone.png"), 404)]
         for path, status in cases:
             with self.subTest(path=path), self.assertRaises(HTTPException) as caught:
                 self._run(path)
             self.assertEqual(caught.exception.status_code, status)
+        self.assertEqual(self.calls, [])
+
+    def test_run_refuses_images_outside_the_workspace(self) -> None:
+        self.runtime.ready = self.model.ready = True
+        outside = Path(self._tmp.name) / "outside.png"
+        Image.fromarray(np.zeros((4, 4, 3), dtype=np.uint8)).save(outside)
+        sibling = Path(f"{self.workspace}-other") / "photo.png"
+        sibling.parent.mkdir()
+        Image.fromarray(np.zeros((4, 4, 3), dtype=np.uint8)).save(sibling)
+        for path in (
+            str(outside),
+            "../outside.png",
+            str(self.workspace / "Images" / ".." / ".." / "outside.png"),
+            str(sibling),
+        ):
+            with self.subTest(path=path), self.assertRaises(HTTPException) as caught:
+                self._run(path)
+            self.assertEqual(caught.exception.status_code, 403)
+            self.assertEqual(caught.exception.detail["code"], "outside_workspace")
+        self.assertEqual(self.calls, [])
+
+    def test_run_refuses_a_symlink_out_of_the_workspace(self) -> None:
+        self.runtime.ready = self.model.ready = True
+        outside = Path(self._tmp.name) / "outside.png"
+        Image.fromarray(np.zeros((4, 4, 3), dtype=np.uint8)).save(outside)
+        link = self.workspace / "link.png"
+        try:
+            link.symlink_to(outside)
+        except OSError:
+            self.skipTest("creating symlinks is not permitted here")
+        with self.assertRaises(HTTPException) as caught:
+            self._run(str(link))
+        self.assertEqual(caught.exception.status_code, 403)
         self.assertEqual(self.calls, [])
 
     def test_run_accepts_absolute_and_workspace_relative_paths(self) -> None:

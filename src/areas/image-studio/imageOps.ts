@@ -14,7 +14,15 @@ export interface ImageOpDescriptor {
   id: string
   label: string
   params_schema: MeshOpParamSchema[]
-  requirements: string[]
+  requirements: ImageOpRequirement[]
+}
+
+/** One entry of an op's `requirements` (ImageOp.describe() on the backend). */
+export interface ImageOpRequirement {
+  kind: SetupStep
+  /** e.g. "onnxruntime", "birefnet-lite" */
+  id: string
+  label: string
 }
 
 /** GET /image/op/{op}/status */
@@ -37,6 +45,38 @@ export type PrepareEvent = SseEvent & { step?: SetupStep }
 export function runInputFor(entries: readonly StudioImage[], selected: StudioImage, opId: string): StudioImage {
   if (selected.op === opId) return sourceOf(entries, selected) ?? selected
   return selected
+}
+
+// ─── One op at a time ─────────────────────────────────────────────────────────
+
+/**
+ * The toolbar runs one op at a time: they share the canvas's busy overlay, so
+ * a second op finishing first would clear it while the other still runs.
+ */
+export interface RunLock {
+  /** Takes the lock for `opId`; false while another op holds it. */
+  claim: (opId: string) => boolean
+  /** Frees the lock if `opId` holds it. */
+  release: (opId: string) => void
+  holder: () => string | null
+}
+
+export function createRunLock(onChange: (holder: string | null) => void = () => {}): RunLock {
+  let holder: string | null = null
+  return {
+    claim: (opId) => {
+      if (holder !== null) return false
+      holder = opId
+      onChange(holder)
+      return true
+    },
+    release: (opId) => {
+      if (holder !== opId) return
+      holder = null
+      onChange(holder)
+    },
+    holder: () => holder,
+  }
 }
 
 // ─── Setup card ───────────────────────────────────────────────────────────────
@@ -123,6 +163,8 @@ interface OpCopy {
 
 const OP_COPY: Record<string, OpCopy> = {
   remove_background: { noun: 'Background removal', running: 'Removing background…', note: 'It runs on your CPU, no GPU needed.' },
+  crop: { noun: 'Crop', running: 'Cropping…' },
+  auto_frame: { noun: 'Auto-frame', running: 'Framing…' },
 }
 
 export function opCopy(op: Pick<ImageOpDescriptor, 'id' | 'label'>): OpCopy {
@@ -137,7 +179,29 @@ export function setupMessage(op: Pick<ImageOpDescriptor, 'id' | 'label'>, downlo
   return copy.note ? `${first} ${copy.note}` : first
 }
 
+// ─── Model view ───────────────────────────────────────────────────────────────
+
+/**
+ * Caption of the "what the model sees" view. Generate uploads the file's
+ * bytes unchanged, so its own size is what the generator receives; a
+ * non-square image is then cropped or padded by each generator its own way.
+ */
+export function modelViewCaption(width: number, height: number): string {
+  const size = `${width} × ${height} px`
+  if (width === height) return `${size} · sent to Generate as is`
+  return `${size} · not square: each generator crops or pads it its own way. Auto-frame makes it square.`
+}
+
 // ─── API errors ───────────────────────────────────────────────────────────────
+
+/** Whether the error is a 403 `{detail:{code:'outside_workspace'}}`: the input must be copied into the workspace first. */
+export function isOutsideWorkspace(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false
+  const response = (err as { response?: { status?: number, data?: { detail?: unknown } } }).response
+  if (response?.status !== 403) return false
+  const detail = response.data?.detail
+  return Boolean(detail && typeof detail === 'object' && (detail as { code?: unknown }).code === 'outside_workspace')
+}
 
 /** The missing steps of a 409 `{detail:{code:'not_ready', missing}}`, or null for any other error. */
 export function notReadyMissing(err: unknown): SetupStep[] | null {

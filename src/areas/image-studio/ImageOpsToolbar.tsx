@@ -8,6 +8,7 @@ import {
   HIDDEN_CARD,
   applyPrepareEvent,
   cardForStatus,
+  createRunLock,
   failInstall,
   opCopy,
   runInputFor,
@@ -15,9 +16,10 @@ import {
   startInstall,
   stepLabel,
   type ImageOpDescriptor,
+  type RunLock,
   type SetupCard,
 } from './imageOps'
-import { ImageOpNotReadyError, getImageOpStatus, listImageOps, prepareImageOp, runImageOp } from './imageOpsApi'
+import { ImageOpNotReadyError, getImageOpStatus, listImageOps, prepareImageOp, runImageOpOnFile } from './imageOpsApi'
 
 // Image operations served by the backend (GET /image/ops: background removal,
 // …). A run reads an image and writes a NEW file; the page adds it to the
@@ -66,6 +68,8 @@ function WandIcon(): JSX.Element {
 export default function ImageOpsToolbar(props: ToolbarProps): JSX.Element | null {
   const apiUrl = useAppStore((s) => s.apiUrl)
   const [ops, setOps] = useState<ImageOpDescriptor[]>([])
+  const [runningOp, setRunningOp] = useState<string | null>(null)
+  const [lock] = useState(() => createRunLock(setRunningOp))
 
   useEffect(() => {
     if (!apiUrl) { setOps([]); return }
@@ -79,14 +83,26 @@ export default function ImageOpsToolbar(props: ToolbarProps): JSX.Element | null
   if (ops.length === 0) return null
   return (
     <div className="flex flex-wrap items-center gap-3">
-      {ops.map((op) => <ImageOpControl key={op.id} op={op} {...props} />)}
+      {ops.map((op) => (
+        <ImageOpControl key={op.id} op={op} lock={lock} blocked={runningOp !== null && runningOp !== op.id} {...props} />
+      ))}
     </div>
   )
 }
 
-function ImageOpControl({ op, entries, selected, onResult, onActivity }: ToolbarProps & { op: ImageOpDescriptor }): JSX.Element {
+function ImageOpControl({ op, lock, blocked, entries, selected, onResult, onActivity }: ToolbarProps & {
+  op: ImageOpDescriptor
+  /** Shared by all the ops: one runs at a time. */
+  lock: RunLock
+  /** Another op is running. */
+  blocked: boolean
+}): JSX.Element {
   const showError = useAppStore((s) => s.showError)
+  const showToast = useAppStore((s) => s.showToast)
   const [params, setParams] = useState<Record<string, unknown>>(() => defaultParamValues(op.params_schema))
+  /** The params as they are now: a run that waits for the setup download reads them when it starts, not when Download was clicked. */
+  const paramsRef = useRef(params)
+  paramsRef.current = params
   const [card, setCard] = useState<SetupCard>(HIDDEN_CARD)
   const [running, setRunning] = useState(false)
   /** Set once the op answered ready, so later clicks skip the status check. */
@@ -96,10 +112,14 @@ function ImageOpControl({ op, entries, selected, onResult, onActivity }: Toolbar
   const copy = opCopy(op)
 
   async function run(input: StudioImage, selectedId: string) {
+    if (!lock.claim(op.id)) {
+      showToast('Wait for the current image operation to finish')
+      return
+    }
     setRunning(true)
     onActivity({ ids: [selectedId, input.id], label: copy.running })
     try {
-      const result = await runImageOp(op.id, input.path, params)
+      const result = await runImageOpOnFile(op.id, input.path, paramsRef.current)
       await onResult({ op: op.id, path: result.path, maskPath: result.maskPath }, input)
     } catch (err) {
       if (err instanceof ImageOpNotReadyError) {
@@ -112,6 +132,7 @@ function ImageOpControl({ op, entries, selected, onResult, onActivity }: Toolbar
     } finally {
       setRunning(false)
       onActivity(null)
+      lock.release(op.id)
     }
   }
 
@@ -169,7 +190,7 @@ function ImageOpControl({ op, entries, selected, onResult, onActivity }: Toolbar
     if (target) await run(target.input, target.selectedId)
   }
 
-  const busy = running || card.phase === 'checking' || card.phase === 'installing'
+  const busy = running || blocked || card.phase === 'checking' || card.phase === 'installing'
 
   return (
     <div className="relative flex items-center gap-2">
@@ -178,7 +199,8 @@ function ImageOpControl({ op, entries, selected, onResult, onActivity }: Toolbar
         values={params}
         onChange={(id, value) => setParams((current) => ({ ...current, [id]: value }))}
         disabled={running}
-        className="flex w-52 flex-col gap-1"
+        // Crop's four edges sit in two columns to keep the header short.
+        className={op.params_schema.length > 2 ? 'grid w-80 grid-cols-2 gap-x-3 gap-y-1' : 'flex w-52 flex-col gap-1'}
       />
       <button type="button" onClick={() => { void start() }} disabled={busy} aria-busy={running} className={BUTTON_CLASS}>
         {running ? <><Spinner /> {copy.running}</> : <><WandIcon /> {op.label}</>}

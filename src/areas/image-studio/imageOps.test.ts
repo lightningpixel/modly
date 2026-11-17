@@ -5,8 +5,12 @@ import {
   applyPrepareEvent,
   approxSize,
   cardForStatus,
+  createRunLock,
   failInstall,
+  isOutsideWorkspace,
+  modelViewCaption,
   notReadyMissing,
+  opCopy,
   runInputFor,
   setupMessage,
   startInstall,
@@ -131,4 +135,49 @@ test('notReadyMissing ignores other errors', () => {
   assert.equal(notReadyMissing(new Error('boom')), null)
   assert.equal(notReadyMissing({ response: { status: 409, data: { detail: 'busy' } } }), null)
   assert.equal(notReadyMissing({ response: { status: 500, data: { detail: { code: 'not_ready' } } } }), null)
+})
+
+// ─── Crop / auto-frame ────────────────────────────────────────────────────────
+
+test('re-running auto-frame or crop on its own result starts again from its source', () => {
+  const cut = image('cut', { sourceId: 'photo', op: OP })
+  const framed = image('framed', { sourceId: 'cut', op: 'auto_frame' })
+  assert.equal(runInputFor([framed, cut], framed, 'auto_frame'), cut)
+  assert.equal(runInputFor([framed, cut], cut, 'auto_frame'), cut)
+  const cropped = image('cropped', { sourceId: 'cut', op: 'crop' })
+  assert.equal(runInputFor([cropped, cut], cropped, 'crop'), cut)
+})
+
+test('crop and auto-frame have their own running label', () => {
+  assert.equal(opCopy({ id: 'crop', label: 'Crop' }).running, 'Cropping…')
+  assert.equal(opCopy({ id: 'auto_frame', label: 'Auto-frame' }).running, 'Framing…')
+})
+
+test('modelViewCaption states the size sent, and warns when it is not square', () => {
+  assert.equal(modelViewCaption(1024, 1024), '1024 × 1024 px · sent to Generate as is')
+  assert.match(modelViewCaption(800, 600), /^800 × 600 px · not square/)
+})
+
+// ─── Run lock ─────────────────────────────────────────────────────────────────
+
+test('one op at a time: a second op cannot run, nor free the lock of the first', () => {
+  const changes: (string | null)[] = []
+  const lock = createRunLock((holder) => changes.push(holder))
+  assert.equal(lock.claim(OP), true)
+  assert.equal(lock.claim('crop'), false)
+  lock.release('crop')
+  assert.equal(lock.holder(), OP)
+  lock.release(OP)
+  assert.equal(lock.holder(), null)
+  assert.equal(lock.claim('crop'), true)
+  assert.deepEqual(changes, [OP, null, 'crop'])
+})
+
+// ─── 403 outside_workspace ────────────────────────────────────────────────────
+
+test('isOutsideWorkspace recognises only the 403 outside_workspace', () => {
+  assert.equal(isOutsideWorkspace({ response: { status: 403, data: { detail: { code: 'outside_workspace' } } } }), true)
+  assert.equal(isOutsideWorkspace({ response: { status: 403, data: { detail: 'Forbidden' } } }), false)
+  assert.equal(isOutsideWorkspace({ response: { status: 400, data: { detail: { code: 'outside_workspace' } } } }), false)
+  assert.equal(isOutsideWorkspace(new Error('boom')), false)
 })

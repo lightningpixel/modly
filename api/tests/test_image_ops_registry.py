@@ -56,8 +56,8 @@ def make_op(requirements=(), fn=None) -> ImageOp:
 class ImageOpsRegistryTests(unittest.TestCase):
     def test_builtin_metadata_is_serializable(self) -> None:
         described = image_ops_registry.describe()
-        self.assertEqual([d["id"] for d in described], ["remove_background"])
-        op = described[0]
+        self.assertEqual([d["id"] for d in described], ["crop", "remove_background", "auto_frame"])
+        op = described[1]
         self.assertEqual(op["label"], "Remove background")
         self.assertEqual(
             [(r["kind"], r["id"]) for r in op["requirements"]],
