@@ -4,6 +4,7 @@ from .agent_format import format_fixes, format_inspection, format_preset, format
 from .inspection import inspect_mesh, suggest_fixes
 from .operations import decimate_mesh, repair_mesh, smooth_mesh
 from .presets import prepare_for_game, prepare_for_printing, prepare_for_web
+from .real_scale import set_real_scale
 from .repair import auto_repair_mesh
 from .transforms import auto_orient, drop_to_ground, normalize_scale, recenter
 from .types import AgentTool, MeshOp
@@ -159,6 +160,45 @@ NORMALIZE_SCALE_PARAMS = (
             {"value": "z", "label": "Depth (Z)"},
         ],
         "tooltip": "Which bounding-box dimension is set to the target size.",
+    },
+)
+
+
+SET_REAL_SCALE_PARAMS = (
+    {
+        "id": "size",
+        "label": "Real Size",
+        "type": "float",
+        "default": 10.0,
+        "min": 0.001,
+        "max": 100000.0,
+        "step": 0.1,
+        "tooltip": "How big the measured dimension really is, in the chosen unit.",
+    },
+    {
+        "id": "unit",
+        "label": "Unit",
+        "type": "select",
+        "default": "cm",
+        "options": [
+            {"value": "mm", "label": "Millimetres"},
+            {"value": "cm", "label": "Centimetres"},
+            {"value": "m", "label": "Metres"},
+        ],
+        "tooltip": "Unit of the real size.",
+    },
+    {
+        "id": "dimension",
+        "label": "Dimension",
+        "type": "select",
+        "default": "longest",
+        "options": [
+            {"value": "longest", "label": "Longest side"},
+            {"value": "x", "label": "Width (X)"},
+            {"value": "y", "label": "Height (Y)"},
+            {"value": "z", "label": "Depth (Z)"},
+        ],
+        "tooltip": "Which bounding-box dimension has the real size.",
     },
 )
 
@@ -354,6 +394,27 @@ BUILTIN_MESH_OPS = (
         params_schema=NORMALIZE_SCALE_PARAMS,
         fn=normalize_scale,
         category="transform",
+    ),
+    MeshOp(
+        id="set_real_scale",
+        label="Set Real Size",
+        params_schema=SET_REAL_SCALE_PARAMS,
+        fn=set_real_scale,
+        category="transform",
+        agent=AgentTool(
+            description=(
+                "Declare how big the object really is (\"this is 30 cm tall\"): rescales the "
+                "mesh to that size and marks it calibrated, so the Print page and STL "
+                "exports use its real size."
+            ),
+            params={
+                "size": "Real size of `dimension`, in `unit`.",
+                "unit": "mm, cm or m.",
+                "dimension": DIMENSION_HINT,
+            },
+            required=("size", "unit"),
+            format_result=format_preset,
+        ),
     ),
     MeshOp(
         id="prepare_for_printing",

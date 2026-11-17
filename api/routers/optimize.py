@@ -26,6 +26,7 @@ from services.mesh_ops import (
     mesh_ops_registry,
 )
 from services.mesh_ops.glb_patch import GlbPatchError, VertexPatch, patch_glb_file
+from services.mesh_ops.real_scale import export_scale
 from services.mesh_ops.transforms import apply_transforms, transform_file
 from schemas.runs import RunRecord
 from services.run_history import run_history, workspace_relative
@@ -537,6 +538,9 @@ def export_mesh(path: str, format: str):
         mesh = trimesh.util.concatenate(geoms) if len(geoms) > 1 else geoms[0]
     else:
         mesh = loaded
+    scale = export_scale(input_path, format)
+    if scale != 1.0:
+        mesh.apply_scale(scale)
 
     data = mesh.export(file_type=format)
     stem = input_path.stem

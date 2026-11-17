@@ -6,6 +6,7 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Optional
 
+from .real_scale import carry_real_scale
 from .types import MeshOp, MeshOpContext, MeshOpNotFoundError, MeshOpResult
 
 
@@ -98,7 +99,9 @@ class MeshOpsRegistry:
         if not path.is_file():
             raise FileNotFoundError(f"Input mesh not found: {path}")
 
-        return operation.fn(path, self.resolve_params(operation_id, params), context)
+        result = operation.fn(path, self.resolve_params(operation_id, params), context)
+        carry_real_scale(path, result.file_path)
+        return result
 
     def resolve_params(
         self,

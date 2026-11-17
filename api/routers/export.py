@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response, FileResponse
 
 from services import imported_sources
+from services.mesh_ops.real_scale import MM_PER_M, export_scale, is_calibrated
 # Import the module (not the name) so WORKSPACE_DIR is read at call time: the
 # settings endpoint rebinds it when the user moves the workspace.
 import services.generator_registry as registry
@@ -164,7 +165,12 @@ def export_for_slicer(fmt: str, token: str, filename: str):
     # thing this corrects — lay an upright model on its side.
     if source_suffix in GLTF_SUFFIXES:
         mesh.apply_transform(trimesh.transformations.rotation_matrix(math.pi / 2, [1, 0, 0]))
-    _normalize_print_scale(mesh)
+    # A calibrated asset is in metres and slicers read millimetres; only an
+    # uncalibrated one needs the unit-size guess.
+    if is_calibrated(full_path):
+        mesh.apply_scale(MM_PER_M)
+    else:
+        _normalize_print_scale(mesh)
 
     data = mesh.export(file_type=fmt)
     if isinstance(data, str):
@@ -200,6 +206,9 @@ def export_mesh(fmt: str, path: str):
         mesh = trimesh.util.concatenate(geoms) if len(geoms) > 1 else geoms[0]
     else:
         mesh = loaded
+    scale = export_scale(full_path, fmt)
+    if scale != 1.0:
+        mesh.apply_scale(scale)
 
     buf = io.BytesIO()
     if fmt == "stl":
