@@ -3,6 +3,7 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import trimesh
@@ -10,6 +11,7 @@ import trimesh
 import routers.export as export_router
 import routers.optimize as optimize_router
 from services.mesh_ops import MeshOp, MeshOpContext, MeshOpResult, MeshOpsRegistry, mesh_ops_registry
+from services.mesh_ops import real_scale
 from services.mesh_ops.real_scale import (
     is_calibrated,
     read_real_scale,
@@ -113,6 +115,26 @@ class SetRealScaleTests(unittest.TestCase):
         self.assertIsNone(read_real_scale(junk))
         self.assertIsNone(read_real_scale(self.workspace / "missing.glb"))
 
+    def test_reading_the_declaration_stops_after_the_json_chunk(self) -> None:
+        path = self.workspace / "real.glb"
+        trimesh.creation.box().export(str(path))
+        write_real_scale(path)
+        data = path.read_bytes()
+        json_length = int.from_bytes(data[12:16], "little")
+        # Keep the header and JSON chunk only: the binary data is never needed.
+        path.write_bytes(data[:20 + json_length])
+
+        self.assertEqual(read_real_scale(path), {"unit": "m"})
+
+    def test_carrying_never_reads_the_output_of_an_uncalibrated_input(self) -> None:
+        output = self.workspace / "out.glb"
+        trimesh.creation.box().export(str(output))
+
+        with mock.patch.object(real_scale, "read_real_scale", wraps=real_scale.read_real_scale) as read:
+            real_scale.carry_real_scale(self.mesh, output)
+
+        self.assertEqual([call.args[0] for call in read.call_args_list], [self.mesh])
+
     def test_the_op_is_offered_in_the_registry(self) -> None:
         described = {op["id"]: op for op in mesh_ops_registry.describe()}["set_real_scale"]
 
@@ -158,6 +180,90 @@ class RealScaleExportTests(unittest.TestCase):
 
         # Y-up to Z-up, in millimetres, not resized to the 50 mm default.
         np.testing.assert_allclose(_stl_extents(body), [100, 200, 300], atol=1e-3)
+
+
+def _stored_extents(path: Path) -> np.ndarray:
+    """Extents of the vertices as stored, ignoring any node transform."""
+    loaded = trimesh.load(str(path))
+    geometries = loaded.geometry.values() if isinstance(loaded, trimesh.Scene) else [loaded]
+    return np.ptp(np.vstack([g.vertices for g in geometries]), axis=0)
+
+
+class RealScaleEndToEndTests(unittest.TestCase):
+    """set_real_scale, then the ops and exports a user runs next, on real files."""
+
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._directory.name).resolve()
+        self._original = export_router.registry.WORKSPACE_DIR
+        export_router.registry.WORKSPACE_DIR = self.workspace
+        # Generator output: 2 × 1 × 0.5 units, no real size.
+        trimesh.creation.box(extents=[2.0, 1.0, 0.5]).export(str(self.workspace / "raw.glb"))
+
+    def tearDown(self) -> None:
+        export_router.registry.WORKSPACE_DIR = self._original
+        self._directory.cleanup()
+
+    def _run(self, op_id: str, input_name: str, output_name: str, **params) -> Path:
+        output = self.workspace / output_name
+        context = MeshOpContext(self.workspace, self.workspace, output_path=output)
+        result = mesh_ops_registry.run(op_id, self.workspace / input_name, params, context)
+        return result.file_path
+
+    def _slicer_extents(self, name: str) -> np.ndarray:
+        token = base64.urlsafe_b64encode(name.encode()).decode("ascii").rstrip("=")
+        return _stl_extents(export_router.export_for_slicer("stl", token, "model.stl").body)
+
+    def test_the_declared_size_is_baked_into_the_vertices(self) -> None:
+        self._run("set_real_scale", "raw.glb", "real.glb", size=30, unit="cm")
+
+        np.testing.assert_allclose(_stored_extents(self.workspace / "real.glb"), [0.3, 0.15, 0.075], atol=1e-6)
+
+    def test_an_stl_export_after_set_real_scale_measures_the_declared_size(self) -> None:
+        self._run("set_real_scale", "raw.glb", "real.glb", size=30, unit="cm")
+
+        body = export_router.export_mesh("stl", "real.glb").body
+        np.testing.assert_allclose(_stl_extents(body), [300, 150, 75], atol=1e-3)
+        body = optimize_router.export_mesh(path="real.glb", format="stl").body
+        np.testing.assert_allclose(_stl_extents(body), [300, 150, 75], atol=1e-3)
+        # Y-up to Z-up for the slicer.
+        np.testing.assert_allclose(self._slicer_extents("real.glb"), [300, 75, 150], atol=1e-3)
+
+    def test_repair_and_smooth_keep_the_declared_size(self) -> None:
+        # A sphere: smoothing a box would round its corners off.
+        trimesh.creation.icosphere(subdivisions=3).export(str(self.workspace / "sphere.glb"))
+        self._run("set_real_scale", "sphere.glb", "real.glb", size=30, unit="cm")
+
+        for op_id in ("repair", "smooth"):
+            with self.subTest(op=op_id):
+                self._run(op_id, "real.glb", f"{op_id}.glb")
+                self.assertTrue(is_calibrated(self.workspace / f"{op_id}.glb"))
+                body = export_router.export_mesh("stl", f"{op_id}.glb").body
+                self.assertAlmostEqual(float(max(_stl_extents(body))), 300.0, delta=10.0)
+
+    def test_ops_read_node_transforms_of_any_glb(self) -> None:
+        # A GLB from elsewhere whose size lives in a node matrix.
+        scene = trimesh.Scene()
+        scene.add_geometry(trimesh.creation.box(extents=[2.0, 1.0, 0.5]), transform=np.diag([0.1, 0.1, 0.1, 1.0]))
+        scene.export(str(self.workspace / "nodes.glb"))
+
+        self._run("repair", "nodes.glb", "nodes-repaired.glb")
+
+        np.testing.assert_allclose(_stored_extents(self.workspace / "nodes-repaired.glb"), [0.2, 0.1, 0.05], atol=1e-6)
+        body = export_router.export_mesh("stl", "nodes.glb").body
+        np.testing.assert_allclose(_stl_extents(body), [0.2, 0.1, 0.05], atol=1e-6)
+
+    def test_normalize_scale_declares_a_real_size(self) -> None:
+        self._run("normalize_scale", "raw.glb", "scaled.glb", size=12, unit="cm")
+
+        self.assertTrue(is_calibrated(self.workspace / "scaled.glb"))
+        self.assertAlmostEqual(float(max(self._slicer_extents("scaled.glb"))), 120.0, places=3)
+
+    def test_prepare_for_printing_reaches_the_slicer_at_the_requested_size(self) -> None:
+        self._run("prepare_for_printing", "raw.glb", "print.glb", size_mm=100)
+
+        self.assertTrue(is_calibrated(self.workspace / "print.glb"))
+        self.assertAlmostEqual(float(max(self._slicer_extents("print.glb"))), 100.0, places=3)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response, FileResponse
 
 from services import imported_sources
+from services.mesh_ops.geometry import single_mesh
 from services.mesh_ops.real_scale import MM_PER_M, export_scale, is_calibrated
 # Import the module (not the name) so WORKSPACE_DIR is read at call time: the
 # settings endpoint rebinds it when the user moves the workspace.
@@ -199,13 +200,11 @@ def export_mesh(fmt: str, path: str):
     if fmt == "glb":
         return FileResponse(str(full_path), media_type="model/gltf-binary")
 
-    # Load and flatten scene to a single mesh
-    loaded = trimesh.load(str(full_path))
-    if isinstance(loaded, trimesh.Scene):
-        geoms = list(loaded.geometry.values())
-        mesh = trimesh.util.concatenate(geoms) if len(geoms) > 1 else geoms[0]
-    else:
-        mesh = loaded
+    # Flatten to a single mesh in world space (node transforms applied).
+    try:
+        mesh = single_mesh(trimesh.load(str(full_path)), trimesh)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     scale = export_scale(full_path, fmt)
     if scale != 1.0:
         mesh.apply_scale(scale)

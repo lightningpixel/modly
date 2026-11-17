@@ -1,8 +1,9 @@
-"""Real-world scale: declare how big an asset really is, and remember it.
+"""Real-world scale: whether a GLB's numbers really are metres.
 
 glTF's unit is the metre, but generators emit meshes at an arbitrary size, so
-a GLB's numbers only mean metres once someone has said how big the object is.
-That declaration is stored in the file itself, in the default scene's extras:
+a GLB's numbers only mean metres once someone has said how big the object is
+(set_real_scale, normalize_scale, the prepare_for_* presets). That declaration
+is stored in the file itself, in the default scene's extras:
 
     scenes[scene].extras.modly.real_scale = {"unit": "m"}
 
@@ -11,14 +12,12 @@ it from the loaded scene's userData. Ops that rebuild the mesh drop the extras;
 the registry carries the marker over to their output (see carry_real_scale).
 """
 
+import json
+import struct
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from .glb_patch import GlbPatchError, _build_glb, _parse_glb
-from .operations import _output_path
-from .presets import DIMENSION_NAMES
-from .transforms import apply_transforms
-from .types import MeshOpContext, MeshOpResult
 
 
 EXTRAS_KEY = "modly"
@@ -26,6 +25,9 @@ REAL_SCALE_KEY = "real_scale"
 CALIBRATED = {"unit": "m"}
 # STL carries no unit and every slicer reads it as millimetres.
 MM_PER_M = 1000.0
+
+_GLB_MAGIC = 0x46546C67      # "glTF"
+_CHUNK_JSON = 0x4E4F534A     # "JSON"
 
 
 def _default_scene(gltf: dict) -> Optional[dict]:
@@ -39,16 +41,32 @@ def _default_scene(gltf: dict) -> Optional[dict]:
     return scene if isinstance(scene, dict) else None
 
 
+def _read_gltf_json(path: Path) -> Optional[dict]:
+    """The JSON chunk of a GLB, reading only the header and that chunk."""
+    with open(path, "rb") as handle:
+        header = handle.read(20)
+        if len(header) < 20:
+            return None
+        magic, version, _length, json_length, chunk_type = struct.unpack("<IIIII", header)
+        if magic != _GLB_MAGIC or version != 2 or chunk_type != _CHUNK_JSON:
+            return None
+        chunk = handle.read(json_length)
+    if len(chunk) != json_length:
+        return None
+    gltf = json.loads(chunk.decode("utf-8"))
+    return gltf if isinstance(gltf, dict) else None
+
+
 def read_real_scale(path: Path) -> Optional[dict[str, Any]]:
     """The asset's real-scale declaration, or None when it is not calibrated."""
     path = Path(path)
     if path.suffix.lower() != ".glb" or not path.is_file():
         return None
     try:
-        gltf, _ = _parse_glb(path.read_bytes())
-    except (GlbPatchError, OSError):
+        gltf = _read_gltf_json(path)
+    except (OSError, UnicodeDecodeError, ValueError):
         return None
-    scene = _default_scene(gltf)
+    scene = _default_scene(gltf) if gltf else None
     extras = scene.get("extras") if scene else None
     modly = extras.get(EXTRAS_KEY) if isinstance(extras, dict) else None
     declaration = modly.get(REAL_SCALE_KEY) if isinstance(modly, dict) else None
@@ -86,6 +104,8 @@ def carry_real_scale(input_path: Path, output_path: Optional[Path]) -> None:
     """
     if output_path is None or Path(output_path).suffix.lower() != ".glb":
         return
+    # The input first: most meshes are not calibrated, and then the output
+    # is never read.
     declaration = read_real_scale(input_path)
     if declaration is None or is_calibrated(output_path):
         return
@@ -102,28 +122,3 @@ def export_scale(path: Path, fmt: str) -> float:
     the file's own units (metres for a calibrated GLB, arbitrary otherwise).
     """
     return MM_PER_M if fmt.lower() == "stl" and is_calibrated(path) else 1.0
-
-
-def set_real_scale(
-    input_path: Path,
-    params: Mapping[str, Any],
-    context: MeshOpContext,
-) -> MeshOpResult:
-    """"This object is 30 cm": rescale the mesh to that size and mark it calibrated."""
-    output_path = _output_path(context, "set-real-scale")
-    # normalize_scale already turns "size in a unit along a dimension" into
-    # metres; the declaration is what makes the result trustworthy downstream.
-    result = apply_transforms(input_path, [("normalize_scale", params)], output_path, context)
-    write_real_scale(output_path)
-    dimensions = [float(value) for value in result.details["dimensions"]]
-    side = DIMENSION_NAMES[params["dimension"]]
-    summary = f"Declared the {side} as {params['size']:g} {params['unit']}: the mesh is now at real size."
-    return MeshOpResult(
-        file_path=output_path,
-        details={
-            "steps": [{"op": "set_real_scale", **params, "summary": summary}],
-            "real_scale": dict(CALIBRATED),
-            "dimensions": dimensions,
-            "dimensions_mm": [value * MM_PER_M for value in dimensions],
-        },
-    )

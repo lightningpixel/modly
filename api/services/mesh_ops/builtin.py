@@ -4,9 +4,8 @@ from .agent_format import format_fixes, format_inspection, format_preset, format
 from .inspection import inspect_mesh, suggest_fixes
 from .operations import decimate_mesh, repair_mesh, smooth_mesh
 from .presets import prepare_for_game, prepare_for_printing, prepare_for_web
-from .real_scale import set_real_scale
 from .repair import auto_repair_mesh
-from .transforms import auto_orient, drop_to_ground, normalize_scale, recenter
+from .transforms import auto_orient, drop_to_ground, normalize_scale, recenter, set_real_scale
 from .types import AgentTool, MeshOp
 
 

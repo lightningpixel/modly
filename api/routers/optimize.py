@@ -26,6 +26,7 @@ from services.mesh_ops import (
     mesh_ops_registry,
 )
 from services.mesh_ops.glb_patch import GlbPatchError, VertexPatch, patch_glb_file
+from services.mesh_ops.geometry import single_mesh
 from services.mesh_ops.real_scale import export_scale
 from services.mesh_ops.transforms import apply_transforms, transform_file
 from schemas.runs import RunRecord
@@ -532,12 +533,11 @@ def export_mesh(path: str, format: str):
     if not input_path.exists():
         raise HTTPException(404, f"File not found: {path}")
 
-    loaded = trimesh.load(str(input_path))
-    if isinstance(loaded, trimesh.Scene):
-        geoms = list(loaded.geometry.values())
-        mesh = trimesh.util.concatenate(geoms) if len(geoms) > 1 else geoms[0]
-    else:
-        mesh = loaded
+    # Flatten to a single mesh in world space (node transforms applied).
+    try:
+        mesh = single_mesh(trimesh.load(str(input_path)), trimesh)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     scale = export_scale(input_path, format)
     if scale != 1.0:
         mesh.apply_scale(scale)
