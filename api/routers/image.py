@@ -140,8 +140,8 @@ async def _run_prepare(op: ImageOp, state: _PrepareState) -> None:
 async def prepare_image_operation(op_name: str):
     """Install what the op is missing, streaming progress. Idempotent: an op
     that is already ready gets a single `done` frame; a call while a prepare is
-    running joins it. GET is accepted too so the renderer's existing
-    `consumeSse` (a plain fetch) can be reused unchanged."""
+    running joins it. POST only: it downloads and installs, so a plain GET (a
+    link, a prefetch) must never start it."""
     op = _get_op(op_name)
     state = _prepares.get(op_name)
     running = state is not None and state.task is not None and not state.task.done()
