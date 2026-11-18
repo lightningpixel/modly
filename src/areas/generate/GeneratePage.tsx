@@ -51,11 +51,11 @@ function createPointLight(): PointLight {
 // Export dropdown
 // ---------------------------------------------------------------------------
 
-const EXPORT_FORMATS = [
-  { fmt: 'glb' as const, desc: 'Binary glTF' },
-  { fmt: 'obj' as const, desc: 'Wavefront' },
-  { fmt: 'stl' as const, desc: '3D Print' },
-  { fmt: 'ply' as const, desc: 'Polygon File' },
+const EXPORT_FORMATS: { fmt: 'glb' | 'obj' | 'stl' | 'ply'; desc: string; hint?: string }[] = [
+  { fmt: 'glb', desc: 'Binary glTF' },
+  { fmt: 'obj', desc: 'Wavefront', hint: 'Texture saved as separate files. GLB keeps everything in one.' },
+  { fmt: 'stl', desc: '3D Print' },
+  { fmt: 'ply', desc: 'Polygon File' },
 ]
 
 function ExportDropdown({
@@ -71,14 +71,17 @@ function ExportDropdown({
 }) {
   return (
     <div className="absolute top-full left-0 mt-1 z-50 bg-zinc-900 border border-zinc-700/60 rounded-xl p-1 flex flex-col gap-0.5 min-w-[150px] shadow-xl">
-      {EXPORT_FORMATS.map(({ fmt, desc }) => (
+      {EXPORT_FORMATS.map(({ fmt, desc, hint }) => (
         <button
           key={fmt}
           onClick={() => { onExport(fmt); onClose() }}
-          className="px-3 py-2 text-left hover:bg-zinc-800 rounded-lg transition-colors flex items-center gap-2.5"
+          className="px-3 py-2 text-left hover:bg-zinc-800 rounded-lg transition-colors flex flex-col gap-0.5"
         >
-          <span className="text-xs font-mono font-semibold text-zinc-200">.{fmt}</span>
-          <span className="text-[10px] text-zinc-500">{desc}</span>
+          <span className="flex items-center gap-2.5">
+            <span className="text-xs font-mono font-semibold text-zinc-200">.{fmt}</span>
+            <span className="text-[10px] text-zinc-500">{desc}</span>
+          </span>
+          {hint && <span className="text-[10px] leading-snug text-zinc-600 max-w-[180px]">{hint}</span>}
         </button>
       ))}
       {canOpenInSlicer && (
@@ -836,6 +839,13 @@ export default function GeneratePage(): JSX.Element {
   async function handleExport(format: 'glb' | 'obj' | 'stl' | 'ply') {
     const outputUrl = await committedMeshUrl()
     if (!outputUrl) return
+    if (format === 'obj') {
+      // OBJ is several files (mesh, material, texture): the main process asks
+      // where to save the .obj and writes the others next to it.
+      const result = await window.electron.model.export({ outputUrl, format })
+      if (!result.success && result.error) showError(result.error)
+      return
+    }
     const stem = `modly-${Date.now()}`
     const link = document.createElement('a')
     if (format === 'glb') {

@@ -71,7 +71,8 @@ export interface ParamSchema {
   label:    string
   type:     'select' | 'int' | 'float' | 'string' | 'file-select'
   default:  number | string
-  options?: { value: number | string; label: string }[]
+  /** select: `hint` is shown under the field while that option is selected. */
+  options?: { value: number | string; label: string; hint?: string }[]
   min?:     number
   max?:     number
   step?:    number

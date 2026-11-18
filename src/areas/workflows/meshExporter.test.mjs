@@ -93,10 +93,17 @@ test('a filename cannot silently use a different export format', async () => {
 })
 
 // One triangle, 0.1 m along X and 0.2 m along Y, with or without the real-size marker.
-function triangleDoc(extras) {
+// With `texture`, it also has UVs and a base color texture of that MIME type.
+function triangleDoc(extras, texture) {
+  const attributes = {
+    POSITION:   new Float32Array([0, 0, 0, 0.1, 0, 0, 0, 0.2, 0]),
+    TEXCOORD_0: texture ? new Float32Array([0, 0, 1, 0, 0, 1]) : undefined,
+  }
+  const baseColor = texture && { getImage: () => new Uint8Array([1, 2, 3]), getMimeType: () => texture }
   const prim = {
-    getAttribute: (name) => (name === 'POSITION' ? { getArray: () => new Float32Array([0, 0, 0, 0.1, 0, 0, 0, 0.2, 0]) } : null),
+    getAttribute: (name) => (attributes[name] ? { getArray: () => attributes[name] } : null),
     getIndices: () => null,
+    getMaterial: () => (baseColor ? { getBaseColorTexture: () => baseColor } : null),
   }
   return {
     getRoot: () => ({
@@ -136,3 +143,21 @@ for (const scenario of [
     }
   })
 }
+test('a textured OBJ gets its material and texture next to it', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'modly-export-'))
+  try {
+    const context = { workspaceDir: join(root, 'workspace'), log() {}, progress() {} }
+    const result = await loadProcessor(triangleDoc({}, 'image/png'))(
+      { filePath: join(root, 'input.glb') }, { export_format: 'obj', output_path: 'models/part.obj' }, context,
+    )
+    const dir = join(context.workspaceDir, 'models')
+    assert.equal(result.filePath, join(dir, 'part.obj'))
+    const obj = readFileSync(result.filePath, 'utf8').split('\n')
+    assert.ok(obj.includes('mtllib part.mtl'))
+    assert.ok(obj.includes('vt 1.000000 1.000000'))
+    assert.ok(readFileSync(join(dir, 'part.mtl'), 'utf8').split('\n').includes('map_Kd part_texture.png'))
+    assert.deepEqual([...readFileSync(join(dir, 'part_texture.png'))], [1, 2, 3])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})

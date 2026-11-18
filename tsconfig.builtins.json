@@ -13,5 +13,8 @@
   },
   "include": [
     "src/areas/workflows/nodes/mesh-exporter/**/*.ts"
+  ],
+  "exclude": [
+    "src/areas/workflows/nodes/**/*.test.ts"
   ]
 }

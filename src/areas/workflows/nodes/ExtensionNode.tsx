@@ -77,12 +77,16 @@ function ParamControl({ param, value, onChange, resolvedParams }: {
     return <FileSelectControl param={param} value={String(value ?? '')} dirValue={dirValue} onChange={onChange} />
   }
   if (param.type === 'select') {
+    const hint = param.options?.find((o) => o.value === value)?.hint
     return (
-      <select value={value} onChange={(e) => onChange(e.target.value)} className={inputCls}>
-        {param.options?.map((o) => (
-          <option key={String(o.value)} value={o.value}>{o.label ?? String(o.value)}</option>
-        ))}
-      </select>
+      <>
+        <select value={value} onChange={(e) => onChange(e.target.value)} className={inputCls}>
+          {param.options?.map((o) => (
+            <option key={String(o.value)} value={o.value}>{o.label ?? String(o.value)}</option>
+          ))}
+        </select>
+        {hint && <p className="mt-1 text-[10px] leading-snug text-zinc-500">{hint}</p>}
+      </>
     )
   }
   if (param.type === 'string') {

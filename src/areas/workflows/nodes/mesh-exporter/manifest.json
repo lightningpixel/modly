@@ -21,7 +21,7 @@
           "options": [
             { "value": "glb", "label": "GLB (Binary glTF)" },
             { "value": "stl", "label": "STL (3D printing)" },
-            { "value": "obj", "label": "OBJ (Wavefront)" },
+            { "value": "obj", "label": "OBJ (Wavefront)", "hint": "Texture saved as separate files. GLB keeps everything in one." },
             { "value": "ply", "label": "PLY (Polygon)" }
           ],
           "tooltip": "Output file format."
