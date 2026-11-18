@@ -25,6 +25,7 @@ from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 from services.generators.base import BaseGenerator
 from services.extension_process import ExtensionProcess, _venv_python
+from services.weight_integrity import IncompleteModelWeightsError, incomplete_weights_message
 from services.model_sources import (
     missing_weight_variant,
     model_sources_are_downloaded,
@@ -837,7 +838,15 @@ class GeneratorRegistry:
                         pass
                     else:
                         gen._auto_download()
-                gen.load()
+                try:
+                    gen.load()
+                except Exception as exc:
+                    message = incomplete_weights_message(
+                        manifest.get("name", gen.DISPLAY_NAME), exc
+                    )
+                    if message is None:
+                        raise
+                    raise IncompleteModelWeightsError(message) from exc
             return gen
 
     def activate_ready_generator(self, model_id: str) -> BaseGenerator:

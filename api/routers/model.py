@@ -184,26 +184,25 @@ async def hf_download_sources(request: FastAPIRequest, model_id: str):
         try:
             yield _fmt({"percent": 0, "status": "Listing repository files..."})
             files_by_source: dict[str, list[str]] = {}
+            sizes_by_source: dict[str, dict[str, Optional[int]]] = {}
 
             for source in sources:
                 _check_download_control(control)
 
                 def _list_files(current=source):
-                    from huggingface_hub import list_repo_files
-                    listed = list_repo_files(
-                        current["repo_id"],
-                        revision=current.get("revision"),
-                        token=hf_token,
+                    listed = _list_repo_file_sizes(
+                        current["repo_id"], current.get("revision"), hf_token
                     )
                     include = current.get("include_prefixes", [])
                     skip = current.get("skip_prefixes", [])
-                    return [
-                        filename for filename in listed
+                    return {
+                        filename: size for filename, size in listed.items()
                         if (not include or any(filename.startswith(prefix) for prefix in include))
                         if not any(filename.startswith(prefix) for prefix in skip)
-                    ]
+                    }
 
-                files = await loop.run_in_executor(None, _list_files)
+                listed_sizes = await loop.run_in_executor(None, _list_files)
+                files = list(listed_sizes)
                 if not files:
                     raise RuntimeError(
                         f'No files found in Hugging Face repo: {source["repo_id"]}'
@@ -212,6 +211,7 @@ async def hf_download_sources(request: FastAPIRequest, model_id: str):
                 for filename in files:
                     resolve_download_path(destination, filename)
                 files_by_source[source["id"]] = files
+                sizes_by_source[source["id"]] = listed_sizes
 
             validate_source_file_plan(sources, files_by_source)
             planned_files = [
@@ -261,6 +261,7 @@ async def hf_download_sources(request: FastAPIRequest, model_id: str):
                         progress_cb=_progress,
                         control=control,
                         token=hf_token,
+                        expected_size=sizes_by_source[source["id"]].get(filename),
                     ),
                 )
                 while not future.done():
@@ -364,14 +365,14 @@ async def hf_download(
             _check_download_control(control)
 
             def _list_files():
-                from huggingface_hub import list_repo_files
-                return [
-                    f for f in list_repo_files(repo_id, token=hf_token)
+                return {
+                    f: size for f, size in _list_repo_file_sizes(repo_id, None, hf_token).items()
                     if (not include_list or any(f.startswith(p) for p in include_list))
                     if not any(f.startswith(p) for p in skip_list)
-                ]
+                }
 
-            files = await loop.run_in_executor(None, _list_files)
+            file_sizes = await loop.run_in_executor(None, _list_files)
+            files = list(file_sizes)
             total = len(files)
 
             if total == 0:
@@ -413,6 +414,7 @@ async def hf_download(
                         progress_cb=_progress,
                         control=control,
                         token=hf_token,
+                        expected_size=file_sizes.get(filename),
                     ),
                 )
 
@@ -459,6 +461,30 @@ async def hf_download(
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
+class IncompleteDownload(OSError):
+    """The server closed the stream before the whole file arrived.
+
+    An OSError so the retry loop resumes from the .part file. http.client does
+    not raise on a short body (read() returns b"" at EOF), so without this check
+    a truncated download was renamed into place and later treated as complete.
+    """
+
+
+def _list_repo_file_sizes(
+    repo_id: str, revision: Optional[str], token: Optional[str]
+) -> dict[str, Optional[int]]:
+    """Every file of a Hugging Face repo with its size in bytes, in one API call."""
+    from huggingface_hub import HfApi
+    return {
+        entry.path: entry.size
+        for entry in HfApi().list_repo_tree(
+            repo_id, revision=revision, token=token, recursive=True
+        )
+        # RepoFolder entries have no size; RepoFile entries always do.
+        if hasattr(entry, "size")
+    }
+
+
 def _download_file_streamed(
     *,
     url: str,
@@ -470,6 +496,7 @@ def _download_file_streamed(
     progress_cb,
     control: dict[str, threading.Event],
     token: Optional[str] = None,
+    expected_size: Optional[int] = None,
 ) -> int:
     final_path = Path(dest_dir) / filename
     temp_path = final_path.with_suffix(final_path.suffix + ".part")
@@ -479,8 +506,9 @@ def _download_file_streamed(
         if not final_path.is_file():
             raise RuntimeError(f"Download target is not a regular file: {filename}")
         existing_size = final_path.stat().st_size
-        if existing_size > 0:
+        if existing_size > 0 and (expected_size is None or existing_size == expected_size):
             return existing_size
+        # Empty, or truncated by an older build: fetch it again.
         final_path.unlink()
 
     # Explicit token (from caller) > env vars > none
@@ -502,6 +530,12 @@ def _download_file_streamed(
         try:
             _check_download_control(control)
             existing_bytes = temp_path.stat().st_size if temp_path.exists() else 0
+            if expected_size is not None and existing_bytes > expected_size:
+                temp_path.unlink()
+                existing_bytes = 0
+            if expected_size is not None and existing_bytes == expected_size and existing_bytes > 0:
+                temp_path.replace(final_path)
+                return existing_bytes
             request_headers = dict(headers)
             request_url = url
             if existing_bytes > 0:
@@ -560,6 +594,13 @@ def _download_file_streamed(
                             })
                             last_emit = now
 
+            expected_bytes = expected_size if expected_size is not None else total_bytes
+            if expected_bytes is not None and bytes_downloaded != expected_bytes:
+                if bytes_downloaded > expected_bytes:
+                    temp_path.unlink(missing_ok=True)
+                raise IncompleteDownload(
+                    f"{filename}: received {bytes_downloaded} of {expected_bytes} bytes"
+                )
             temp_path.replace(final_path)
             return bytes_downloaded
 
