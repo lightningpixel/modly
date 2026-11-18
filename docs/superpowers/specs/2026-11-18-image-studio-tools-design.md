@@ -39,9 +39,9 @@ The maintainer picked B.
 
 ### Backend (`api/services/image_ops`)
 
-- `crop` params stay `left`, `top`, `right`, `bottom` (percent of the side cut off each edge), but become `float`, `min 0`, `max 99`, `step 0.1`. The 45 % limit goes.
+- `crop` params stay `left`, `top`, `right`, `bottom` (percent of the side cut off each edge), but become `float`, `min 0`, `max 100`, `step 0.1`. The 45 % limit goes.
 - `crop` raises `ImageOpInputError` when `left + right >= 100` or `top + bottom >= 100` (nothing left to keep). `framing.crop_box` already rounds to pixels and keeps at least 1 px.
-- Tests in `api/tests/test_image_ops_framing.py` follow (the clamp test moves from 45 to 99, plus the new error).
+- Tests in `api/tests/test_image_ops_framing.py` follow (the clamp test moves from 45 to 100, plus the new error).
 
 ### Front end (`src/areas/image-studio`)
 

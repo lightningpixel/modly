@@ -35,10 +35,10 @@
 - Test: `api/tests/test_image_ops_framing.py`
 
 **Interfaces:**
-- Produces: op `crop` params `left|top|right|bottom`: `type "float"`, `default 0.0`, `min 0.0`, `max 99.0`, `step 0.1`.
+- Produces: op `crop` params `left|top|right|bottom`: `type "float"`, `default 0.0`, `min 0.0`, `max 100.0`, `step 0.1`.
 
 - [ ] **Step 1: Update/add tests**
-  - `test_crop_edges_are_clamped`: `resolve_params("crop", {"left": 150})["left"] == 99.0`.
+  - `test_crop_edges_are_clamped`: `resolve_params("crop", {"left": 150})["left"] == 100.0`.
   - `test_crop_accepts_fractional_percentages`: on a 1000×500 image, `{"left": 12.5, "top": 10.2}` → output size `(875, 449)` (`crop_box` rounds: x0=125, y0=51).
   - `test_crop_refuses_an_empty_box`: `{"left": 60, "right": 40}` raises `ImageOpInputError`; same for `top+bottom >= 100`.
 - [ ] **Step 2: Run, expect the new tests to FAIL.**
