@@ -18,6 +18,7 @@ import services.generator_registry as registry
 from services.generator_registry import generator_registry
 from schemas.generation import GenerateFromArtifactRequest, JobStatus
 from services.run_history import run_history
+from services.weight_integrity import IncompleteModelWeightsError
 from services.artifact_input import (
     RESERVED_ARTIFACT_PARAMS,
     TypedArtifactInput,
@@ -453,7 +454,8 @@ def _run_generation_impl(
         except UnicodeEncodeError:
             print(msg.encode("ascii", errors="replace").decode("ascii"))
         job.status = "error"
-        job.error  = tb.strip()
+        # Actionable errors reach the user as-is; the full traceback stays in the log.
+        job.error  = str(exc) if isinstance(exc, IncompleteModelWeightsError) else tb.strip()
         _completed_at[job_id] = time.monotonic()
     finally:
         _job_generators.pop(job_id, None)
