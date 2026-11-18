@@ -22,6 +22,7 @@ import {
   type SetupCard,
 } from './imageOps'
 import { ImageOpIcon } from './imageOpIcons'
+import CropTool, { type CropEdges } from './CropTool'
 import { ImageOpNotReadyError, getImageOpStatus, listImageOps, prepareImageOp, runImageOpOnFile } from './imageOpsApi'
 
 // Image operations served by the backend (GET /image/ops: background removal,
@@ -265,11 +266,16 @@ function ImageOpControl(props: ToolbarProps & {
     </>
   )
 
-  // CROP_UI: crop is the one op with its own UI. Task 4 replaces this branch with
-  //   <CropTool start={start} running={running} busy={busy} optionsSlot={optionsSlot}
-  //     overlaySlot={props.overlaySlot} onActiveToolChange={onActiveToolChange} />
-  // Until then crop falls through to the generic options.
-  const options = op.id === 'crop' ? genericOptions : genericOptions
+  // Crop is the one op with its own UI: a frame on the image, and its own options.
+  const isCrop = op.id === 'crop'
+  /** What the crop frame is drawn on: the image the run will read. */
+  const cropInput = active && isCrop ? runInputFor(entries, selected, op.id) : null
+
+  async function applyCrop(edges: CropEdges): Promise<boolean> {
+    const added = await start({ ...edges })
+    if (added) onActiveToolChange(null)
+    return added
+  }
 
   return (
     <>
@@ -279,9 +285,14 @@ function ImageOpControl(props: ToolbarProps & {
         {running ? <Spinner size={16} /> : <ImageOpIcon opId={op.id} />}
       </button>
 
+      {cropInput && (
+        <CropTool key={cropInput.id} input={cropInput} optionsSlot={optionsSlot} overlaySlot={props.overlaySlot}
+          running={running} busy={busy} onApply={applyCrop} onCancel={() => onActiveToolChange(null)} />
+      )}
+
       {active && optionsSlot && createPortal(
         <>
-          {options}
+          {!isCrop && genericOptions}
           {card.phase !== 'hidden' && card.phase !== 'checking' && (
             <SetupCardView
               card={card}
