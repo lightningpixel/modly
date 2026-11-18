@@ -33,6 +33,9 @@ in, list its origin in `MODLY_ORIGINS` before starting Modly (comma-separated, `
 MODLY_ORIGINS="http://localhost:3000,chrome-extension://*"   # or "*" for every page
 ```
 
+`<img>` / `<video>` tags send no `Origin`, so the page's `Referer` is used instead. Browsers drop it
+from an HTTPS page to the HTTP API: on an HTTPS site, add `crossorigin="anonymous"` to those tags.
+
 The request's `Host` must be `localhost` or an IP address (this blocks DNS rebinding). To reach the
 API by a machine name, list it in `MODLY_HOSTS`, e.g. `MODLY_HOSTS=jetson.local`.
 

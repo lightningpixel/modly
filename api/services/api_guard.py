@@ -6,7 +6,8 @@ reach too. Browsers say where a request comes from (``Origin``,
 ``Sec-Fetch-Site``); other callers (scripts, curl, modly-cli, the MCP server,
 OrcaSlicer, extensions) send neither. So:
 
-- A request from a web page is refused unless its origin is allowed:
+- A request from a web page is refused unless its origin is allowed (for
+  ``<img>``/``<video>`` tags, which send no ``Origin``, the ``Referer``'s):
   the app's own pages, the origins in ``MODLY_ORIGINS`` (comma-separated,
   ``*`` wildcards, e.g. ``http://localhost:*,chrome-extension://*``), or the
   API's own origin (its /docs page).
@@ -29,6 +30,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 logger = logging.getLogger("modly.api_guard")
 
@@ -124,6 +126,19 @@ def origin_allowed(origin: str, config: GuardConfig) -> bool:
     return bool(pattern and pattern.fullmatch(_trim(origin)))
 
 
+def _referer_origin(referer: str | None) -> str | None:
+    """The origin part of a Referer (``https://site.example``), or None."""
+    if not referer:
+        return None
+    try:
+        parts = urlsplit(referer)
+    except ValueError:
+        return None
+    if not parts.scheme or not parts.netloc:
+        return None
+    return f"{parts.scheme}://{parts.netloc}"
+
+
 def _secret_matches(supplied: str | None, secret: str | None) -> bool:
     if not supplied or not secret:
         return False
@@ -145,7 +160,10 @@ def is_allowed(method: str, headers: dict[str, str], config: GuardConfig) -> boo
     if origin is None and site not in _CROSS_SITE:
         return True  # not a web page: scripts, CLI, OrcaSlicer, a URL typed in the browser
     if origin is None:
-        return False  # another site's <img>, <script> or link
+        # Another site's <img>, <video>, <script> or link: no Origin, so go by the
+        # Referer, which a page can leave out but not forge.
+        referer_origin = _referer_origin(headers.get("referer"))
+        return referer_origin is not None and origin_allowed(referer_origin, config)
     if host and _trim(origin).lower() == f"http://{host.strip().lower()}":
         return True  # the API's own pages (/docs)
     return origin_allowed(origin, config)

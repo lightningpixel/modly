@@ -61,6 +61,18 @@ class RuleTests(unittest.TestCase):
         self.assertFalse(self.allowed("POST", config=config, origin="http://127.0.0.1:3000"))
         self.assertFalse(self.allowed("POST", config=config, origin="null"))
 
+    def test_tags_without_origin_go_by_the_referer(self) -> None:
+        config = GuardConfig.from_env({"MODLY_ORIGINS": "https://gallery.example"})
+        # <img src> on an allowed site: no Origin, cross-site, Referer from that site.
+        self.assertTrue(self.allowed(config=config, sec_fetch_site="cross-site", referer="https://gallery.example/page?x=1"))
+        # Any other site, a hidden Referer, or junk stays refused.
+        self.assertFalse(self.allowed(config=config, sec_fetch_site="cross-site", referer="https://evil.example/"))
+        self.assertFalse(self.allowed(config=config, sec_fetch_site="cross-site"))
+        self.assertFalse(self.allowed(config=config, sec_fetch_site="cross-site", referer="not a url"))
+        self.assertFalse(self.allowed(config=config, sec_fetch_site="cross-site", referer="https://gallery.example.evil.net/"))
+        # An Origin, when there is one, wins over the Referer.
+        self.assertFalse(self.allowed("POST", config=config, origin="https://evil.example", referer="https://gallery.example/"))
+
     def test_star_opens_the_api_to_every_page(self) -> None:
         config = GuardConfig.from_env({"MODLY_ORIGINS": "*"})
         self.assertTrue(self.allowed("POST", config=config, origin="https://anything.example"))
