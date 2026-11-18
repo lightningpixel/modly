@@ -7,6 +7,7 @@ import { redoDepth, undoDepth } from '@shared/stores/meshHistory'
 import { useApi } from '@shared/hooks/useApi'
 import { ColorPicker } from '@shared/components/ui'
 import GenerationHUD from './components/GenerationHUD'
+import GenerationLogoLoader from './components/GenerationLogoLoader'
 import Viewer3D from './components/Viewer3D'
 import WorkflowPanel from './components/WorkflowPanel'
 import EditPanel from './components/EditPanel'
@@ -1359,6 +1360,7 @@ export default function GeneratePage(): JSX.Element {
               onSelectPointLight={handleSelectPointLight}
               onPointLightsChange={setPointLights}
             />
+            <GenerationLogoLoader />
             <GenerationHUD />
           </div>
           {editPanelOpen && <EditPanel onClose={() => { void closeEditPanel() }} />}
