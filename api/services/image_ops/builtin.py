@@ -105,7 +105,7 @@ def _edge_param(param_id: str, label: str) -> dict[str, Any]:
         "type": "float",
         "default": 0.0,
         "min": 0.0,
-        "max": 99.0,
+        "max": 100.0,
         "step": 0.1,
         "tooltip": f"Percentage of the image cut off the {param_id} edge.",
     }

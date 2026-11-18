@@ -127,7 +127,7 @@ class FramingOpsTests(unittest.TestCase):
                 self.assertEqual(_visible_box(framed), (0, 0, 512, 512))
 
     def test_crop_edges_are_clamped(self) -> None:
-        self.assertEqual(image_ops_registry.resolve_params("crop", {"left": 150})["left"], 99.0)
+        self.assertEqual(image_ops_registry.resolve_params("crop", {"left": 150})["left"], 100.0)
 
     def test_crop_accepts_fractional_percentages(self) -> None:
         path = self._save(Image.new("RGB", (1000, 500), (10, 20, 30)), "wide.png")
