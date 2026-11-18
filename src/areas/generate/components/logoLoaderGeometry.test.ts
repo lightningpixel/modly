@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   buildLogoPieces, delaunay, fitPolygons, pathToPolygons, pieceDirection, pointInPolygon,
-  polygonCentroid, resamplePolygon, signedArea, triangulatePiece, uniqueEdges, type Polygon,
+  polygonCentroid, resamplePolygon, signedArea, simplifyPolygon, triangulatePiece, uniqueEdges, type Polygon,
 } from './logoLoaderGeometry'
 import { MODLY_LOGO_PATHS } from '../../../shared/components/ui/modlyLogoPaths'
 
@@ -71,6 +71,36 @@ test('triangulatePiece covers the shape area and stays inside it', () => {
   assert.ok(Math.abs(area - 4) < 1e-6, `area ${area}`)
   assert.ok(piece.vertices.length > piece.boundaryCount, 'has interior vertices')
   assert.deepEqual(piece.center, { x: 1, y: 1 })
+})
+
+test('simplifyPolygon straightens wobbly sides and keeps the corners', () => {
+  // A 2x2 square whose sides wobble by 0.005 and whose corner (2,2) is rounded.
+  const wobbly: Polygon = [
+    { x: 0, y: 0 }, { x: 1, y: 0.005 }, { x: 2, y: 0 },
+    { x: 2.004, y: 1 }, { x: 2, y: 1.97 }, { x: 1.99, y: 1.99 }, { x: 1.97, y: 2 },
+    { x: 1, y: 1.996 }, { x: 0, y: 2 }, { x: -0.005, y: 1 },
+  ]
+  const out = simplifyPolygon(wobbly, 0.02)
+  assert.ok(out.length >= 4 && out.length <= 6, `got ${out.length} vertices`)
+  for (const corner of [{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 0, y: 2 }]) {
+    assert.ok(out.some((p) => p.x === corner.x && p.y === corner.y), `corner ${corner.x},${corner.y} kept`)
+  }
+  assert.deepEqual(simplifyPolygon(square, 0.01), square)
+})
+
+test('the logo outline points lie on straight edges', () => {
+  for (const piece of buildLogoPieces(MODLY_LOGO_PATHS, 2, 0.12)) {
+    const outline = piece.vertices.slice(0, piece.boundaryCount)
+    const n = outline.length
+    // Each point is either a corner or collinear with its two neighbours.
+    let straight = 0
+    for (let i = 0; i < n; i++) {
+      const p = outline[(i + n - 1) % n]!, q = outline[i]!, r = outline[(i + 1) % n]!
+      const cross = (q.x - p.x) * (r.y - q.y) - (q.y - p.y) * (r.x - q.x)
+      if (Math.abs(cross) < 1e-9) straight++
+    }
+    assert.ok(straight > n / 2, `${straight}/${n} outline points on straight runs`)
+  }
 })
 
 test('uniqueEdges lists shared edges once', () => {

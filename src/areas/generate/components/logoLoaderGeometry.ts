@@ -290,13 +290,58 @@ export function delaunay(points: Vec2[]): Triangle[] {
   return out
 }
 
+/** Distance from `p` to the segment `a`–`b`. */
+function distanceToSegment(p: Vec2, a: Vec2, b: Vec2): number {
+  const dx = b.x - a.x, dy = b.y - a.y
+  const len2 = dx * dx + dy * dy
+  const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2))
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
+}
+
+/** Ramer–Douglas–Peucker on an open polyline, endpoints kept. */
+function simplifyPolyline(points: Polygon, tolerance: number): Polygon {
+  if (points.length < 3) return points
+  const a = points[0]!, b = points[points.length - 1]!
+  let worst = 0, at = 0
+  for (let i = 1; i < points.length - 1; i++) {
+    const d = distanceToSegment(points[i]!, a, b)
+    if (d > worst) { worst = d; at = i }
+  }
+  if (worst <= tolerance) return [a, b]
+  const left = simplifyPolyline(points.slice(0, at + 1), tolerance)
+  const right = simplifyPolyline(points.slice(at), tolerance)
+  return [...left.slice(0, -1), ...right]
+}
+
+/**
+ * Closed-polygon Ramer–Douglas–Peucker: drops the vertices that stray less
+ * than `tolerance` from a straight edge. Split at the vertex farthest from the
+ * first one so both halves are open polylines.
+ */
+export function simplifyPolygon(poly: Polygon, tolerance: number): Polygon {
+  if (poly.length < 4) return poly
+  const first = poly[0]!
+  let far = 0, farDist = -1
+  poly.forEach((p, i) => {
+    const d = Math.hypot(p.x - first.x, p.y - first.y)
+    if (d > farDist) { farDist = d; far = i }
+  })
+  const a = simplifyPolyline(poly.slice(0, far + 1), tolerance)
+  const b = simplifyPolyline([...poly.slice(far), first], tolerance)
+  return [...a.slice(0, -1), ...b.slice(0, -1)]
+}
+
 /**
  * Low-poly triangulation of one simple polygon: resampled outline plus a
  * jittered interior grid, Delaunay-triangulated and clipped to the shape.
  */
 export function triangulatePiece(poly: Polygon, spacing: number): LogoPiece {
-  const ccw = signedArea(poly) < 0 ? [...poly].reverse() : poly
-  const outline = resamplePolygon(ccw, spacing)
+  // The logo's sides are drawn as near-straight cubics with slightly rounded
+  // corners: simplify them to true straight edges first, so the resampled
+  // outline lies on straight lines instead of following the curve's wobble.
+  const ccw = simplifyPolygon(signedArea(poly) < 0 ? [...poly].reverse() : poly, spacing * 0.1)
+  // Every vertex left after simplification is a real corner.
+  const outline = resamplePolygon(ccw, spacing, 0)
   const all = [...outline, ...interiorPoints(ccw, spacing)]
   const triangles = delaunay(all).filter(([a, b, c]) => {
     const A = all[a]!, B = all[b]!, C = all[c]!

@@ -74,13 +74,13 @@ function buildPieceResources(piece: LogoPiece, dotTexture: THREE.Texture): Piece
   face.setIndex(index)
   face.computeBoundingSphere()
 
-  // Inner triangulation on the front face, plus the ribs joining front and back.
+  // Inner triangulation on both faces, plus the ribs joining front and back.
   const isOutlineEdge = (u: number, v: number): boolean =>
     u < b && v < b && (Math.abs(u - v) === 1 || Math.abs(u - v) === b - 1)
   const innerPts: number[] = []
   for (const [u, v] of uniqueEdges(triangles)) {
     if (isOutlineEdge(u, v)) continue
-    innerPts.push(vertices[u]!.x, vertices[u]!.y, h, vertices[v]!.x, vertices[v]!.y, h)
+    for (const z of [h, -h]) innerPts.push(vertices[u]!.x, vertices[u]!.y, z, vertices[v]!.x, vertices[v]!.y, z)
   }
   for (let i = 0; i < b; i++) innerPts.push(vertices[i]!.x, vertices[i]!.y, h, vertices[i]!.x, vertices[i]!.y, -h)
   const inner = new THREE.BufferGeometry()
@@ -97,10 +97,9 @@ function buildPieceResources(piece: LogoPiece, dotTexture: THREE.Texture): Piece
   const outline = new THREE.BufferGeometry()
   outline.setAttribute('position', new THREE.Float32BufferAttribute(outlinePts, 3))
 
-  // Vertex dots: every front vertex, and the back outline.
+  // Vertex dots on both faces.
   const dotPts: number[] = []
-  vertices.forEach((v) => dotPts.push(v.x, v.y, h))
-  for (let i = 0; i < b; i++) dotPts.push(vertices[i]!.x, vertices[i]!.y, -h)
+  for (const z of [h, -h]) vertices.forEach((v) => dotPts.push(v.x, v.y, z))
   const dots = new THREE.BufferGeometry()
   dots.setAttribute('position', new THREE.Float32BufferAttribute(dotPts, 3))
 
