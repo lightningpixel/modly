@@ -1,7 +1,7 @@
 import { ipcMain, BrowserWindow, Notification, dialog, app, shell } from 'electron'
 import { buildSync } from 'esbuild'
 import { autoUpdater } from 'electron-updater'
-import { basename, join } from 'path'
+import { basename, dirname, extname, join } from 'path'
 import { rm as rmAsync, readFile, writeFile, mkdir, readdir, rename, cp, symlink, lstat, copyFile } from 'fs/promises'
 import { existsSync, mkdirSync, readdirSync, statSync } from 'fs'
 import axios from 'axios'
@@ -848,6 +848,18 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     if (result.canceled || !result.filePath) return { success: false }
 
     try {
+      if (format === 'obj') {
+        // Like Blender: the material and texture go next to the chosen .obj.
+        const dir = dirname(result.filePath)
+        const stem = basename(result.filePath, extname(result.filePath))
+        const { data } = await axios.get<{ files: { name: string; data: string }[] }>(
+          `${apiBaseUrl()}/export/obj/files?path=${encodeURIComponent(meshPath)}&name=${encodeURIComponent(stem)}`,
+        )
+        for (const file of data.files) {
+          await writeFile(join(dir, basename(file.name)), Buffer.from(file.data, 'base64'))
+        }
+        return { success: true }
+      }
       const response = await axios.get(
         `${apiBaseUrl()}/export/${format}?path=${encodeURIComponent(meshPath)}`,
         { responseType: 'arraybuffer' }

@@ -201,22 +201,17 @@ def export_for_slicer(fmt: str, token: str, filename: str):
     )
 
 
-@router.get("/{fmt}")
-def export_mesh(fmt: str, path: str):
-    if fmt not in SUPPORTED:
-        raise HTTPException(400, f"Unsupported format: {fmt}. Supported: {', '.join(SUPPORTED)}")
-
+def _workspace_source(path: str) -> Path:
     full_path = (registry.WORKSPACE_DIR / path).resolve()
     if not registry.is_within_workspace(full_path):
         raise HTTPException(400, "Invalid path")
     if not full_path.exists():
         raise HTTPException(404, f"File not found: {path}")
+    return full_path
 
-    # GLB — serve directly, no conversion needed
-    if fmt == "glb":
-        return FileResponse(str(full_path), media_type="model/gltf-binary")
 
-    # Flatten to a single mesh in world space (node transforms applied).
+def _load_for_export(full_path: Path, fmt: str) -> "trimesh.Trimesh":
+    """One world-space mesh (node transforms applied), in the format's units."""
     try:
         mesh = single_mesh(trimesh.load(str(full_path)), trimesh)
     except ValueError as exc:
@@ -224,6 +219,94 @@ def export_mesh(fmt: str, path: str):
     scale = export_scale(full_path, fmt)
     if scale != 1.0:
         mesh.apply_scale(scale)
+    return mesh
+
+
+def _base_color_image(mesh: "trimesh.Trimesh"):
+    """The mesh's base color texture (a PIL image), or None when it has none."""
+    visual = getattr(mesh, "visual", None)
+    if getattr(visual, "kind", None) != "texture" or getattr(visual, "uv", None) is None:
+        return None
+    material = getattr(visual, "material", None)
+    image = getattr(material, "baseColorTexture", None)
+    if image is None:
+        image = getattr(material, "image", None)
+    return image
+
+
+def obj_files(mesh: "trimesh.Trimesh", stem: str) -> dict[str, bytes]:
+    """The files of an OBJ export named ``stem``, by file name.
+
+    Like Blender: a textured mesh gives ``<stem>.obj``, ``<stem>.mtl`` and
+    ``<stem>_texture.png`` side by side, the OBJ and MTL referring to the others
+    by relative name. An untextured mesh gives the OBJ alone, as before.
+    trimesh keeps UVs with OBJ's bottom-left origin (it flips V when reading
+    glTF), so the coordinates are written as they are.
+    """
+    obj_name = f"{stem}.obj"
+    image = _base_color_image(mesh)
+    if image is None:
+        data = mesh.export(file_type="obj")
+        return {obj_name: data.encode("utf-8") if isinstance(data, str) else data}
+
+    mtl_name, texture_name = f"{stem}.mtl", f"{stem}_texture.png"
+    textured = mesh.copy()
+    # A material of our own: a known `usemtl` name, defined in the MTL below.
+    textured.visual.material = trimesh.visual.material.SimpleMaterial(name="material", image=image)
+    obj_text, _ = trimesh.exchange.obj.export_obj(
+        textured, include_texture=True, return_texture=True, mtl_name=mtl_name,
+    )
+    mtl_text = "\n".join([
+        "# Exported by Modly",
+        "newmtl material",
+        "Ka 1.000000 1.000000 1.000000",
+        "Kd 1.000000 1.000000 1.000000",
+        "Ks 0.000000 0.000000 0.000000",
+        "d 1.000000",
+        "illum 1",
+        f"map_Kd {texture_name}",
+        "",
+    ])
+    if image.mode not in ("L", "LA", "RGB", "RGBA", "P"):
+        image = image.convert("RGBA")
+    png = io.BytesIO()
+    image.save(png, format="PNG")
+    return {
+        obj_name: obj_text.encode("utf-8"),
+        mtl_name: mtl_text.encode("utf-8"),
+        texture_name: png.getvalue(),
+    }
+
+
+@router.get("/obj/files")
+def export_obj_files(path: str, name: str):
+    """An OBJ export as its separate files, for the caller to write side by side.
+
+    ``name`` is the file stem the user chose (``model`` for ``model.obj``).
+    Answers ``{"files": [{"name": ..., "data": <base64>}, ...]}``, the OBJ first.
+    """
+    if not name or name in (".", "..") or "/" in name or "\\" in name:
+        raise HTTPException(400, "Invalid file name")
+    full_path = _workspace_source(path)
+    files = obj_files(_load_for_export(full_path, "obj"), name)
+    return {"files": [
+        {"name": file_name, "data": base64.b64encode(data).decode("ascii")}
+        for file_name, data in files.items()
+    ]}
+
+
+@router.get("/{fmt}")
+def export_mesh(fmt: str, path: str):
+    if fmt not in SUPPORTED:
+        raise HTTPException(400, f"Unsupported format: {fmt}. Supported: {', '.join(SUPPORTED)}")
+
+    full_path = _workspace_source(path)
+
+    # GLB — serve directly, no conversion needed
+    if fmt == "glb":
+        return FileResponse(str(full_path), media_type="model/gltf-binary")
+
+    mesh = _load_for_export(full_path, fmt)
 
     buf = io.BytesIO()
     if fmt == "stl":
