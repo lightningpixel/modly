@@ -229,3 +229,18 @@ export function isTextField(target: EventTarget | null): boolean {
   const type = typeof el.type === 'string' ? el.type.toLowerCase() : 'text'
   return !NON_TEXT_INPUTS.has(type)
 }
+
+/** Tags whose Enter/Space key already does something (activates, follows, submits, toggles). */
+const INTERACTIVE_TAGS = new Set(['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'SUMMARY'])
+const INTERACTIVE_ROLES = new Set(['button', 'link', 'checkbox', 'radio', 'switch', 'tab', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'combobox', 'textbox', 'slider', 'spinbutton'])
+
+/** Whether a key event's target is a control that handles Enter itself, so a page-wide Enter shortcut must leave it alone. Duck-typed so it runs without a DOM. */
+export function isInteractive(target: EventTarget | null): boolean {
+  if (isTextField(target)) return true
+  if (!target || typeof target !== 'object') return false
+  const el = target as { tagName?: unknown, getAttribute?: unknown }
+  const tag = typeof el.tagName === 'string' ? el.tagName.toUpperCase() : ''
+  if (INTERACTIVE_TAGS.has(tag)) return true
+  const role = typeof el.getAttribute === 'function' ? (el.getAttribute as (name: string) => unknown).call(target, 'role') : null
+  return typeof role === 'string' && INTERACTIVE_ROLES.has(role.toLowerCase())
+}

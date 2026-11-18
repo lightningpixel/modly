@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
 import type { StudioImage } from './imageStudioStore'
-import { isTextField } from './imageOps'
+import { isInteractive, isTextField } from './imageOps'
 import {
   aspectRatio,
   cropEdges,
@@ -103,17 +103,17 @@ export default function CropTool({ input, optionsSlot, overlaySlot, running, bus
   }, [canApply, size, rect, onApply])
 
   // Enter applies, Esc cancels. Capture phase, so this runs before the
-  // toolbar's Esc listener, which skips events already handled.
+  // toolbar's Esc listener, which skips events already handled. Enter on a
+  // control (a ratio, Reset, a header button, a link…) is left to that control.
   const keys = useRef({ apply, onCancel })
   keys.current = { apply, onCancel }
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || isTextField(event.target)) return
-      if (event.key === 'Escape') {
+      if (event.defaultPrevented) return
+      if (event.key === 'Escape' && !isTextField(event.target)) {
         event.preventDefault()
         keys.current.onCancel()
-      } else if (event.key === 'Enter' && !event.repeat) {
-        // Also keeps Enter from clicking the focused button (a ratio, Reset…).
+      } else if (event.key === 'Enter' && !event.repeat && !isInteractive(event.target)) {
         event.preventDefault()
         keys.current.apply()
       }
@@ -207,6 +207,9 @@ function CropOverlay({ input, size, rect, ratio, locked, onImageSize, onRectChan
     if (locked || !rect || event.button !== 0) return
     event.preventDefault()
     event.stopPropagation()
+    // preventDefault keeps focus where it was (often the Crop icon): move it
+    // here, so the Enter that follows applies the crop rather than clicking it.
+    container?.focus({ preventScroll: true })
     event.currentTarget.setPointerCapture(event.pointerId)
     drag.current = { handle, pointerId: event.pointerId, x: event.clientX, y: event.clientY, start: rect }
     setDragging(true)
@@ -214,7 +217,15 @@ function CropOverlay({ input, size, rect, ratio, locked, onImageSize, onRectChan
 
   function onPointerMove(event: ReactPointerEvent<HTMLElement>) {
     const current = drag.current
-    if (!current || current.pointerId !== event.pointerId || !size || !box) return
+    if (!current || current.pointerId !== event.pointerId) return
+    // The release was missed (the grabbed handle unmounted when the run
+    // locked the frame): end the drag rather than follow a hovering pointer.
+    if (locked || event.buttons === 0) {
+      drag.current = null
+      setDragging(false)
+      return
+    }
+    if (!size || !box) return
     // Screen pixels to image pixels, at the scale the image is drawn now.
     const dx = (event.clientX - current.x) / box.scale
     const dy = (event.clientY - current.y) / box.scale
@@ -241,7 +252,7 @@ function CropOverlay({ input, size, rect, ratio, locked, onImageSize, onRectChan
     : null
 
   return (
-    <div ref={setContainer} className="absolute inset-0 select-none overflow-hidden bg-zinc-950">
+    <div ref={setContainer} tabIndex={-1} role="group" aria-label="Crop frame" className="absolute inset-0 select-none overflow-hidden bg-zinc-950 outline-none">
       <img ref={imgRef} src={input.previewUrl} alt={input.name} draggable={false}
         onLoad={(event) => onImageSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })}
         className="pointer-events-none absolute inset-0 h-full w-full object-contain" />
