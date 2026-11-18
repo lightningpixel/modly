@@ -76,18 +76,6 @@ export const PAGES = [
     wrapperClass: 'flex flex-1 overflow-hidden',
   },
   {
-    id: 'print',
-    label: 'Print',
-    group: 'create',
-    icon: [
-      ['path', { d: 'M6 9V3h12v6' }],
-      ['rect', { x: 3, y: 9, width: 18, height: 8, rx: 1.5 }],
-      ['rect', { x: 7, y: 14, width: 10, height: 7, rx: 1 }],
-    ],
-    load: () => import('@areas/print/PrintPage'),
-    wrapperClass: 'flex flex-1 overflow-hidden',
-  },
-  {
     id: 'library',
     label: 'Library',
     group: 'manage',
@@ -99,20 +87,6 @@ export const PAGES = [
     ],
     load: () => import('@areas/library/LibraryPage'),
     wrapperClass: 'flex flex-1 overflow-hidden',
-  },
-  {
-    id: 'queue',
-    label: 'Queue',
-    group: 'manage',
-    icon: [
-      ['path', { d: 'M4 6h11' }],
-      ['path', { d: 'M4 12h6' }],
-      ['path', { d: 'M4 18h6' }],
-      ['circle', { cx: 17, cy: 15.5, r: 4.5 }],
-      ['path', { d: 'M17 13.5v2.2l1.4 1.1' }],
-    ],
-    load: () => import('@areas/queue/QueuePage'),
-    wrapperClass: 'flex-1 overflow-y-auto',
   },
   {
     id: 'models',
