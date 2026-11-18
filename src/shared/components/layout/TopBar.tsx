@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useAppStore } from '@shared/stores/appStore'
 import { useAgentPanelStore } from '@shared/stores/agentPanelStore'
 import MemoryIndicator from './MemoryIndicator'
+import QueueButton from '@areas/queue/QueuePanel'
 
 export default function TopBar(): JSX.Element {
   const { patchUpdateReady, platform, showRamIndicator, showVramIndicator } = useAppStore()
@@ -47,6 +48,9 @@ export default function TopBar(): JSX.Element {
 
       {/* Memory indicator */}
       {(showRamIndicator || showVramIndicator) && <MemoryIndicator />}
+
+      {/* Queue: running, queued and finished runs */}
+      <QueueButton />
 
       {/* Agent panel toggle */}
       <button

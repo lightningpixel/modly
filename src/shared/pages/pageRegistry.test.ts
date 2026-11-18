@@ -23,7 +23,7 @@ test('the pages keep their ids, labels and sidebar order', () => {
     [
       ['home', ['home:Home']],
       ['create', ['generate:Generate', 'image-studio:Image Studio', 'workflows:Workflows', 'print:Print']],
-      ['manage', ['library:Library', 'queue:Queue']],
+      ['manage', ['library:Library']],
       ['system', ['models:Extensions', 'settings:Settings']],
     ],
   )
