@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
+from .geometry import single_mesh
 from .types import (
     MeshOpContext,
     MeshOpExecutionError,
@@ -32,15 +33,8 @@ def _output_path(context: MeshOpContext, prefix: str) -> Path:
 
 
 def _load_single_mesh(input_path: Path, trimesh_module):
-    loaded = trimesh_module.load(str(input_path))
-    if isinstance(loaded, trimesh_module.Scene):
-        geometries = list(loaded.geometry.values())
-        return (
-            trimesh_module.util.concatenate(geometries)
-            if len(geometries) > 1
-            else geometries[0]
-        )
-    return loaded
+    # In world space: a mesh scaled at node level must keep its size.
+    return single_mesh(trimesh_module.load(str(input_path)), trimesh_module)
 
 
 def _raw_geometry(mesh, trimesh_module):

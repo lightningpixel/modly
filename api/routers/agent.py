@@ -4,36 +4,114 @@ local llama.cpp server or any OpenAI-compatible provider.
 """
 import asyncio
 import json
+import os
 import uuid
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from services import llm_server
+from services import ollama_health as ollama_health_service
 from services.llm_server import llama_pool
+from services.mesh_ops import MeshOp, MeshOpNotFoundError, MeshOpsRegistry, mesh_ops_registry
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
-MODLY_API = "http://localhost:8765"
+# Set by Electron: the port moves off 8765 when another program holds it.
+MODLY_API = os.environ.get("MODLY_API_URL", "http://127.0.0.1:8765").rstrip("/")
 
-SYSTEM_PROMPT = """\
+# Mesh operations reach the chat through the registry: an op declared with an
+# `agent` spec becomes a tool, with no change here.
+_JSON_TYPES = {"int": "integer", "float": "number", "boolean": "boolean", "select": "string"}
+
+
+def _show(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _agent_param(schema: dict, description: str) -> dict:
+    prop: dict = {"type": _JSON_TYPES.get(schema.get("type"), "string")}
+    if schema.get("type") == "select":
+        prop["enum"] = [option["value"] for option in schema.get("options", [])]
+    hints = []
+    if "min" in schema and "max" in schema:
+        hints.append(f"range {_show(schema['min'])}–{_show(schema['max'])}")
+    if "default" in schema:
+        hints.append(f"default {_show(schema['default'])}")
+    prop["description"] = f"{description} ({', '.join(hints)})" if hints else description
+    return prop
+
+
+def _agent_required(op: MeshOp) -> list[str]:
+    return ["path", *op.agent.required]
+
+
+def registry_tools(registry: MeshOpsRegistry) -> list[dict]:
+    """The function-calling schema of every op the registry exposes to the agent."""
+    tools = []
+    for op in registry:
+        if op.agent is None:
+            continue
+        schemas = {schema["id"]: schema for schema in op.params_schema}
+        properties = {
+            "path": {
+                "type": "string",
+                "description": "Workspace-relative path to the mesh file. Use get_mesh_info to obtain it.",
+            },
+            **{pid: _agent_param(schemas[pid], text) for pid, text in op.agent.params.items()},
+        }
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": op.id,
+                "description": op.agent.description,
+                "parameters": {"type": "object", "properties": properties, "required": _agent_required(op)},
+            },
+        })
+    return tools
+
+
+def registry_tool_lines(registry: MeshOpsRegistry) -> str:
+    """The system prompt's entries for the ops the registry exposes to the agent."""
+    lines = []
+    for op in registry:
+        if op.agent is None:
+            continue
+        required = _agent_required(op)
+        args = ["path", *(pid if pid in required else f"{pid}?" for pid in op.agent.params)]
+        lines.append(f"- **{op.id}({', '.join(args)})** — {op.agent.description}")
+    return "\n".join(lines)
+
+
+SYSTEM_PROMPT = f"""\
 You are Modly's built-in AI assistant, specialized in 3D modeling and workflow automation.
 You help users generate 3D models from images, optimize meshes, and manage workflows directly inside the Modly application.
+You can act on the whole app (extensions, model weights, workflows, settings, generation) from any page, without changing page.
 
 ## Available tools
 
 - **list_models** — List all downloaded 3D generation models ready to use.
+- **generate_from_image(model_id?)** — Generate a 3D model from the image attached to the user's message. Omit model_id to use the model selected in the app.
+- **list_extensions** — List installed extensions.
+- **get_settings** — Show the storage folders and UI options.
+- **install_extension(github_url)** / **uninstall_extension(extension_id)** / **reload_extensions** — Manage extensions.
+- **download_model_weights(extension_id, variant?)** / **delete_model_weights(extension_id, variant?)** — Manage model weights.
+- **open_workflow(workflow_id)** / **delete_workflow(workflow_id)** — Open a workflow in the editor, or delete it.
+- **set_setting(key, value)** — Change `uiScale` (one of `small`, `medium`, `large`, `very-large`), `useAtkinsonFont`, `showRamIndicator` or `showVramIndicator` (booleans).
+- **set_storage_folder(kind, path)** — Move the `models`, `workspace` or `workflows` folder.
+- **undo_mesh** / **redo_mesh** — Undo or redo the last change to the current mesh.
+- **navigate(page)** — Switch the app to another page.
 - **unload_models** — Unload all 3D generation models from GPU VRAM to free memory.
 - **get_mesh_info** — Get info about the current mesh in the 3D viewer (path, triangle count).
-- **inspect_mesh(path)** — Diagnose a mesh without modifying it: watertight, manifold, holes, self-intersections, parts, dimensions, volume, UVs/normals, and whether it is 3D-printable.
-- **suggest_fixes(path)** — Inspect a mesh and list the operations (with params) that would fix its problems.
-- **repair_mesh(path, fill_holes?)** — Repair a mesh automatically: fills holes, fixes non-manifold edges, degenerate faces and flipped normals, re-checking until it is closed and manifold. Writes a new, untextured mesh.
+{registry_tool_lines(mesh_ops_registry)}
 - **arrange_mesh(path, steps, size?, unit?, dimension?)** — Reposition a mesh in one call. Steps: `auto_orient` (lay it flat on its widest side), `normalize_scale` (resize to `size` in `unit`), `recenter` (centre on the origin), `drop_to_ground` (rest it on the ground). Steps always run in that order, whatever order you list them in.
-- **decimate_mesh(path, target_faces)** — Reduce the polygon count of a mesh.
-- **smooth_mesh(path, iterations)** — Apply Laplacian smoothing to a mesh.
 - **get_generation_status(job_id)** — Poll the status of an ongoing 3D generation job.
 - **list_workflows** — List all available workflows in Modly.
 - **run_workflow(workflow_id)** — Execute a workflow in Modly by its ID. If the user attached an image in their message, it will automatically be used as the workflow's input image.
@@ -43,12 +121,15 @@ You help users generate 3D models from images, optimize meshes, and manage workf
 
 - Always use tools to act on the scene — never just describe what you would do.
 - If you need the current mesh path, call get_mesh_info first.
+- To prepare a mesh for 3D printing, a game engine or the web, call prepare_for_printing, prepare_for_game or prepare_for_web ONCE: each runs every step itself, so never chain repair_mesh, arrange_mesh or decimate for these intents, and no suggest_fixes is needed first. Pass the size or triangle budget only if the user gave one. Report any remaining issue it lists.
 - To repair or fix a mesh, call repair_mesh. Report the issues it could not fix, and warn the user when it says the textures were dropped.
 - To center, ground, lay flat or resize a mesh, call arrange_mesh ONCE with every requested step — never one call per step.
 - To answer questions about a mesh's quality or printability, call inspect_mesh — never guess. Before repairing a mesh, call suggest_fixes to pick the right operations.
 - If you need to run a workflow but don't know the ID, call list_workflows first.
 - To create a workflow, ONLY use extension ids listed under "Available extensions" in the context. Never invent an id. Chain steps so each step's input type matches the previous step's output type.
 - For a workflow's input, `input_type` MUST be exactly one of: `image`, `text`, or `mesh`. These map to the Image, Text, and Load 3D Mesh nodes. Never invent another input. Pick the one matching the first step's expected input.
+- uninstall_extension, delete_model_weights, delete_workflow and set_storage_folder ask the user to confirm. If the result says the user declined, acknowledge it and do not retry.
+- Never call navigate unless the user explicitly asks to go to a page. Act from where the user is.
 - After each tool call, give a short one-sentence summary of what was done.
 - Always reply in the same language the user is writing in.
 - Be concise. No unnecessary explanations.\
@@ -77,68 +158,6 @@ TOOLS = [
             "name": "get_mesh_info",
             "description": "Get information about the current mesh loaded in the 3D viewer (triangle count, path, etc.).",
             "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "inspect_mesh",
-            "description": "Diagnose a mesh without modifying it: watertight, manifold, holes, self-intersections, disconnected parts, dimensions, volume, UVs/normals, and whether it is 3D-printable.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Workspace-relative path to the mesh file. Use get_mesh_info to obtain it.",
-                    },
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "suggest_fixes",
-            "description": "Inspect a mesh and list the operations (with parameters) that would fix its problems. Does not modify the mesh.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Workspace-relative path to the mesh file. Use get_mesh_info to obtain it.",
-                    },
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "repair_mesh",
-            "description": (
-                "Repair a mesh automatically: fill holes, fix non-manifold edges, degenerate "
-                "faces and flipped normals, re-checking until it is closed and manifold. "
-                "Writes a new mesh without textures; does nothing if the mesh is already sound."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Workspace-relative path to the mesh file. Use get_mesh_info to obtain it.",
-                    },
-                    "fill_holes": {
-                        "type": "boolean",
-                        "description": (
-                            "Close holes (default true). Set false only for meshes meant to stay open, "
-                            "like terrain: then only flipped faces are fixed."
-                        ),
-                    },
-                },
-                "required": ["path"],
-            },
         },
     },
     {
@@ -176,7 +195,10 @@ TOOLS = [
                     "unit": {
                         "type": "string",
                         "enum": ["m", "cm", "mm"],
-                        "description": "normalize_scale only: unit of `size`. Default m.",
+                        "description": (
+                            "normalize_scale only: unit of `size`, when the user gave a real size. "
+                            "Omit it for a size in model units: the mesh is then not marked as real-sized."
+                        ),
                     },
                     "dimension": {
                         "type": "string",
@@ -185,48 +207,6 @@ TOOLS = [
                     },
                 },
                 "required": ["path", "steps"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "decimate_mesh",
-            "description": "Reduce the polygon count of the current mesh using quadric edge collapse.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Workspace-relative path to the mesh file (e.g. 'Default/mesh.glb'). Use get_mesh_info to obtain it.",
-                    },
-                    "target_faces": {
-                        "type": "integer",
-                        "description": "Target number of faces after decimation.",
-                    },
-                },
-                "required": ["path", "target_faces"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "smooth_mesh",
-            "description": "Apply Laplacian smoothing to the current mesh.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Workspace-relative path to the mesh file. Use get_mesh_info to obtain it.",
-                    },
-                    "iterations": {
-                        "type": "integer",
-                        "description": "Number of smoothing iterations (1–20). More = smoother but loses detail.",
-                    },
-                },
-                "required": ["path", "iterations"],
             },
         },
     },
@@ -314,6 +294,174 @@ TOOLS = [
         },
     },
 ]
+TOOLS += registry_tools(mesh_ops_registry)
+
+
+def _function(name: str, description: str, properties: dict | None = None, required: list[str] | None = None) -> dict:
+    parameters: dict = {"type": "object", "properties": properties or {}}
+    if required:
+        parameters["required"] = required
+    return {"type": "function", "function": {"name": name, "description": description, "parameters": parameters}}
+
+
+_EXTENSION_ID = {"type": "string", "description": "Exact extension id, as listed by list_extensions."}
+_WORKFLOW_ID = {"type": "string", "description": "Exact workflow id, as listed by list_workflows."}
+_VARIANT = {"type": "string", "description": "Optional weights variant, for extensions that offer several. Omit for the default."}
+
+# Server-side tools that read the request context or hand a run to the app.
+TOOLS += [
+    _function("list_extensions", "List the installed extensions, with their ids and input→output types."),
+    _function("get_settings", "Show Modly's storage folders (models, workspace, workflows, extensions) and UI options."),
+    _function(
+        "generate_from_image",
+        "Generate a 3D model from the image the user attached to their message. The app runs the "
+        "generation and shows its progress. Needs an attached image.",
+        {"model_id": {
+            "type": "string",
+            "description": "Id of a downloaded generation model (see list_models). Omit to use the model selected in the app.",
+        }},
+    ),
+]
+
+# Tools the app runs itself (Electron IPC, renderer stores), mapped to whether
+# the user must confirm them first. The frontend obeys `confirm`.
+CLIENT_TOOLS: dict[str, bool] = {
+    # Installing runs code downloaded from GitHub: the user must see the URL and click.
+    "install_extension": True,
+    "uninstall_extension": True,
+    "reload_extensions": False,
+    "download_model_weights": False,
+    "delete_model_weights": True,
+    "delete_workflow": True,
+    "open_workflow": False,
+    "set_setting": False,
+    "set_storage_folder": True,
+    "undo_mesh": False,
+    "redo_mesh": False,
+    "navigate": False,
+}
+
+TOOLS += [
+    _function(
+        "install_extension",
+        "Install an extension from its GitHub repository URL, then load it.",
+        {"github_url": {"type": "string", "description": "Repository URL, e.g. https://github.com/owner/repo."}},
+        ["github_url"],
+    ),
+    _function(
+        "uninstall_extension",
+        "Uninstall an extension and remove its files. The user is asked to confirm.",
+        {"extension_id": _EXTENSION_ID},
+        ["extension_id"],
+    ),
+    _function("reload_extensions", "Reload every installed extension, e.g. after its files changed on disk."),
+    _function(
+        "download_model_weights",
+        "Download the model weights an extension needs. The download continues in the background.",
+        {"extension_id": _EXTENSION_ID, "variant": _VARIANT},
+        ["extension_id"],
+    ),
+    _function(
+        "delete_model_weights",
+        "Delete an extension's downloaded model weights from disk. The user is asked to confirm.",
+        {"extension_id": _EXTENSION_ID, "variant": _VARIANT},
+        ["extension_id"],
+    ),
+    _function(
+        "delete_workflow",
+        "Delete a saved workflow. The user is asked to confirm.",
+        {"workflow_id": _WORKFLOW_ID},
+        ["workflow_id"],
+    ),
+    _function(
+        "open_workflow",
+        "Open a workflow in the workflow editor, without leaving the current page.",
+        {"workflow_id": _WORKFLOW_ID},
+        ["workflow_id"],
+    ),
+    _function(
+        "set_setting",
+        "Change a UI setting. uiScale is one of small, medium, large, very-large; useAtkinsonFont, showRamIndicator and showVramIndicator are booleans.",
+        {
+            "key": {"type": "string", "enum": ["uiScale", "useAtkinsonFont", "showRamIndicator", "showVramIndicator"]},
+            "value": {"type": ["string", "boolean"], "description": "For uiScale one of: small, medium, large, very-large. A boolean otherwise."},
+        },
+        ["key", "value"],
+    ),
+    _function(
+        "set_storage_folder",
+        "Change where Modly stores models, the workspace or workflows. The user is asked to confirm.",
+        {
+            "kind": {"type": "string", "enum": ["models", "workspace", "workflows"]},
+            "path": {"type": "string", "description": "Absolute path of the new folder."},
+        },
+        ["kind", "path"],
+    ),
+    _function("undo_mesh", "Undo the last change to the current mesh in the viewer."),
+    _function("redo_mesh", "Redo the last undone change to the current mesh in the viewer."),
+    _function(
+        "navigate",
+        "Switch the app to another page. Use it ONLY when the user explicitly asks to go to a page; "
+        "every other tool works from any page.",
+        {"page": {"type": "string", "description": "A page id from the app context's Pages line."}},
+        ["page"],
+    ),
+]
+
+# Seconds the user has to click Confirm or Cancel on a confirmed client tool.
+# Once they confirm (POST /agent/tool-confirmed), the tool gets tool_timeout.
+CONFIRM_TIMEOUT = 600.0
+_NO_ANSWER = "Error: The app did not answer in time."
+# Client tools are run by the Modly app; /agent/chat has nobody to run them.
+_NEEDS_APP = "Error: This tool needs the Modly app."
+
+# call_id → the turn waiting for the app's answer (see /agent/tool-result).
+_pending_client_tools: dict[str, asyncio.Future] = {}
+# call_id → set when the user clicked Confirm (see /agent/tool-confirmed).
+_confirmed_client_tools: dict[str, asyncio.Event] = {}
+
+# What the non-streaming /agent/chat offers: no client tool, nobody would answer.
+SERVER_TOOLS = [t for t in TOOLS if t["function"]["name"] not in CLIENT_TOOLS]
+
+
+def _one_line(text: str, limit: int = 64) -> str:
+    """A context value from the app, on one line and capped."""
+    return " ".join(text.split())[:limit]
+
+
+def _not_finished(tool: str, limit: float) -> str:
+    return (
+        f"Error: {tool} was confirmed but did not finish within {limit:g} s. "
+        "It may still be running in the app; check before retrying."
+    )
+
+
+async def _await_client_answer(
+    tool: str, answer: asyncio.Future, confirmed: asyncio.Event, confirm: bool, tool_timeout: float,
+) -> str:
+    """The app's answer to one client tool, or why there is none.
+
+    A confirmed tool waits up to CONFIRM_TIMEOUT for the click (or a direct
+    answer, e.g. a Cancel), then tool_timeout for the run itself.
+    """
+    if confirm:
+        clicked = asyncio.ensure_future(confirmed.wait())
+        try:
+            await asyncio.wait({answer, clicked}, timeout=CONFIRM_TIMEOUT, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            clicked.cancel()
+        if answer.done():
+            return answer.result()
+        if not confirmed.is_set():
+            return _NO_ANSWER
+        try:
+            return await asyncio.wait_for(answer, tool_timeout)
+        except asyncio.TimeoutError:
+            return _not_finished(tool, tool_timeout)
+    try:
+        return await asyncio.wait_for(answer, tool_timeout)
+    except asyncio.TimeoutError:
+        return _NO_ANSWER
 
 
 # Input kinds the agent may pick, mapped to the real Modly source-node types.
@@ -375,70 +523,81 @@ def _build_workflow_graph(name: str, description: str, input_type: str, steps: l
     return {"name": name, "description": description, "nodes": all_nodes, "edges": edges}
 
 
-def _format_inspection(report: dict) -> str:
-    """Render an inspect_mesh report as compact text for the model."""
-    def yes_no(value) -> str:
-        return "unknown" if value is None else ("yes" if value else "no")
+def _agent_op(name: str) -> MeshOp | None:
+    """The registry op behind a tool name, if the registry exposes it to the agent."""
+    try:
+        op = mesh_ops_registry.get(name)
+    except MeshOpNotFoundError:
+        return None
+    return op if op.agent is not None else None
 
-    dims = " × ".join(f"{d:.4g}" for d in report.get("dimensions", []))
-    volume = report.get("volume")
-    self_hits = report.get("self_intersecting_face_count")
-    lines = [
-        f"Printable: {yes_no(report.get('printable'))}",
-        f"Faces: {report.get('face_count', '?'):,}, vertices: {report.get('vertex_count', '?'):,}, parts: {report.get('component_count', '?')}",
-        f"Watertight: {yes_no(report.get('is_watertight'))}, manifold: {yes_no(report.get('is_manifold'))}, consistent winding: {yes_no(report.get('is_winding_consistent'))}",
-        f"Holes: {report.get('hole_count', 0)} ({report.get('boundary_edge_count', 0)} open edges), non-manifold edges: {report.get('non_manifold_edge_count', 0)}, degenerate faces: {report.get('degenerate_face_count', 0)}",
-        f"Self-intersecting faces: {'not checked' if self_hits is None else self_hits}",
-        f"Dimensions: {dims}, surface area: {report.get('surface_area', 0):.4g}, volume: {'n/a (not closed)' if volume is None else f'{volume:.4g}'}",
-        f"UVs: {yes_no(report.get('has_uvs'))}, normals: {yes_no(report.get('has_normals'))}",
+
+async def _run_agent_op(client: httpx.AsyncClient, op: MeshOp, arguments: dict) -> tuple[str, dict | None]:
+    # Only the params shown to the model are forwarded; the rest keep their defaults.
+    params = {pid: arguments[pid] for pid in op.agent.params if arguments.get(pid) is not None}
+    r = await client.post(
+        f"{MODLY_API}/optimize/op/{op.id}",
+        json={"path": arguments["path"], "params": params},
+    )
+    r.raise_for_status()
+    data = r.json()
+
+    # An op that wrote a mesh answers with its url; analysis ops leave the scene as is.
+    payload = None
+    if data.get("url"):
+        payload = {"type": "mesh_update", "url": data["url"], "face_count": data.get("face_count")}
+
+    if op.agent.format_result is not None:
+        text = op.agent.format_result(data)
+    elif payload is not None:
+        faces = data.get("face_count")
+        text = f"{op.label} done. New mesh path: {data['path']}" + (f" ({faces:,} faces)." if faces else ".")
+    else:
+        text = f"{op.label}: {json.dumps(data)[:2000]}"
+    return text, payload
+
+
+def _extension_lines(extensions: list[dict]) -> list[str]:
+    return [
+        f"- {e['id']} ({e.get('input', '?')}→{e.get('output', '?')}): {e.get('name', e['id'])}"
+        for e in extensions if e.get("id")
     ]
-    issues = report.get("issues") or []
-    if issues:
-        lines.append("Issues: " + "; ".join(issues))
-    return "\n".join(lines)
 
 
-def _format_fixes(data: dict) -> str:
-    """Render a suggest_fixes result as compact text for the model."""
-    fixes = data.get("fixes") or []
-    notes = data.get("notes") or []
-    if not fixes and not notes:
-        return "No fixes needed — the mesh has no detected problems."
-    lines = ["Suggested operations:"] if fixes else ["No operation can fix the detected problems."]
-    for fix in fixes:
-        lines.append(f"- {fix['op']} {json.dumps(fix.get('params', {}))}: {fix.get('reason', '')}")
-    lines.extend(f"Note: {note}" for note in notes)
-    return "\n".join(lines)
+def _id_name_lines(items: list[dict]) -> list[str]:
+    return [f"- {i['id']}: {i.get('name') or i['id']}" for i in items if i.get("id")]
 
 
-def _format_repair(data: dict) -> tuple[str, dict | None]:
-    """Render a repair_mesh result for the model, plus the viewer update."""
-    remaining = data.get("remaining_issues") or []
-    if not data.get("repaired"):
-        text = "Nothing to repair: the mesh is already closed and manifold."
-        if remaining:
-            text = "Nothing was repaired. Remaining: " + "; ".join(remaining) + "."
-        return text, None
-
-    steps = ", ".join(data.get("steps") or [])
-    lines = [
-        f"Repaired in {data.get('passes', '?')} pass(es) ({steps}).",
-        ("Still remaining: " + "; ".join(remaining) + ".") if remaining
-        else "The mesh is now closed (watertight) and manifold.",
-        f"New mesh path: {data['path']} ({data.get('face_count', '?'):,} faces).",
-    ]
-    if data.get("textures_dropped"):
-        lines.append("The textures and UVs were dropped: the repaired mesh is geometry only.")
-    payload = {"type": "mesh_update", "url": data["url"], "face_count": data.get("face_count")}
-    return "\n".join(lines), payload
+_STORAGE_LABELS = {
+    "modelsDir": "Models folder",
+    "workspaceDir": "Workspace folder",
+    "workflowsDir": "Workflows folder",
+    "extensionsDir": "Extensions folder",
+}
 
 
-async def execute_tool(name: str, arguments: dict, context: dict) -> tuple[str, dict | None]:
+def _settings_lines(context: dict) -> list[str]:
+    """The storage folders and UI options the app sent, one per line."""
+    storage = context.get("storage") or {}
+    ui = context.get("ui") or {}
+    lines = [f"{label}: {storage[key]}" for key, label in _STORAGE_LABELS.items() if storage.get(key)]
+    lines += [f"{key}: {_show(value)}" for key, value in ui.items() if value is not None]
+    return lines
+
+
+async def execute_tool(
+    name: str, arguments: dict, context: dict, *, timeout: float = 60.0, has_image: bool = False,
+) -> tuple[str, dict | None]:
     """Execute a tool and return (result_text, action_payload).
     action_payload carries data the frontend needs to react (e.g. new mesh URL).
+    has_image: the user's last message carries an image (generate_from_image).
     """
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         try:
+            op = _agent_op(name)
+            if op is not None:
+                return await _run_agent_op(client, op, arguments)
+
             if name == "list_models":
                 r = await client.get(f"{MODLY_API}/model/all")
                 r.raise_for_status()
@@ -463,33 +622,6 @@ async def execute_tool(name: str, arguments: dict, context: dict) -> tuple[str, 
                     info += f" ({mesh_triangles:,} triangles)"
                 return info, None
 
-            elif name == "inspect_mesh":
-                r = await client.post(
-                    f"{MODLY_API}/optimize/op/inspect_mesh",
-                    json={"path": arguments["path"]},
-                )
-                r.raise_for_status()
-                return _format_inspection(r.json()), None
-
-            elif name == "suggest_fixes":
-                r = await client.post(
-                    f"{MODLY_API}/optimize/op/suggest_fixes",
-                    json={"path": arguments["path"]},
-                )
-                r.raise_for_status()
-                return _format_fixes(r.json()), None
-
-            elif name == "repair_mesh":
-                params = {}
-                if arguments.get("fill_holes") is not None:
-                    params["fill_holes"] = bool(arguments["fill_holes"])
-                r = await client.post(
-                    f"{MODLY_API}/optimize/op/repair_mesh",
-                    json={"path": arguments["path"], "params": params},
-                )
-                r.raise_for_status()
-                return _format_repair(r.json())
-
             elif name == "arrange_mesh":
                 scale_params = {
                     key: arguments[key] for key in ("size", "unit", "dimension")
@@ -511,26 +643,6 @@ async def execute_tool(name: str, arguments: dict, context: dict) -> tuple[str, 
                     f"New mesh path: {data['path']}. Dimensions (x × y × z, metres): {dims}."
                 )
                 return text, {"type": "mesh_update", "url": data["url"]}
-
-            elif name == "decimate_mesh":
-                r = await client.post(
-                    f"{MODLY_API}/optimize/mesh",
-                    json={"path": arguments["path"], "target_faces": arguments["target_faces"]},
-                )
-                r.raise_for_status()
-                data = r.json()
-                payload = {"type": "mesh_update", "url": data["url"], "face_count": data.get("face_count")}
-                return f"Decimated to {data.get('face_count', '?')} faces.", payload
-
-            elif name == "smooth_mesh":
-                r = await client.post(
-                    f"{MODLY_API}/optimize/smooth",
-                    json={"path": arguments["path"], "iterations": arguments["iterations"]},
-                )
-                r.raise_for_status()
-                data = r.json()
-                payload = {"type": "mesh_update", "url": data["url"]}
-                return f"Smoothed mesh ({arguments['iterations']} iterations).", payload
 
             elif name == "get_generation_status":
                 r = await client.get(f"{MODLY_API}/generate/status/{arguments['job_id']}")
@@ -558,6 +670,34 @@ async def execute_tool(name: str, arguments: dict, context: dict) -> tuple[str, 
                     return f"Workflow '{workflow_id}' not found. Use list_workflows to see available workflows.", None
                 payload = {"type": "run_workflow", "workflow_id": workflow_id, "workflow_name": match["name"]}
                 return f"Executing workflow '{match['name']}'…", payload
+
+            elif name == "list_extensions":
+                lines = _extension_lines(context.get("extensions") or [])
+                if not lines:
+                    return "No extensions installed.", None
+                return "Installed extensions:\n" + "\n".join(lines), None
+
+            elif name == "get_settings":
+                lines = _settings_lines(context)
+                if not lines:
+                    return "No settings were sent by the app.", None
+                return "\n".join(lines), None
+
+            elif name == "generate_from_image":
+                if not has_image:
+                    return "No image is attached. Ask the user to attach the image to generate from.", None
+                model_id = arguments.get("model_id") or None
+                models = context.get("models") or []
+                label = "the selected model"
+                if model_id and models:
+                    match = next((m for m in models if m.get("id") == model_id), None)
+                    if not match:
+                        ids = ", ".join(m["id"] for m in models if m.get("id"))
+                        return f"Model '{model_id}' is not downloaded. Use one of: {ids}.", None
+                    label = match.get("name") or model_id
+                elif model_id:
+                    label = model_id
+                return f"Generating a 3D model with {label}…", {"type": "generate_from_image", "model_id": model_id}
 
             elif name == "create_workflow":
                 steps = arguments.get("steps") or []
@@ -620,18 +760,24 @@ class AgentChatRequest(BaseModel):
     provider: ProviderConfig = ProviderConfig()
     context: dict = {}
     thinking: str = "auto"  # "auto" | "on" | "off"
+    # Guardrails of the tool loop: tool calls allowed in one turn, and seconds
+    # one call may take. The chat sends the values set in Settings → Agent.
+    tool_budget: int = Field(default=10, ge=1, le=100)
+    tool_timeout: float = Field(default=120.0, gt=0, le=3600)
 
 
 class ActionDone(BaseModel):
     tool: str
     result: str
     payload: dict | None = None
+    error: dict | None = None  # the stop, when a guardrail cut this call short
 
 
 class AgentChatResponse(BaseModel):
     message: str
     actions: list[ActionDone] = []
     thinking: str | None = None
+    stopped: dict | None = None
 
 
 def _auth_headers(base_url: str, api_key: Optional[str]) -> dict:
@@ -666,6 +812,17 @@ async def list_external_models(req: ExternalModelsRequest):
             return {"models": sorted(m["id"] for m in data if isinstance(m, dict) and m.get("id"))}
         except Exception:
             return {"models": []}
+
+
+@router.get("/ollama/health")
+async def ollama_health(base_url: str = "http://localhost:11434/v1", model: str = ""):
+    """Is Ollama up, and is `model` pulled? `status` is `ok`, `unreachable`,
+    `model_missing` or `no_model`; the chat panel turns it into a banner.
+    Only local addresses are accepted (400 otherwise)."""
+    try:
+        return await ollama_health_service.check(base_url, model)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 async def _unload_llm_after_workflow(request: AgentChatRequest, actions_done: list[ActionDone]) -> None:
@@ -881,7 +1038,10 @@ async def _read_round(response: httpx.Response, round_: _Round):
         yield event
 
 
-def _done(message: str, actions: list[ActionDone], thinking: list[str], error: bool = False) -> dict:
+def _done(
+    message: str, actions: list[ActionDone], thinking: list[str], error: bool = False,
+    stopped: dict | None = None,
+) -> dict:
     return {
         "type": "done",
         "message": message,
@@ -890,7 +1050,30 @@ def _done(message: str, actions: list[ActionDone], thinking: list[str], error: b
         # The message reports a failure rather than answering: the chat shows
         # it after whatever text already streamed.
         "error": error,
+        # Set when a guardrail ended the tool loop (see _tool_stop).
+        "stopped": stopped,
     }
+
+
+def _tool_stop(code: str, tool: str, limit: float) -> dict:
+    """Why a guardrail ended the tool loop, and what the user can do about it.
+
+    tool_budget_exhausted — the model asked for a call past the turn's budget
+    tool_timeout          — one call ran past its timeout
+    """
+    if code == "tool_budget_exhausted":
+        message = (
+            f"Stopped after {limit:g} tool calls: the agent kept calling tools without "
+            f"finishing (it wanted to run {tool} next). Try a more specific request, "
+            f"or raise the tool budget in Settings → Agent."
+        )
+    else:
+        message = (
+            f"Stopped: {tool} did not finish within {limit:g} s. It may still be "
+            f"running in the background. Try again on a lighter mesh, or raise the "
+            f"tool timeout in Settings → Agent."
+        )
+    return {"code": code, "tool": tool, "limit": limit, "message": message}
 
 
 def _release_claimed(claim: asyncio.Future) -> None:
@@ -913,11 +1096,16 @@ async def _claim_slot(model: str, spec: dict):
         raise
 
 
-async def _chat_events(request: AgentChatRequest):
+async def _chat_events(request: AgentChatRequest, client_tools: bool = True):
     """Run the tool loop, yielding its events as they happen.
+
+    client_tools — False when nobody reads the stream to run them (/agent/chat):
+                   they are not offered, and a call to one fails at once.
 
     token / thinking — answer and reasoning text, in pieces
     tool_start / tool_done — around each tool call
+    client_tool — between them, for a tool the app runs: the turn waits for
+                  its answer on POST /agent/tool-result with the same call_id
     done — always last: the final answer, every action and the full reasoning
     """
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -925,6 +1113,16 @@ async def _chat_events(request: AgentChatRequest):
     # Inject scene context so the LLM knows current state
     if request.context:
         ctx_lines = []
+        if request.context.get("page"):
+            ctx_lines.append(f"Current page: {request.context['page']}")
+        # From the app's page registry; kept short and on one line all the same.
+        pages = [
+            (_one_line(p["id"]), _one_line(p.get("label") if isinstance(p.get("label"), str) else p["id"]))
+            for p in (request.context.get("pages") or [])[:32]
+            if isinstance(p, dict) and isinstance(p.get("id"), str)
+        ]
+        if pages:
+            ctx_lines.append("Pages: " + ", ".join(f"{pid} ({label})" for pid, label in pages))
         if request.context.get("currentMeshPath"):
             ctx_lines.append(f"Current mesh path: {request.context['currentMeshPath']}")
         if request.context.get("meshTriangles"):
@@ -935,19 +1133,17 @@ async def _chat_events(request: AgentChatRequest):
                 "content": "Scene context:\n" + "\n".join(ctx_lines),
             })
 
-        extensions = request.context.get("extensions") or []
-        if extensions:
-            ext_lines = [
-                f"- {e['id']} ({e.get('input', '?')}→{e.get('output', '?')}): {e.get('name', e['id'])}"
-                for e in extensions
-            ]
-            messages.append({
-                "role": "system",
-                "content": (
-                    "Available extensions (use the exact id when creating workflows):\n"
-                    + "\n".join(ext_lines)
-                ),
-            })
+        sections = [
+            ("Available extensions (use the exact id when creating workflows)",
+             _extension_lines(request.context.get("extensions") or [])),
+            ("Downloaded generation models (use the exact id with generate_from_image)",
+             _id_name_lines(request.context.get("models") or [])),
+            ("Workflows", _id_name_lines(request.context.get("workflows") or [])),
+            ("Settings", _settings_lines(request.context)),
+        ]
+        for title, lines in sections:
+            if lines:
+                messages.append({"role": "system", "content": f"{title}:\n" + "\n".join(lines)})
 
     # ONE system message, first. Qwen3.5's chat template raises "System message
     # must be at the beginning", which llama-server returns as a flat HTTP 400;
@@ -981,11 +1177,16 @@ async def _chat_events(request: AgentChatRequest):
 
     for m in request.messages:
         messages.append(_user_entry(m, send_images))
+    # The image generate_from_image would use: the frontend takes it from the
+    # user's last message, as run_workflow does.
+    last_user = next((m for m in reversed(request.messages) if m.role == "user"), None)
+    has_image = bool(last_user and last_user.images)
 
     actions_done: list[ActionDone] = []
     all_thinking:  list[str]       = []
     final: str | None = None
     error: str | None = None
+    stopped: dict | None = None
     answered = False
 
     try:
@@ -997,12 +1198,16 @@ async def _chat_events(request: AgentChatRequest):
                         "POST",
                         f"{base_url}/chat/completions",
                         headers=headers,
-                        json={"model": request.model, "messages": messages, "tools": TOOLS, "stream": True, **extra},
+                        json={
+                            "model": request.model, "messages": messages,
+                            "tools": TOOLS if client_tools else SERVER_TOOLS, "stream": True, **extra,
+                        },
                     ),
                     stream=True,
                 )
 
-            for _ in range(10):  # max tool-call rounds
+            # Bounded: a round either answers or spends at least one tool call.
+            while stopped is None:
                 round_ = _Round(answered, bool(all_thinking))
                 r = await post()
                 try:
@@ -1038,11 +1243,58 @@ async def _chat_events(request: AgentChatRequest):
 
                 for tc in tool_calls:
                     fn = tc["function"]
+                    if len(actions_done) >= request.tool_budget:
+                        stopped = _tool_stop("tool_budget_exhausted", fn["name"], request.tool_budget)
+                        break
                     arguments = _tool_arguments(fn.get("arguments"))
                     yield {"type": "tool_start", "id": tc["id"], "tool": fn["name"], "arguments": arguments}
-                    result_text, payload = await execute_tool(fn["name"], arguments, request.context)
-                    actions_done.append(ActionDone(tool=fn["name"], result=result_text, payload=payload))
-                    yield {"type": "tool_done", "id": tc["id"], "tool": fn["name"], "result": result_text, "payload": payload}
+                    if fn["name"] in CLIENT_TOOLS and not client_tools:
+                        # Not offered here, but a model may still name one.
+                        result_text, payload = _NEEDS_APP, None
+                    elif fn["name"] in CLIENT_TOOLS:
+                        # The app runs it and answers through /agent/tool-result.
+                        confirm = CLIENT_TOOLS[fn["name"]]
+                        call_id = uuid.uuid4().hex
+                        answer = asyncio.get_running_loop().create_future()
+                        confirmed = asyncio.Event()
+                        _pending_client_tools[call_id] = answer
+                        _confirmed_client_tools[call_id] = confirmed
+                        try:
+                            yield {
+                                "type": "client_tool", "id": tc["id"], "call_id": call_id,
+                                "tool": fn["name"], "arguments": arguments, "confirm": confirm,
+                            }
+                            result_text = await _await_client_answer(
+                                fn["name"], answer, confirmed, confirm, request.tool_timeout,
+                            )
+                        finally:
+                            # Also runs when the client leaves: nobody will answer.
+                            _pending_client_tools.pop(call_id, None)
+                            _confirmed_client_tools.pop(call_id, None)
+                            answer.cancel()
+                        payload = None
+                    else:
+                        try:
+                            result_text, payload = await asyncio.wait_for(
+                                execute_tool(
+                                    fn["name"], arguments, request.context,
+                                    timeout=request.tool_timeout, has_image=has_image,
+                                ),
+                                request.tool_timeout,
+                            )
+                        except asyncio.TimeoutError:
+                            # Cancelling the call drops its HTTP request, but a mesh op
+                            # the API already started runs to its end in a worker
+                            # thread; its result is never shown.
+                            stopped = _tool_stop("tool_timeout", fn["name"], request.tool_timeout)
+                            result_text, payload = stopped["message"], None
+                    actions_done.append(ActionDone(tool=fn["name"], result=result_text, payload=payload, error=stopped))
+                    yield {
+                        "type": "tool_done", "id": tc["id"], "tool": fn["name"],
+                        "result": result_text, "payload": payload, "error": stopped,
+                    }
+                    if stopped is not None:
+                        break
                     messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result_text})
     except httpx.HTTPError as e:
         error = f"Could not reach the LLM at {base_url}: {e}"
@@ -1057,20 +1309,57 @@ async def _chat_events(request: AgentChatRequest):
 
     if error is not None:
         yield _done(error, actions_done, all_thinking, error=True)
-    elif final is None:
-        yield _done("Reached maximum tool iterations.", actions_done, all_thinking, error=True)
+    elif stopped is not None:
+        yield _done(stopped["message"], actions_done, all_thinking, error=True, stopped=stopped)
     else:
         yield _done(final, actions_done, all_thinking)
+
+
+class ToolResultRequest(BaseModel):
+    call_id: str
+    result: str
+    error: bool = False
+
+
+@router.post("/tool-result")
+async def agent_tool_result(req: ToolResultRequest):
+    """The app's answer to a client_tool event; the waiting turn resumes with it."""
+    answer = _pending_client_tools.get(req.call_id)
+    if answer is None or answer.done():
+        raise HTTPException(status_code=404, detail="No tool call is waiting for this call_id.")
+    # The app's results already start with "Error: "; don't say it twice.
+    result = req.result
+    if req.error and not result.startswith("Error:"):
+        result = f"Error: {result}"
+    answer.set_result(result)
+    return {"ok": True}
+
+
+class ToolConfirmedRequest(BaseModel):
+    call_id: str
+
+
+@router.post("/tool-confirmed")
+async def agent_tool_confirmed(req: ToolConfirmedRequest):
+    """The user clicked Confirm: the turn now waits tool_timeout for the result."""
+    confirmed = _confirmed_client_tools.get(req.call_id)
+    answer = _pending_client_tools.get(req.call_id)
+    if confirmed is None or answer is None or answer.done():
+        raise HTTPException(status_code=404, detail="No tool call is waiting for this call_id.")
+    confirmed.set()
+    return {"ok": True}
 
 
 @router.post("/chat", response_model=AgentChatResponse)
 async def agent_chat(request: AgentChatRequest):
     """The whole turn at once, for callers that don't read a stream."""
     done: dict = {}
-    async for event in _chat_events(request):
+    async for event in _chat_events(request, client_tools=False):
         if event["type"] == "done":
             done = event
-    return AgentChatResponse(message=done["message"], actions=done["actions"], thinking=done["thinking"])
+    return AgentChatResponse(
+        message=done["message"], actions=done["actions"], thinking=done["thinking"], stopped=done["stopped"],
+    )
 
 
 @router.post("/chat/stream")

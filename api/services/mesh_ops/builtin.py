@@ -1,10 +1,12 @@
 """Built-in mesh operation definitions."""
 
+from .agent_format import format_fixes, format_inspection, format_preset, format_repair
 from .inspection import inspect_mesh, suggest_fixes
 from .operations import decimate_mesh, repair_mesh, smooth_mesh
+from .presets import prepare_for_game, prepare_for_printing, prepare_for_web
 from .repair import auto_repair_mesh
-from .transforms import auto_orient, drop_to_ground, normalize_scale, recenter
-from .types import MeshOp
+from .transforms import auto_orient, drop_to_ground, normalize_scale, recenter, set_real_scale
+from .types import AgentTool, MeshOp
 
 
 REPAIR_PARAMS = (
@@ -137,13 +139,17 @@ NORMALIZE_SCALE_PARAMS = (
         "id": "unit",
         "label": "Unit",
         "type": "select",
-        "default": "m",
+        "default": "units",
         "options": [
+            {"value": "units", "label": "Model units (no real size)"},
             {"value": "m", "label": "Metres"},
             {"value": "cm", "label": "Centimetres"},
             {"value": "mm", "label": "Millimetres"},
         ],
-        "tooltip": "glTF stores metres: 20 cm is written as 0.2 units.",
+        "tooltip": (
+            "glTF stores metres: 20 cm is written as 0.2 units. A real unit also "
+            "marks the mesh as real-sized, for the Print page and exports."
+        ),
     },
     {
         "id": "dimension",
@@ -157,6 +163,45 @@ NORMALIZE_SCALE_PARAMS = (
             {"value": "z", "label": "Depth (Z)"},
         ],
         "tooltip": "Which bounding-box dimension is set to the target size.",
+    },
+)
+
+
+SET_REAL_SCALE_PARAMS = (
+    {
+        "id": "size",
+        "label": "Real Size",
+        "type": "float",
+        "default": 10.0,
+        "min": 0.001,
+        "max": 100000.0,
+        "step": 0.1,
+        "tooltip": "How big the measured dimension really is, in the chosen unit.",
+    },
+    {
+        "id": "unit",
+        "label": "Unit",
+        "type": "select",
+        "default": "cm",
+        "options": [
+            {"value": "mm", "label": "Millimetres"},
+            {"value": "cm", "label": "Centimetres"},
+            {"value": "m", "label": "Metres"},
+        ],
+        "tooltip": "Unit of the real size.",
+    },
+    {
+        "id": "dimension",
+        "label": "Dimension",
+        "type": "select",
+        "default": "longest",
+        "options": [
+            {"value": "longest", "label": "Longest side"},
+            {"value": "x", "label": "Width (X)"},
+            {"value": "y", "label": "Height (Y)"},
+            {"value": "z", "label": "Depth (Z)"},
+        ],
+        "tooltip": "Which bounding-box dimension has the real size.",
     },
 )
 
@@ -176,6 +221,73 @@ REPAIR_MESH_PARAMS = (
 )
 
 
+DIMENSION_PARAM = {
+    "id": "dimension",
+    "label": "Dimension",
+    "type": "select",
+    "default": "longest",
+    "options": [
+        {"value": "longest", "label": "Longest side"},
+        {"value": "x", "label": "Width (X)"},
+        {"value": "y", "label": "Height (Y)"},
+        {"value": "z", "label": "Depth (Z)"},
+    ],
+    "tooltip": "Which bounding-box dimension is set to the target size.",
+}
+
+
+PREPARE_FOR_PRINTING_PARAMS = (
+    {
+        "id": "size_mm",
+        "label": "Size (mm)",
+        "type": "float",
+        "default": 100.0,
+        "min": 1.0,
+        "max": 10000.0,
+        "step": 1.0,
+        "tooltip": "Printed size of the chosen dimension, in millimetres.",
+    },
+    DIMENSION_PARAM,
+)
+
+PREPARE_FOR_GAME_PARAMS = (
+    {
+        "id": "target_faces",
+        "label": "Poly Budget",
+        "type": "int",
+        "default": 20000,
+        "min": 100,
+        "max": 1000000,
+        "tooltip": "Maximum number of triangles the game asset may keep.",
+    },
+    {
+        "id": "size_m",
+        "label": "Size (m)",
+        "type": "float",
+        "default": 1.0,
+        "min": 0.01,
+        "max": 1000.0,
+        "step": 0.1,
+        "tooltip": "In-game size of the chosen dimension, in metres.",
+    },
+    DIMENSION_PARAM,
+)
+
+PREPARE_FOR_WEB_PARAMS = (
+    {
+        "id": "target_faces",
+        "label": "Poly Budget",
+        "type": "int",
+        "default": 5000,
+        "min": 100,
+        "max": 200000,
+        "tooltip": "Maximum number of triangles: fewer means a lighter download.",
+    },
+)
+
+DIMENSION_HINT = "Which side gets the size: longest, x (width), y (height) or z (depth)."
+
+
 BUILTIN_MESH_OPS = (
     MeshOp(
         id="repair",
@@ -190,6 +302,20 @@ BUILTIN_MESH_OPS = (
         params_schema=REPAIR_MESH_PARAMS,
         fn=auto_repair_mesh,
         category="repair",
+        agent=AgentTool(
+            description=(
+                "Repair a mesh automatically: fill holes, fix non-manifold edges, degenerate "
+                "faces and flipped normals, re-checking until it is closed and manifold. "
+                "Writes a new mesh without textures; does nothing if the mesh is already sound."
+            ),
+            params={
+                "fill_holes": (
+                    "Close holes. Set false only for meshes meant to stay open, "
+                    "like terrain: then only flipped faces are fixed."
+                ),
+            },
+            format_result=format_repair,
+        ),
     ),
     MeshOp(
         id="decimate",
@@ -197,6 +323,11 @@ BUILTIN_MESH_OPS = (
         params_schema=DECIMATE_PARAMS,
         fn=decimate_mesh,
         category="optimization",
+        agent=AgentTool(
+            description="Reduce the polygon count of a mesh using quadric edge collapse.",
+            params={"target_faces": "Target number of triangles after decimation."},
+            required=("target_faces",),
+        ),
     ),
     MeshOp(
         id="smooth",
@@ -204,6 +335,11 @@ BUILTIN_MESH_OPS = (
         params_schema=SMOOTH_PARAMS,
         fn=smooth_mesh,
         category="optimization",
+        agent=AgentTool(
+            description="Smooth the surface of a mesh (volume-preserving Taubin smoothing).",
+            params={"iterations": "Number of smoothing passes. More = smoother but loses detail."},
+            required=("iterations",),
+        ),
     ),
     MeshOp(
         id="inspect_mesh",
@@ -211,6 +347,14 @@ BUILTIN_MESH_OPS = (
         params_schema=INSPECT_PARAMS,
         fn=inspect_mesh,
         category="analysis",
+        agent=AgentTool(
+            description=(
+                "Diagnose a mesh without modifying it: watertight, manifold, holes, "
+                "self-intersections, disconnected parts, dimensions, volume, UVs/normals, "
+                "and whether it is 3D-printable."
+            ),
+            format_result=format_inspection,
+        ),
     ),
     MeshOp(
         id="suggest_fixes",
@@ -218,6 +362,13 @@ BUILTIN_MESH_OPS = (
         params_schema=INSPECT_PARAMS,
         fn=suggest_fixes,
         category="analysis",
+        agent=AgentTool(
+            description=(
+                "Inspect a mesh and list the operations (with parameters) that would fix "
+                "its problems. Does not modify the mesh."
+            ),
+            format_result=format_fixes,
+        ),
     ),
     MeshOp(
         id="recenter",
@@ -246,5 +397,79 @@ BUILTIN_MESH_OPS = (
         params_schema=NORMALIZE_SCALE_PARAMS,
         fn=normalize_scale,
         category="transform",
+    ),
+    MeshOp(
+        id="set_real_scale",
+        label="Set Real Size",
+        params_schema=SET_REAL_SCALE_PARAMS,
+        fn=set_real_scale,
+        category="transform",
+        agent=AgentTool(
+            description=(
+                "Declare how big the object really is (\"this is 30 cm tall\"): rescales the "
+                "mesh to that size and marks it calibrated, so the Print page and STL "
+                "exports use its real size."
+            ),
+            params={
+                "size": "Real size of `dimension`, in `unit`.",
+                "unit": "mm, cm or m.",
+                "dimension": DIMENSION_HINT,
+            },
+            required=("size", "unit"),
+            format_result=format_preset,
+        ),
+    ),
+    MeshOp(
+        id="prepare_for_printing",
+        label="Prepare for 3D Printing",
+        params_schema=PREPARE_FOR_PRINTING_PARAMS,
+        fn=prepare_for_printing,
+        category="presets",
+        agent=AgentTool(
+            description=(
+                "Make a mesh ready for 3D printing in one call: repair it until it is "
+                "watertight and manifold, lay it flat, scale it in millimetres and rest it "
+                "on the build plate. Writes a new mesh without textures."
+            ),
+            params={
+                "size_mm": "Printed size of `dimension`, in millimetres.",
+                "dimension": DIMENSION_HINT,
+            },
+            format_result=format_preset,
+        ),
+    ),
+    MeshOp(
+        id="prepare_for_game",
+        label="Prepare for Game",
+        params_schema=PREPARE_FOR_GAME_PARAMS,
+        fn=prepare_for_game,
+        category="presets",
+        agent=AgentTool(
+            description=(
+                "Make a mesh ready for a game engine in one call: decimate it to a "
+                "triangle budget, scale it in metres and recompute its normals."
+            ),
+            params={
+                "target_faces": "Triangle budget of the game asset.",
+                "size_m": "In-game size of `dimension`, in metres.",
+                "dimension": DIMENSION_HINT,
+            },
+            format_result=format_preset,
+        ),
+    ),
+    MeshOp(
+        id="prepare_for_web",
+        label="Prepare for Web",
+        params_schema=PREPARE_FOR_WEB_PARAMS,
+        fn=prepare_for_web,
+        category="presets",
+        agent=AgentTool(
+            description=(
+                "Make a mesh light enough for the web in one call: decimate it "
+                "aggressively and recompute its normals. Keeps its textures and size."
+            ),
+            params={"target_faces": "Triangle budget; lower means a lighter download."},
+            format_result=format_preset,
+        ),
     ),
 )

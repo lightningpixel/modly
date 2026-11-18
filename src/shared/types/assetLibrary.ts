@@ -43,6 +43,8 @@ export interface AssetLibraryEntry {
   nonOpenableReason?: string
   createdAt?: string
   updatedAt?: string
+  /** Cached render of the current file version (modly-thumb:// URL); absent until rendered. */
+  thumbnailUrl?: string
 }
 
 export interface AssetLibrarySourceLink {
@@ -81,3 +83,24 @@ export type AssetLibraryReadResult =
 export type AssetLibraryOpenResult =
   | { success: true, entry: AssetLibraryEntry }
   | { success: false, error: AssetLibraryError }
+
+export interface AssetThumbnailError {
+  code: 'unsafe-path' | 'not-found' | 'unsupported' | 'stale' | 'invalid-image' | 'write-failed'
+  message: string
+}
+
+/** A workspace mesh's thumbnail state: `version` identifies the file version a new render must be saved under. */
+export type AssetThumbnailStatusResult =
+  | { success: true, workspacePath: string, version: string, thumbnailUrl?: string }
+  | { success: false, error: AssetThumbnailError }
+
+export interface AssetThumbnailSaveRequest {
+  workspacePath: string
+  version: string
+  /** Encoded WebP image bytes. */
+  image: Uint8Array
+}
+
+export type AssetThumbnailSaveResult =
+  | { success: true, thumbnailUrl: string }
+  | { success: false, error: AssetThumbnailError }

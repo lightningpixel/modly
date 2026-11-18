@@ -483,6 +483,68 @@ class ServeConfigTests(unittest.TestCase):
         self.assertEqual(module.DEFAULT_TIMEOUT_SECONDS, 1800)
         self.assertEqual(module.DEFAULT_POLL_SECONDS, 2.0)
 
+    def test_default_python_uses_settings_dependencies_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            api_dir = Path(td) / "api"
+            api_dir.mkdir()
+            deps_python = Path(td) / "deps" / "venv" / "Scripts" / "python.exe"
+            deps_python.parent.mkdir(parents=True)
+            deps_python.write_text("# python")
+            with patch.object(agent, "_windows_env_paths", return_value=[]):
+                found = agent._default_python(api_dir, {"dependenciesDir": str(Path(td) / "deps")})
+            self.assertEqual(found, deps_python)
+
+    def test_default_python_prefers_app_venv_over_api_dev_venv(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            api_dir = Path(td) / "api"
+            dev_python = api_dir / ".venv" / "Scripts" / "python.exe"
+            dev_python.parent.mkdir(parents=True)
+            dev_python.write_text("# python")
+            deps_python = Path(td) / "deps" / "venv" / "Scripts" / "python.exe"
+            deps_python.parent.mkdir(parents=True)
+            deps_python.write_text("# python")
+            with patch.object(agent, "_windows_env_paths", return_value=[]):
+                found = agent._default_python(api_dir, {"dependenciesDir": str(Path(td) / "deps")})
+                fallback = agent._default_python(api_dir, {})
+            self.assertEqual(found, deps_python)
+            self.assertEqual(fallback, dev_python)
+
+    def test_resolve_serve_config_drops_callers_python_env(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            api_dir = Path(td) / "api"
+            api_dir.mkdir()
+            (api_dir / "main.py").write_text("# api")
+            python = Path(td) / "python.exe"
+            python.write_text("# python")
+            args = SimpleNamespace(api_dir=str(api_dir), python=str(python), host="127.0.0.1", port=8765,
+                                   models_dir=None, workspace_dir=None, extensions_dir=None, model=None, hf_token=None)
+            foreign = {"PYTHONHOME": "C:/conda", "PYTHONPATH": "C:/elsewhere", "VIRTUAL_ENV": "C:/venv",
+                       "CONDA_PREFIX": "C:/conda", "PIP_USER": "1"}
+            with patch.dict(os.environ, foreign), \
+                    patch.object(agent, "_load_modly_settings", return_value={}):
+                _api_dir, _python, env, _cmd, _url = agent._resolve_serve_config(args)
+            for key in foreign:
+                self.assertNotIn(key, env)
+            self.assertIn("PATH", env)
+
+    def test_resolve_serve_config_matches_desktop_env(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            api_dir = Path(td) / "resources" / "api"
+            api_dir.mkdir(parents=True)
+            (api_dir / "main.py").write_text("# api")
+            (Path(td) / ("Modly.exe" if os.name == "nt" else "modly")).write_text("# exe")
+            python = Path(td) / "python.exe"
+            python.write_text("# python")
+            args = SimpleNamespace(api_dir=str(api_dir), python=str(python), host="127.0.0.1", port=8765,
+                                   models_dir=None, workspace_dir=None, extensions_dir=None, model=None, hf_token=None)
+            clean = {k: v for k, v in os.environ.items() if k not in ("MODLY_LLM_DIR", "MODLY_NODE_EXECUTABLE")}
+            with patch.dict(os.environ, clean, clear=True), \
+                    patch.object(agent, "_load_modly_settings", return_value={"agentDir": "D:/modly/agent"}):
+                _api_dir, _python, env, _cmd, _url = agent._resolve_serve_config(args)
+            self.assertEqual(env["PYTHONIOENCODING"], "utf-8")
+            self.assertEqual(env["MODLY_LLM_DIR"], "D:/modly/agent")
+            self.assertTrue(env["MODLY_NODE_EXECUTABLE"].lower().endswith(("modly.exe", "modly")))
+
     def test_resolve_serve_config_explicit_paths(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             api_dir = Path(td) / "api"

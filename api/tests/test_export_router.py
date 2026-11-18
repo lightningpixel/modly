@@ -204,5 +204,85 @@ class ImportedSourceSlicerTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 404)
 
 
+def _textured_quad() -> "trimesh.Trimesh":
+    """A quad whose texture is red on its top half and green on its bottom half.
+
+    Vertex 2 sits at the top of the UV square (OBJ/trimesh convention: V up),
+    so a correctly oriented export samples red there.
+    """
+    from PIL import Image
+
+    image = Image.new("RGB", (8, 8), (0, 255, 0))
+    image.paste((255, 0, 0), (0, 0, 8, 4))  # rows 0-3: the top of the image
+    mesh = trimesh.Trimesh(
+        vertices=[[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]],
+        faces=[[0, 1, 2], [0, 2, 3]],
+        process=False,
+    )
+    mesh.visual = trimesh.visual.TextureVisuals(
+        uv=[[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]],
+        material=trimesh.visual.material.PBRMaterial(name="Base Material", baseColorTexture=image),
+    )
+    return mesh
+
+
+@unittest.skipUnless(HAVE_TRIMESH, "trimesh not installed")
+class ExportObjFilesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name).resolve()
+        self._orig_workspace = export_router.registry.WORKSPACE_DIR
+        export_router.registry.WORKSPACE_DIR = self.workspace
+
+    def tearDown(self) -> None:
+        export_router.registry.WORKSPACE_DIR = self._orig_workspace
+        self._tmp.cleanup()
+
+    def _export(self, mesh, name: str = "my model") -> dict:
+        # Through a GLB in the workspace, like a generated mesh.
+        mesh.export(str(self.workspace / "mesh.glb"))
+        resp = export_router.export_obj_files(path="mesh.glb", name=name)
+        return {f["name"]: base64.b64decode(f["data"]) for f in resp["files"]}
+
+    def test_textured_mesh_writes_obj_mtl_and_texture_side_by_side(self) -> None:
+        files = self._export(_textured_quad())
+        self.assertEqual(list(files), ["my model.obj", "my model.mtl", "my model_texture.png"])
+
+        obj = files["my model.obj"].decode("utf-8")
+        self.assertIn("mtllib my model.mtl", obj.splitlines())
+        self.assertIn("usemtl material", obj.splitlines())
+        mtl = files["my model.mtl"].decode("utf-8").splitlines()
+        self.assertIn("newmtl material", mtl)
+        self.assertIn("map_Kd my model_texture.png", mtl)
+
+    def test_texture_lands_upright(self) -> None:
+        from PIL import Image
+
+        files = self._export(_textured_quad())
+        texture = Image.open(io.BytesIO(files["my model_texture.png"])).convert("RGB")
+        obj = files["my model.obj"].decode("utf-8").splitlines()
+        uvs = [tuple(map(float, line.split()[1:3])) for line in obj if line.startswith("vt ")]
+        self.assertEqual(len(uvs), 4)
+        # OBJ's V runs bottom-up while image rows run top-down.
+        w, h = texture.size
+        top = max(uvs, key=lambda uv: uv[1])
+        bottom = min(uvs, key=lambda uv: uv[1])
+        sample = lambda uv: texture.getpixel((int(uv[0] * (w - 1)), int((1 - uv[1]) * (h - 1))))
+        self.assertEqual(sample(top), (255, 0, 0))
+        self.assertEqual(sample(bottom), (0, 255, 0))
+
+    def test_untextured_mesh_writes_the_obj_alone(self) -> None:
+        files = self._export(trimesh.creation.box())
+        self.assertEqual(list(files), ["my model.obj"])
+        self.assertNotIn("mtllib", files["my model.obj"].decode("utf-8"))
+
+    def test_rejects_a_name_with_a_path(self) -> None:
+        trimesh.creation.box().export(str(self.workspace / "mesh.glb"))
+        for name in ("../escape", "dir\\model", "", ".."):
+            with self.assertRaises(HTTPException) as ctx:
+                export_router.export_obj_files(path="mesh.glb", name=name)
+            self.assertEqual(ctx.exception.status_code, 400)
+
+
 if __name__ == "__main__":
     unittest.main()

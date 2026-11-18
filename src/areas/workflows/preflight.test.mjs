@@ -132,6 +132,33 @@ test('multi-input extension requires every declared input type', () => {
   assert.ok(issues.some((i) => i.key === 'proc:missing:text'))
 })
 
+test('optional input slots are not required, but their type is still accepted (#241)', () => {
+  const { validateWorkflowPreflight } = loadModule()
+  const proc = { id: 'proc', type: 'extensionNode', position: { x: 0, y: 0 }, data: { extensionId: 'pack/process-node' } }
+  // image-to-image: required front image, optional second image
+  const imageToImage = ext({ inputs: ['image', 'image'], inputsRequired: [true, false] })
+  assert.deepEqual(
+    validateWorkflowPreflight(wf([imageNode('img'), proc], [{ id: 'e1', source: 'img', target: 'proc', targetHandle: 'input-0' }]), [imageToImage]),
+    [],
+  )
+
+  // an optional text prompt next to a required image
+  const withPrompt = ext({ inputs: ['image', 'text'], inputsRequired: [true, false] })
+  assert.deepEqual(validateWorkflowPreflight(wf([imageNode('img'), proc], [{ id: 'e1', source: 'img', target: 'proc' }]), [withPrompt]), [])
+  const both = validateWorkflowPreflight(
+    wf([imageNode('img'), textNode('txt'), proc], [{ id: 'e1', source: 'img', target: 'proc' }, { id: 'e2', source: 'txt', target: 'proc' }]),
+    [withPrompt],
+  )
+  assert.deepEqual(both, [])
+})
+
+test('missing type names the real type instead of defaulting to text', () => {
+  const { validateWorkflowPreflight } = loadModule()
+  const proc = { id: 'proc', type: 'extensionNode', position: { x: 0, y: 0 }, data: { extensionId: 'pack/process-node' } }
+  const issues = validateWorkflowPreflight(wf([proc]), [ext({ input: 'pointcloud' })])
+  assert.match(issues[0].message, /needs an incoming pointcloud connection/)
+})
+
 test('scene input requires a validated Load Scene source and rejects image wiring', () => {
   const { validateWorkflowPreflight } = loadModule()
   const model = { id: 'model', type: 'extensionNode', position: { x: 0, y: 0 }, data: { extensionId: 'pack/process-node' } }

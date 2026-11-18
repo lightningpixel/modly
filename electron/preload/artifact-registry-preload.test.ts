@@ -44,6 +44,28 @@ test('preload exposes scoped workspace library list/read/open methods', async ()
   ])
 })
 
+test('preload exposes workspace thumbnail status/save methods', async () => {
+  const calls: Array<{ channel: string, payload?: unknown }> = []
+  const api = createElectronApi({
+    invoke: async (channel: string, payload?: unknown) => {
+      calls.push({ channel, payload })
+      return { success: true }
+    },
+    send: () => undefined,
+    on: () => undefined,
+    removeAllListeners: () => undefined,
+  }, { setZoomFactor: () => undefined }, { getPathForFile: () => '' })
+  const image = new Uint8Array([1, 2, 3])
+
+  await api.workspace.thumbnails.status('Workflows/hero.glb')
+  await api.workspace.thumbnails.save({ workspacePath: 'Workflows/hero.glb', version: 'v1', image })
+
+  assert.deepEqual(calls, [
+    { channel: 'workspace:thumbnails:status', payload: { workspacePath: 'Workflows/hero.glb' } },
+    { channel: 'workspace:thumbnails:save', payload: { workspacePath: 'Workflows/hero.glb', version: 'v1', image } },
+  ])
+})
+
 test('preload resolves dropped file paths through Electron webUtils', () => {
   const files: unknown[] = []
   const calls: string[] = []

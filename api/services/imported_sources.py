@@ -11,10 +11,10 @@ only if it is an EXACT member here, i.e. a file the user chose themselves in
 this session. Membership is an equality test, never a prefix test, so it grants
 no traversal.
 
-It also remembers each file's ORIGINAL suffix. An imported `.stl` is converted
-to GLB on import without any axis change, so the container extension alone would
-mislead a consumer into applying the glTF Y-up -> Z-up rotation to data that is
-already Z-up.
+It also remembers each file's source suffix, which decides the up axis. An
+imported `.stl`/`.obj`/`.ply` is converted on import to a real glTF (Y-up,
+metres) and registered as `.glb`; the suffix still matters for any file
+registered in its own format.
 
 Session-scoped and in-memory: it is emptied when the backend restarts, so a
 deeplink replayed after a restart is rejected rather than silently served. Links

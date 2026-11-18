@@ -242,6 +242,10 @@ WORKSPACE_DIR=$HOME/.modly/workspace \
 > Optional: `export HF_TOKEN=hf_...` before launching to avoid HuggingFace rate-limits
 > on the one-time ~4 GB weight download.
 
+> Reaching the API by the Jetson's IP works as is. To use a name instead (`http://jetson.local:8000`),
+> add `MODLY_HOSTS=jetson.local`. A web app calling it from a browser needs its origin in
+> `MODLY_ORIGINS` (see `api/README.md`).
+
 Check it (from the Jetson, or from another machine using the Jetson's IP):
 
 ```bash

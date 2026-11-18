@@ -98,6 +98,9 @@ class ApplyTransformsTests(unittest.TestCase):
         # A shallow bowl (open hemisphere-like dish) opening upwards.
         bowl = trimesh.creation.icosphere(subdivisions=3)
         bowl.update_faces(bowl.triangles_center[:, 1] < -0.3)
+        # update_faces keeps the cut-away vertices, which would still be
+        # exported and measured below as the top of a whole sphere.
+        bowl.remove_unreferenced_vertices()
         bowl.apply_scale([1.0, 0.3, 1.0])
         bowl.apply_transform(
             trimesh.transformations.rotation_matrix(np.radians(10), [1, 0, 0])

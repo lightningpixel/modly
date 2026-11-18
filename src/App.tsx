@@ -5,6 +5,7 @@ import MainLayout from '@shared/components/layout/MainLayout'
 import { UpdateModal } from '@shared/components/ui/UpdateModal'
 import { ErrorModal } from '@shared/components/ui/ErrorModal'
 import { Toast } from '@shared/components/ui/Toast'
+import { startAssetThumbnailService } from '@shared/thumbnails/assetThumbnailService'
 
 const UI_SCALE_FACTORS: Record<UiScale, number> = { small: 0.875, medium: 1, large: 1.25, 'very-large': 1.5 }
 
@@ -36,6 +37,8 @@ export default function App(): JSX.Element {
     )
     window.electron.ui.setZoomFactor(UI_SCALE_FACTORS[uiScale])
   }, [useAtkinsonFont, uiScale])
+
+  useEffect(() => startAssetThumbnailService(), [])
 
   useEffect(() => {
     if (setupStatus === 'done') initApp()

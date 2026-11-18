@@ -162,17 +162,11 @@ class ChatEventTests(unittest.TestCase):
         self.assertTrue(events[0]["error"])
         self.assertEqual(events[0]["message"], "LLM error (401): Incorrect API key provided.")
 
-    def test_tool_loop_limit_is_reported_as_an_error(self) -> None:
-        rounds = [
-            _sse(_call(0, id=f"c{i}", function={"name": "list_workflows", "arguments": "{}"}))
-            for i in range(10)
-        ]
-        with mock.patch.object(agent, "execute_tool", mock.AsyncMock(return_value=("none", None))):
-            events = _events(_Scripted(*rounds), _external())
+    def test_done_reports_no_stop_when_the_turn_finishes(self) -> None:
+        events = _events(_Scripted(_sse({"content": "Hi"})), _external())
 
-        self.assertTrue(events[-1]["error"])
-        self.assertEqual(events[-1]["message"], "Reached maximum tool iterations.")
-        self.assertEqual(len(events[-1]["actions"]), 10)
+        self.assertIsNone(events[-1]["stopped"])
+
 
     def test_local_slot_is_released_when_the_client_disconnects(self) -> None:
         class Slot:
@@ -239,6 +233,111 @@ class ChatEventTests(unittest.TestCase):
             asyncio.run(leave_while_loading())
 
         self.assertEqual(slot.released, 1)
+
+
+def _tool_round(i: int, name: str = "list_workflows") -> httpx.Response:
+    return _sse(_call(0, id=f"c{i}", function={"name": name, "arguments": "{}"}))
+
+
+def _limited(**limits) -> agent.AgentChatRequest:
+    request = _external()
+    return request.model_copy(update=limits)
+
+
+class ToolLoopGuardrailTests(unittest.TestCase):
+    def test_runaway_loop_stops_at_the_default_budget_with_a_structured_error(self) -> None:
+        scripted = _Scripted(*[_tool_round(i) for i in range(11)])
+        with mock.patch.object(agent, "execute_tool", mock.AsyncMock(return_value=("none", None))):
+            events = _events(scripted, _external())
+
+        done = events[-1]
+        self.assertTrue(done["error"])
+        self.assertEqual(len(done["actions"]), 10)
+        # The call over budget is refused, not started.
+        self.assertEqual(sum(e["type"] == "tool_start" for e in events), 10)
+        stop = done["stopped"]
+        self.assertEqual(stop["code"], "tool_budget_exhausted")
+        self.assertEqual(stop["tool"], "list_workflows")
+        self.assertEqual(stop["limit"], 10)
+        self.assertEqual(done["message"], stop["message"])
+        self.assertNotIn("Reached maximum tool iterations", stop["message"])
+        self.assertIn("10 tool calls", stop["message"])
+        self.assertIn("Settings → Agent", stop["message"])
+
+    def test_tool_budget_is_set_per_request(self) -> None:
+        scripted = _Scripted(*[_tool_round(i) for i in range(3)])
+        with mock.patch.object(agent, "execute_tool", mock.AsyncMock(return_value=("none", None))):
+            events = _events(scripted, _limited(tool_budget=2))
+
+        self.assertEqual(len(events[-1]["actions"]), 2)
+        self.assertEqual(events[-1]["stopped"]["limit"], 2)
+        self.assertEqual(len(scripted.bodies), 3)
+
+    def test_spending_the_whole_budget_then_answering_is_not_an_error(self) -> None:
+        scripted = _Scripted(_tool_round(0), _tool_round(1), _sse({"content": "All done."}))
+        with mock.patch.object(agent, "execute_tool", mock.AsyncMock(return_value=("none", None))):
+            events = _events(scripted, _limited(tool_budget=2))
+
+        self.assertFalse(events[-1]["error"])
+        self.assertIsNone(events[-1]["stopped"])
+        self.assertEqual(events[-1]["message"], "All done.")
+
+    def test_calls_of_one_round_beyond_the_budget_are_not_run(self) -> None:
+        both = _sse(
+            _call(0, id="a", function={"name": "list_workflows", "arguments": "{}"}),
+            _call(1, id="b", function={"name": "list_models", "arguments": "{}"}),
+        )
+        tool = mock.AsyncMock(return_value=("none", None))
+        with mock.patch.object(agent, "execute_tool", tool):
+            events = _events(_Scripted(both), _limited(tool_budget=1))
+
+        self.assertEqual(tool.await_count, 1)
+        self.assertEqual(events[-1]["stopped"]["tool"], "list_models")
+
+    def test_a_tool_over_its_timeout_stops_the_loop_with_a_structured_error(self) -> None:
+        async def slow(*_args, **_kwargs):
+            await asyncio.sleep(5)
+            return "late", None
+
+        scripted = _Scripted(_tool_round(0, "repair_mesh"), _sse({"content": "never asked"}))
+        with mock.patch.object(agent, "execute_tool", slow):
+            events = _events(scripted, _limited(tool_timeout=0.05))
+
+        self.assertEqual([e["type"] for e in events], ["tool_start", "tool_done", "done"])
+        finish, done = events[1], events[2]
+        stop = done["stopped"]
+        self.assertEqual(stop["code"], "tool_timeout")
+        self.assertEqual(stop["tool"], "repair_mesh")
+        self.assertEqual(stop["limit"], 0.05)
+        self.assertIn("Settings → Agent", stop["message"])
+        # The timed-out call settles in the card, flagged with the same error.
+        self.assertEqual(finish["error"], stop)
+        self.assertIsNone(finish["payload"])
+        self.assertEqual(done["actions"][0]["error"], stop)
+        self.assertTrue(done["error"])
+        # The model is not asked to carry on after a timeout.
+        self.assertEqual(len(scripted.bodies), 1)
+
+    def test_the_tool_timeout_also_bounds_its_http_calls(self) -> None:
+        tool = mock.AsyncMock(return_value=("none", None))
+        with mock.patch.object(agent, "execute_tool", tool):
+            _events(_Scripted(_tool_round(0), _sse({"content": "ok"})), _limited(tool_timeout=300))
+
+        self.assertEqual(tool.await_args.kwargs["timeout"], 300)
+
+    def test_limits_have_defaults_and_bounds(self) -> None:
+        request = _external()
+        self.assertEqual((request.tool_budget, request.tool_timeout), (10, 120))
+        for bad in ({"tool_budget": 0}, {"tool_budget": 101}, {"tool_timeout": 0}, {"tool_timeout": 3601}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                agent.AgentChatRequest(messages=[], **bad)
+
+    def test_json_route_returns_the_stop(self) -> None:
+        with mock.patch.object(agent, "execute_tool", mock.AsyncMock(return_value=("none", None))), \
+             mock.patch.object(agent.httpx, "AsyncClient", _Scripted(_tool_round(0), _tool_round(1))):
+            response = asyncio.run(agent.agent_chat(_limited(tool_budget=1)))
+
+        self.assertEqual(response.stopped["code"], "tool_budget_exhausted")
 
 
 class StreamRouteTests(unittest.TestCase):

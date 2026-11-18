@@ -377,8 +377,8 @@ async def download_model(model_id: str):
 # ─── Engine (llama-server binary) install (SSE) ───────────────────────────────
 
 @router.get("/binary/install")
-async def install_binary():
-    if llm_server.binary_installed():
+async def install_binary(repair: bool = False):
+    if llm_server.binary_installed() and not repair:
         async def already():
             yield _fmt({"percent": 100, "status": "done"})
         return StreamingResponse(already(), media_type="text/event-stream")
@@ -395,7 +395,7 @@ async def install_binary():
         try:
             future = loop.run_in_executor(
                 None,
-                lambda: llm_server.install_binary(_progress, lambda: _check_control(control)),
+                lambda: llm_server.install_binary(_progress, lambda: _check_control(control), clean=repair),
             )
             while not future.done():
                 try:

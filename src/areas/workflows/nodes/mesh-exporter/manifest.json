@@ -21,7 +21,7 @@
           "options": [
             { "value": "glb", "label": "GLB (Binary glTF)" },
             { "value": "stl", "label": "STL (3D printing)" },
-            { "value": "obj", "label": "OBJ (Wavefront)" },
+            { "value": "obj", "label": "OBJ (Wavefront)", "hint": "Texture saved as separate files. GLB keeps everything in one." },
             { "value": "ply", "label": "PLY (Polygon)" }
           ],
           "tooltip": "Output file format."
@@ -31,7 +31,7 @@
           "label": "Output Path",
           "type": "string",
           "default": "",
-          "tooltip": "Destination folder. Leave empty to save in the workspace Exports folder."
+          "tooltip": "Destination folder or filename with the selected format's extension. Relative paths use the workspace folder. An existing file with that name is replaced. Leave empty to save in the workspace Exports folder."
         }
       ]
     }

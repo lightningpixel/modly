@@ -17,7 +17,7 @@ useAppStore.getState = () => appState
 `)
 const axiosStub = stub('axios.ts', `const axios: any = { create: () => (globalThis as any).__sceneClient }; export default axios; export type AxiosInstance = any`)
 const extStub = stub('ext.ts', `export const getWorkflowExtension = (id: string, all: any[]) => all.find((value) => value.id === id); export type WorkflowExtension = any`)
-const notifyStub = stub('notify.ts', `export const showCompletionNotification = async () => {}; export const showErrorNotification = async () => {}`)
+const notifyStub = stub('notify.ts', `export const showCompletionNotification = async () => {}; export const showRunErrorNotification = async () => {}`)
 const aliases = new Map([
   ['axios', axiosStub], ['@shared/stores/appStore', appStoreStub],
   ['./mockExtensions', extStub], ['@shared/utils/notification', notifyStub],
@@ -54,6 +54,8 @@ test('scene model uses typed artifact route and preserves scene output', async (
   assert.deepEqual(posts[0].body, {
     input_kind: 'scene', input_path: 'Workflows/input/scene-manifest.json',
     model_id: 'pixal/world', collection: 'Workflows', params: {},
+    // The generation is filed under the workflow run that started it.
+    parent_run_id: useWorkflowRunStore.getState().liveRecord.id,
   })
   assert.equal(useWorkflowRunStore.getState().runState.outputPath, '/workspace/Workflows/result/scene-manifest.json')
   assert.equal(useWorkflowRunStore.getState().runState.outputUrl, undefined)

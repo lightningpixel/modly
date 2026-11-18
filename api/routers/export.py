@@ -9,6 +9,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response, FileResponse
 
 from services import imported_sources
+from services.mesh_ops.geometry import single_mesh
+from services.mesh_ops.real_scale import MM_PER_M, export_scale, is_calibrated
 # Import the module (not the name) so WORKSPACE_DIR is read at call time: the
 # settings endpoint rebinds it when the user moves the workspace.
 import services.generator_registry as registry
@@ -77,18 +79,24 @@ def _scale_to_print_size(mesh: "trimesh.Trimesh", longest_mm: float = DEFAULT_PR
         mesh.apply_scale(longest_mm / longest)
 
 
-def _normalize_print_scale(mesh: "trimesh.Trimesh") -> bool:
-    """Rescale ``mesh`` only if it looks unit-sized; return whether it was rescaled.
+def print_mm_per_unit(mesh: "trimesh.Trimesh | None", calibrated: bool) -> float:
+    """Millimetres per mesh unit when the mesh is printed.
 
-    A mesh whose longest edge already exceeds ``UNIT_SCALE_MAX`` is assumed to
-    carry a real-world size the user chose, and is left untouched.
+    The single rule behind the slicer hand-off and the Print page, so the size
+    on the plate is the size the slicer gets:
+
+    * a calibrated asset is in metres: 1000 mm per unit;
+    * an unit-sized one (longest edge up to ``UNIT_SCALE_MAX``) is AI output
+      with no real size: its longest edge becomes ``DEFAULT_PRINT_LONGEST_MM``;
+    * anything larger is assumed to be in millimetres already.
     """
-    extents = mesh.extents
+    if calibrated:
+        return MM_PER_M
+    extents = mesh.extents if mesh is not None else None
     longest = float(max(extents)) if extents is not None and len(extents) else 0.0
-    if not math.isfinite(longest) or not (1e-9 < longest <= UNIT_SCALE_MAX):
-        return False
-    _scale_to_print_size(mesh)
-    return True
+    if math.isfinite(longest) and 1e-9 < longest <= UNIT_SCALE_MAX:
+        return DEFAULT_PRINT_LONGEST_MM / longest
+    return 1.0
 
 
 def _resolve_slicer_source(token: str) -> tuple[Path, str]:
@@ -133,6 +141,18 @@ def _resolve_slicer_source(token: str) -> tuple[Path, str]:
     return full_path, full_path.suffix.lower()
 
 
+@router.get("/print-scale/{token}")
+def print_scale(token: str):
+    """How the slicer hand-off sizes this mesh: the Print page shows the same.
+
+    ``token`` is the same source token as the slicer route's.
+    """
+    full_path, _ = _resolve_slicer_source(token)
+    calibrated = is_calibrated(full_path)
+    mesh = None if calibrated else _to_single_mesh(trimesh.load(str(full_path)))
+    return {"calibrated": calibrated, "mm_per_unit": print_mm_per_unit(mesh, calibrated)}
+
+
 @router.get("/slicer/{fmt}/{token}/{filename}")
 def export_for_slicer(fmt: str, token: str, filename: str):
     """Serve a generated GLB converted to a slicer-importable mesh, at a URL
@@ -164,7 +184,10 @@ def export_for_slicer(fmt: str, token: str, filename: str):
     # thing this corrects — lay an upright model on its side.
     if source_suffix in GLTF_SUFFIXES:
         mesh.apply_transform(trimesh.transformations.rotation_matrix(math.pi / 2, [1, 0, 0]))
-    _normalize_print_scale(mesh)
+    # Slicers read millimetres (see print_mm_per_unit).
+    scale = print_mm_per_unit(mesh, is_calibrated(full_path))
+    if scale != 1.0:
+        mesh.apply_scale(scale)
 
     data = mesh.export(file_type=fmt)
     if isinstance(data, str):
@@ -178,28 +201,112 @@ def export_for_slicer(fmt: str, token: str, filename: str):
     )
 
 
-@router.get("/{fmt}")
-def export_mesh(fmt: str, path: str):
-    if fmt not in SUPPORTED:
-        raise HTTPException(400, f"Unsupported format: {fmt}. Supported: {', '.join(SUPPORTED)}")
-
+def _workspace_source(path: str) -> Path:
     full_path = (registry.WORKSPACE_DIR / path).resolve()
     if not registry.is_within_workspace(full_path):
         raise HTTPException(400, "Invalid path")
     if not full_path.exists():
         raise HTTPException(404, f"File not found: {path}")
+    return full_path
+
+
+def _load_for_export(full_path: Path, fmt: str) -> "trimesh.Trimesh":
+    """One world-space mesh (node transforms applied), in the format's units."""
+    try:
+        mesh = single_mesh(trimesh.load(str(full_path)), trimesh)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    scale = export_scale(full_path, fmt)
+    if scale != 1.0:
+        mesh.apply_scale(scale)
+    return mesh
+
+
+def _base_color_image(mesh: "trimesh.Trimesh"):
+    """The mesh's base color texture (a PIL image), or None when it has none."""
+    visual = getattr(mesh, "visual", None)
+    if getattr(visual, "kind", None) != "texture" or getattr(visual, "uv", None) is None:
+        return None
+    material = getattr(visual, "material", None)
+    image = getattr(material, "baseColorTexture", None)
+    if image is None:
+        image = getattr(material, "image", None)
+    return image
+
+
+def obj_files(mesh: "trimesh.Trimesh", stem: str) -> dict[str, bytes]:
+    """The files of an OBJ export named ``stem``, by file name.
+
+    Like Blender: a textured mesh gives ``<stem>.obj``, ``<stem>.mtl`` and
+    ``<stem>_texture.png`` side by side, the OBJ and MTL referring to the others
+    by relative name. An untextured mesh gives the OBJ alone, as before.
+    trimesh keeps UVs with OBJ's bottom-left origin (it flips V when reading
+    glTF), so the coordinates are written as they are.
+    """
+    obj_name = f"{stem}.obj"
+    image = _base_color_image(mesh)
+    if image is None:
+        data = mesh.export(file_type="obj")
+        return {obj_name: data.encode("utf-8") if isinstance(data, str) else data}
+
+    mtl_name, texture_name = f"{stem}.mtl", f"{stem}_texture.png"
+    textured = mesh.copy()
+    # A material of our own: a known `usemtl` name, defined in the MTL below.
+    textured.visual.material = trimesh.visual.material.SimpleMaterial(name="material", image=image)
+    obj_text, _ = trimesh.exchange.obj.export_obj(
+        textured, include_texture=True, return_texture=True, mtl_name=mtl_name,
+    )
+    mtl_text = "\n".join([
+        "# Exported by Modly",
+        "newmtl material",
+        "Ka 1.000000 1.000000 1.000000",
+        "Kd 1.000000 1.000000 1.000000",
+        "Ks 0.000000 0.000000 0.000000",
+        "d 1.000000",
+        "illum 1",
+        f"map_Kd {texture_name}",
+        "",
+    ])
+    if image.mode not in ("L", "LA", "RGB", "RGBA", "P"):
+        image = image.convert("RGBA")
+    png = io.BytesIO()
+    image.save(png, format="PNG")
+    return {
+        obj_name: obj_text.encode("utf-8"),
+        mtl_name: mtl_text.encode("utf-8"),
+        texture_name: png.getvalue(),
+    }
+
+
+@router.get("/obj/files")
+def export_obj_files(path: str, name: str):
+    """An OBJ export as its separate files, for the caller to write side by side.
+
+    ``name`` is the file stem the user chose (``model`` for ``model.obj``).
+    Answers ``{"files": [{"name": ..., "data": <base64>}, ...]}``, the OBJ first.
+    """
+    if not name or name in (".", "..") or "/" in name or "\\" in name:
+        raise HTTPException(400, "Invalid file name")
+    full_path = _workspace_source(path)
+    files = obj_files(_load_for_export(full_path, "obj"), name)
+    return {"files": [
+        {"name": file_name, "data": base64.b64encode(data).decode("ascii")}
+        for file_name, data in files.items()
+    ]}
+
+
+@router.get("/{fmt}")
+def export_mesh(fmt: str, path: str):
+    if fmt not in SUPPORTED:
+        raise HTTPException(400, f"Unsupported format: {fmt}. Supported: {', '.join(SUPPORTED)}")
+
+    full_path = _workspace_source(path)
 
     # GLB — serve directly, no conversion needed
     if fmt == "glb":
         return FileResponse(str(full_path), media_type="model/gltf-binary")
 
-    # Load and flatten scene to a single mesh
-    loaded = trimesh.load(str(full_path))
-    if isinstance(loaded, trimesh.Scene):
-        geoms = list(loaded.geometry.values())
-        mesh = trimesh.util.concatenate(geoms) if len(geoms) > 1 else geoms[0]
-    else:
-        mesh = loaded
+    mesh = _load_for_export(full_path, fmt)
 
     buf = io.BytesIO()
     if fmt == "stl":

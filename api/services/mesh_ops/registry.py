@@ -4,8 +4,9 @@ import re
 from copy import deepcopy
 from math import isfinite
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Iterable, Iterator, Mapping, Optional
 
+from .real_scale import carry_real_scale
 from .types import MeshOp, MeshOpContext, MeshOpNotFoundError, MeshOpResult
 
 
@@ -80,6 +81,9 @@ class MeshOpsRegistry:
         except KeyError as exc:
             raise MeshOpNotFoundError(operation_id) from exc
 
+    def __iter__(self) -> Iterator[MeshOp]:
+        return iter(self._operations.values())
+
     def describe(self) -> list[dict[str, Any]]:
         return [operation.describe() for operation in self._operations.values()]
 
@@ -95,7 +99,9 @@ class MeshOpsRegistry:
         if not path.is_file():
             raise FileNotFoundError(f"Input mesh not found: {path}")
 
-        return operation.fn(path, self.resolve_params(operation_id, params), context)
+        result = operation.fn(path, self.resolve_params(operation_id, params), context)
+        carry_real_scale(path, result.file_path)
+        return result
 
     def resolve_params(
         self,

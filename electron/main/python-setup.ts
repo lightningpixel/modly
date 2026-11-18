@@ -6,6 +6,7 @@ import { spawn, execSync } from 'child_process'
 import { createHash } from 'crypto'
 import { getSettings } from './settings-store'
 import { copyRuntimeTree } from './copy-runtime'
+import { pythonChildEnv } from './child-env'
 
 const SETUP_VERSION = 3
 
@@ -36,16 +37,7 @@ function hashRequirements(): string {
  * Strips vars that could redirect imports or installs to the user's system Python.
  */
 export function cleanPythonEnv(): NodeJS.ProcessEnv {
-  const {
-    PYTHONHOME, PYTHONPATH, PYTHONSTARTUP, PYTHONUSERBASE,
-    PIP_USER, PIP_TARGET, PIP_PREFIX, PIP_REQUIRE_VIRTUALENV,
-    VIRTUAL_ENV, CONDA_PREFIX,
-    ...rest
-  } = process.env
-  void PYTHONHOME; void PYTHONPATH; void PYTHONSTARTUP; void PYTHONUSERBASE
-  void PIP_USER; void PIP_TARGET; void PIP_PREFIX; void PIP_REQUIRE_VIRTUALENV
-  void VIRTUAL_ENV; void CONDA_PREFIX
-  return rest
+  return pythonChildEnv(process.env)
 }
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────

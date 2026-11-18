@@ -4,7 +4,14 @@ import type {
   AssetLibraryOpenResult,
   AssetLibraryReadRequest,
   AssetLibraryReadResult,
+  AssetThumbnailSaveRequest,
+  AssetThumbnailSaveResult,
+  AssetThumbnailStatusResult,
 } from '../../src/shared/types/assetLibrary'
+import type {
+  Conversation as AgentConversation,
+  ConversationSummary as AgentConversationSummary,
+} from '../main/agent-conversations'
 
 export interface IpcRendererLike {
   invoke(channel: string, ...args: unknown[]): Promise<unknown>
@@ -55,6 +62,9 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
     system: {
       memory: (): Promise<{ total: number; used: number; available: number }> =>
         ipcRenderer.invoke('system:memory') as Promise<{ total: number; used: number; available: number }>,
+      /** VRAM in bytes of the largest NVIDIA GPU; null without NVIDIA, on macOS, or when a sample timed out. */
+      gpuMemory: (): Promise<{ total: number; used: number; available: number; name: string } | null> =>
+        ipcRenderer.invoke('system:gpuMemory') as Promise<{ total: number; used: number; available: number; name: string } | null>,
     },
 
     // Python / FastAPI bridge
@@ -95,10 +105,14 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         ipcRenderer.invoke('fs:listFiles', dirPath, extensions) as Promise<string[]>,
       selectTextFile:    (): Promise<string | null> =>
         ipcRenderer.invoke('fs:selectTextFile') as Promise<string | null>,
-      moveDirectory:     (args: { src: string; dest: string }): Promise<{ success: boolean; error?: string }> =>
-        ipcRenderer.invoke('fs:moveDirectory', args) as Promise<{ success: boolean; error?: string }>,
-      deleteDirectory:   (dirPath: string): Promise<{ success: boolean; error?: string }> =>
-        ipcRenderer.invoke('fs:deleteDirectory', dirPath) as Promise<{ success: boolean; error?: string }>,
+      moveDirectory:     (args: { src: string; dest: string }): Promise<{ success: boolean; error?: string; kept?: string[] }> =>
+        ipcRenderer.invoke('fs:moveDirectory', args) as Promise<{ success: boolean; error?: string; kept?: string[] }>,
+      deleteDirectory:   (dirPath: string): Promise<{ success: boolean; error?: string; kept?: string[] }> =>
+        ipcRenderer.invoke('fs:deleteDirectory', dirPath) as Promise<{ success: boolean; error?: string; kept?: string[] }>,
+      storageEntries:    (kind: 'models' | 'workspace' | 'workflows'): Promise<{ modly: string[]; other: string[] }> =>
+        ipcRenderer.invoke('fs:storageEntries', kind) as Promise<{ modly: string[]; other: string[] }>,
+      checkStorageLocation: (dirPath: string): Promise<{ ok: boolean; error?: string }> =>
+        ipcRenderer.invoke('fs:checkStorageLocation', dirPath) as Promise<{ ok: boolean; error?: string }>,
       readScreenshotDataUrl: (filename: string): Promise<string> =>
         ipcRenderer.invoke('fs:readScreenshotDataUrl', filename) as Promise<string>,
     },
@@ -116,6 +130,17 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
       // Opens a file picker and copies the chosen .gguf into the agent's models folder.
       addModel: (): Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }> =>
         ipcRenderer.invoke('agent:addModel') as Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }>,
+      // Persisted chat conversations (<userData>/agent/conversations/{id}.json).
+      conversations: {
+        list:   (): Promise<AgentConversationSummary[]> =>
+          ipcRenderer.invoke('agent:conversations:list') as Promise<AgentConversationSummary[]>,
+        read:   (id: string): Promise<AgentConversation | null> =>
+          ipcRenderer.invoke('agent:conversations:read', id) as Promise<AgentConversation | null>,
+        save:   (conversation: AgentConversation): Promise<void> =>
+          ipcRenderer.invoke('agent:conversations:save', conversation) as Promise<void>,
+        remove: (id: string): Promise<void> =>
+          ipcRenderer.invoke('agent:conversations:remove', id) as Promise<void>,
+      },
     },
 
     // Settings
@@ -229,6 +254,17 @@ export function createElectronApi(ipcRenderer: IpcRendererLike, webFrame: WebFra
         list: (): Promise<AssetLibraryListResult> => ipcRenderer.invoke('workspace:library:list') as Promise<AssetLibraryListResult>,
         read: (request: AssetLibraryReadRequest): Promise<AssetLibraryReadResult> => ipcRenderer.invoke('workspace:library:read', request) as Promise<AssetLibraryReadResult>,
         open: (request: AssetLibraryOpenRequest): Promise<AssetLibraryOpenResult> => ipcRenderer.invoke('workspace:library:open', request) as Promise<AssetLibraryOpenResult>,
+      },
+      thumbnails: {
+        status: (workspacePath: string): Promise<AssetThumbnailStatusResult> => ipcRenderer.invoke('workspace:thumbnails:status', { workspacePath }) as Promise<AssetThumbnailStatusResult>,
+        save: (request: AssetThumbnailSaveRequest): Promise<AssetThumbnailSaveResult> => ipcRenderer.invoke('workspace:thumbnails:save', request) as Promise<AssetThumbnailSaveResult>,
+      },
+      // Images handed over as bytes (pasted, dropped from a browser), saved to <workspace>/Images/.
+      images: {
+        save: (request: { bytes: Uint8Array; name?: string; mime: string }): Promise<{ success: true; path: string } | { success: false; error: string }> =>
+          ipcRenderer.invoke('workspace:images:save', request) as Promise<{ success: true; path: string } | { success: false; error: string }>,
+        reveal: (path: string): Promise<{ success: boolean; error?: string }> =>
+          ipcRenderer.invoke('workspace:images:reveal', path) as Promise<{ success: boolean; error?: string }>,
       },
     },
 

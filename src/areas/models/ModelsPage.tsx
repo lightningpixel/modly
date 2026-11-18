@@ -68,13 +68,13 @@ export default function ModelsPage(): JSX.Element {
   const searchRef = useRef<HTMLInputElement>(null)
 
   // Another page asked to open an extension (e.g. a weight variant picked but not installed)
-  const extensionToOpen      = useNavStore((s) => s.extensionToOpen)
-  const clearExtensionToOpen = useNavStore((s) => s.clearExtensionToOpen)
+  const extensionToOpen = useNavStore((s) => s.params?.extension ?? null)
+  const clearParams     = useNavStore((s) => s.clearParams)
   useEffect(() => {
     if (!extensionToOpen) return
     setSelectedId(extensionToOpen)
-    clearExtensionToOpen()
-  }, [extensionToOpen, clearExtensionToOpen])
+    clearParams()
+  }, [extensionToOpen, clearParams])
 
   // GitHub extension install form
   const [showGHForm, setShowGHForm] = useState(false)
@@ -596,9 +596,13 @@ export default function ModelsPage(): JSX.Element {
               </div>
             )}
 
-            <p className="text-[10px] text-zinc-600">
-              The repo must contain a <span className="font-mono text-zinc-500">manifest.json</span> and a <span className="font-mono text-zinc-500">generator.py</span> at its root.
-            </p>
+            {/* Only a hint before installing: shown under an unrelated error
+                (e.g. a failed setup.py) it reads as the cause (#280). */}
+            {!ghErr && (
+              <p className="text-[10px] text-zinc-600">
+                The repo must contain a <span className="font-mono text-zinc-500">manifest.json</span> and a <span className="font-mono text-zinc-500">generator.py</span> at its root.
+              </p>
+            )}
           </div>
         </div>
       )}

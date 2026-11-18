@@ -30,11 +30,7 @@ function nodeLabel(node: WFNode, allExtensions: WorkflowExtension[]): string {
 }
 
 function formatType(type: DataType): string {
-  if (type === 'scene') return 'scene'
-  if (type === 'mesh') return 'mesh'
-  if (type === 'image') return 'image'
-  if (type === 'audio') return 'audio'
-  return 'text'
+  return String(type)
 }
 
 function formatRequiredTypes(types: DataType[]): string {
@@ -142,7 +138,10 @@ export function validateWorkflowPreflight(
     }
 
     const incomingEdges = workflow.edges.filter((edge) => edge.target === node.id)
-    const requiredTypes = [...new Set((ext.inputs ?? [ext.input]) as DataType[])]
+    const slotTypes = (ext.inputs ?? [ext.input]) as DataType[]
+    const acceptedTypes = [...new Set(slotTypes)]
+    // A type is required when at least one slot of that type is not optional.
+    const requiredTypes = [...new Set(slotTypes.filter((_, i) => ext.inputsRequired?.[i] !== false))]
 
     for (const requiredType of requiredTypes) {
       const hasMatchingInput = incomingEdges.some((edge) => outputTypes.get(edge.source) === requiredType)
@@ -158,11 +157,11 @@ export function validateWorkflowPreflight(
     for (const edge of incomingEdges) {
       const sourceNode = nodeMap.get(edge.source)
       const sourceType = outputTypes.get(edge.source)
-      if (!sourceNode || !sourceType || requiredTypes.includes(sourceType)) continue
+      if (!sourceNode || !sourceType || acceptedTypes.includes(sourceType)) continue
       pushIssue(issues, {
         key: `${node.id}:type:${edge.id}`,
         nodeId: node.id,
-        message: `${ext.name} expects ${formatRequiredTypes(requiredTypes)}, but ${nodeLabel(sourceNode, allExtensions)} outputs ${formatType(sourceType)}.`,
+        message: `${ext.name} expects ${formatRequiredTypes(acceptedTypes)}, but ${nodeLabel(sourceNode, allExtensions)} outputs ${formatType(sourceType)}.`,
       })
     }
   }

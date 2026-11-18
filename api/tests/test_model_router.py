@@ -86,14 +86,15 @@ class MultiSourceRouterTests(unittest.TestCase):
     def install_hf_stub(self, files: dict[str, list[str]], calls: list[str]) -> None:
         module = types.ModuleType("huggingface_hub")
 
-        def list_repo_files(repo_id, revision=None, token=None):
-            calls.append(f"list:{repo_id}:{revision}:{token}")
-            return files[repo_id]
+        class HfApi:
+            def list_repo_tree(self, repo_id, revision=None, token=None, recursive=False):
+                calls.append(f"list:{repo_id}:{revision}:{token}")
+                return [types.SimpleNamespace(path=name, size=None) for name in files[repo_id]]
 
         def hf_hub_url(repo_id, filename, revision=None):
             return f"https://example.invalid/{repo_id}/{revision or 'main'}/{filename}"
 
-        module.list_repo_files = list_repo_files
+        module.HfApi = HfApi
         module.hf_hub_url = hf_hub_url
         sys.modules["huggingface_hub"] = module
 
@@ -307,6 +308,120 @@ class ModelLifecycleEndpointTests(unittest.TestCase):
 
         self.assertEqual(status["id"], "demo/a")
         self.assertEqual(switched, {"active": "demo/b"})
+
+
+class _FakeResponse:
+    """urlopen() stand-in serving ``body`` and, like http.client, returning b""
+    at EOF even when Content-Length promised more."""
+
+    def __init__(self, body: bytes, content_length: int, status: int = 200) -> None:
+        self._body = body
+        self.status = status
+        self.headers = {"Content-Length": str(content_length)}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        return None
+
+    def read(self, size: int) -> bytes:
+        chunk, self._body = self._body[:size], self._body[size:]
+        return chunk
+
+
+class DownloadFileStreamedTests(unittest.TestCase):
+    FULL = b"0123456789"
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory(prefix="modly-download-")
+        self.dest = Path(self.tempdir.name)
+        self.control = {"pause": threading.Event(), "cancel": threading.Event()}
+        self.requests: list[dict] = []
+        patches = [
+            patch.object(model_router.time, "sleep", lambda _s: None),
+            patch.object(model_router, "_resolve_direct_download_url", lambda url, headers: url),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def download(self, responses: list, expected_size=None) -> int:
+        def fake_urlopen(request, timeout=None):
+            self.requests.append(dict(request.header_items()))
+            return responses.pop(0)
+
+        with patch.object(model_router, "urlopen", fake_urlopen):
+            return model_router._download_file_streamed(
+                url="https://example.invalid/w.safetensors",
+                filename="w.safetensors",
+                dest_dir=str(self.dest),
+                file_index=1,
+                total_files=1,
+                base_percent=1,
+                progress_cb=lambda _m: None,
+                control=self.control,
+                expected_size=expected_size,
+            )
+
+    def test_stream_closed_early_resumes_instead_of_saving_a_truncated_file(self) -> None:
+        size = self.download([
+            _FakeResponse(self.FULL[:4], content_length=len(self.FULL)),
+            _FakeResponse(self.FULL[4:], content_length=6, status=206),
+        ])
+
+        self.assertEqual(size, len(self.FULL))
+        self.assertEqual((self.dest / "w.safetensors").read_bytes(), self.FULL)
+        self.assertEqual(self.requests[1].get("Range"), "bytes=4-")
+        self.assertFalse((self.dest / "w.safetensors.part").exists())
+
+    def test_never_renames_a_short_file_into_place(self) -> None:
+        responses = [_FakeResponse(self.FULL[:4], content_length=len(self.FULL))]
+        responses += [_FakeResponse(b"", content_length=6, status=206) for _ in range(2)]
+        with self.assertRaisesRegex(RuntimeError, "received 4 of 10 bytes"):
+            self.download(responses)
+
+        self.assertFalse((self.dest / "w.safetensors").exists())
+        self.assertEqual((self.dest / "w.safetensors.part").read_bytes(), self.FULL[:4])
+
+    def test_existing_file_with_the_wrong_size_is_downloaded_again(self) -> None:
+        (self.dest / "w.safetensors").write_bytes(self.FULL[:4])
+        size = self.download(
+            [_FakeResponse(self.FULL, content_length=len(self.FULL))],
+            expected_size=len(self.FULL),
+        )
+
+        self.assertEqual(size, len(self.FULL))
+        self.assertEqual((self.dest / "w.safetensors").read_bytes(), self.FULL)
+
+    def test_existing_file_with_the_expected_size_is_kept(self) -> None:
+        (self.dest / "w.safetensors").write_bytes(self.FULL)
+        self.assertEqual(self.download([], expected_size=len(self.FULL)), len(self.FULL))
+        self.assertEqual(self.requests, [])
+
+    def test_repo_listing_reports_file_sizes_and_skips_folders(self) -> None:
+        module = types.ModuleType("huggingface_hub")
+        seen: dict = {}
+
+        class HfApi:
+            def list_repo_tree(self, repo_id, revision=None, token=None, recursive=False):
+                seen.update(repo_id=repo_id, revision=revision, token=token, recursive=recursive)
+                return [
+                    types.SimpleNamespace(path="transformer", tree_id="t"),
+                    types.SimpleNamespace(path="transformer/w.safetensors", size=10),
+                ]
+
+        module.HfApi = HfApi
+        with patch.dict(sys.modules, {"huggingface_hub": module}):
+            sizes = model_router._list_repo_file_sizes("org/repo", "main", "tok")
+
+        self.assertEqual(sizes, {"transformer/w.safetensors": 10})
+        self.assertEqual(
+            seen, {"repo_id": "org/repo", "revision": "main", "token": "tok", "recursive": True}
+        )
 
 
 if __name__ == "__main__":

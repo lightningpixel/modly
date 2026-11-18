@@ -8,6 +8,8 @@ import { initAutoUpdater } from './updater'
 import { syncBuiltinExtensions } from './builtin-sync'
 import { reconcileInterruptedExtensionInstalls } from './extension-install-recovery'
 import { getSettings } from './settings-store'
+import { APP_HEADER, getAppSecret, isApiRequest, isAppNavigation } from './api-guard'
+import { handleThumbnailProtocol, registerThumbnailScheme } from './asset-thumbnail-protocol'
 
 let mainWindow: BrowserWindow | null = null
 let pythonBridge: PythonBridge | null = null
@@ -67,6 +69,17 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
+  // The window only ever shows Modly's own pages: any other page loaded here
+  // would get the app secret from the request hook. Links open in the browser.
+  const rendererUrl = is.dev ? process.env['ELECTRON_RENDERER_URL'] : undefined
+  const keepOnApp = (event: Electron.Event, url: string) => {
+    if (isAppNavigation(url, rendererUrl)) return
+    event.preventDefault()
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
+  }
+  mainWindow.webContents.on('will-navigate', keepOnApp)
+  mainWindow.webContents.on('will-redirect', keepOnApp)
+
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
     mainWindow.webContents.openDevTools()
@@ -76,6 +89,7 @@ function createWindow(): void {
 }
 
 app.setName('Modly')
+registerThumbnailScheme()
 
 process.on('uncaughtException', (err) => {
   if ((err as NodeJS.ErrnoException).code === 'EPIPE') return
@@ -101,6 +115,8 @@ app.whenReady().then(async () => {
     optimizer.watchWindowShortcuts(window)
   })
 
+  handleThumbnailProtocol()
+
   // Sync built-in extensions from app resources to userData
   syncBuiltinExtensions()
 
@@ -118,6 +134,26 @@ app.whenReady().then(async () => {
   pythonBridge.setWindowGetter(() => mainWindow)
   setupIpcHandlers(pythonBridge, () => mainWindow)
   initAutoUpdater(() => mainWindow)
+
+  // The backend refuses requests from web pages, and the packaged window's
+  // file:// pages look like one (Origin: null). The secret header proves they
+  // are Modly. Adding it here covers every request of the window (axios,
+  // fetch, SSE, three.js loaders, <img>) with no change in the renderer, which
+  // never sees the secret. The filter has no port, which matches any port; the
+  // backend's port is checked per request since it may change on a restart.
+  // A session takes a single onBeforeSendHeaders listener: this is the only one.
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: ['http://127.0.0.1/*', 'http://localhost/*'] },
+    (details, callback) => {
+      const port = pythonBridge?.getPort()
+      // Only the app window's own requests, never another webContents.
+      const fromAppWindow = mainWindow !== null && details.webContentsId === mainWindow.webContents.id
+      if (fromAppWindow && port !== undefined && isApiRequest(details.url, port)) {
+        details.requestHeaders[APP_HEADER] = getAppSecret()
+      }
+      callback({ requestHeaders: details.requestHeaders })
+    },
+  )
 
   createWindow()
 

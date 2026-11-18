@@ -507,3 +507,69 @@ test('validateInstallManifest validates weight variants and keeps them off proce
   }, files, 'repository'), /weight_variants is supported only for model nodes/)
 })
 
+test('parseGitHubRepoUrl resolves owner and repo from the URL forms people paste (#280)', () => {
+  const mod = loadModule()
+  const expected = { owner: 'DrHepa', repo: 'modly-trellis-text-extension' }
+  for (const url of [
+    'https://github.com/DrHepa/modly-trellis-text-extension',
+    '  https://github.com/DrHepa/modly-trellis-text-extension/  ',
+    // The "Code > HTTPS" clone URL: the GitHub API answers 404 for "<repo>.git"
+    'https://github.com/DrHepa/modly-trellis-text-extension.git',
+    'https://github.com/DrHepa/modly-trellis-text-extension/tree/master',
+    'https://github.com/DrHepa/modly-trellis-text-extension?tab=readme-ov-file',
+  ]) {
+    assert.deepEqual(mod.parseGitHubRepoUrl(url), expected, url)
+  }
+})
+
+test('parseGitHubRepoUrl rejects URLs that do not name a GitHub repository', () => {
+  const mod = loadModule()
+  assert.throws(() => mod.parseGitHubRepoUrl('https://gitlab.com/owner/repo'), /must be a GitHub repository/)
+  assert.throws(() => mod.parseGitHubRepoUrl('https://github.com/owner'), /expected format/)
+  assert.throws(() => mod.parseGitHubRepoUrl('https://github.com/owner/.git'), /expected format/)
+})
+
+
+test('normalizeNodeInputs reduces slot objects to type names and keeps labels and optionality (#241)', () => {
+  const mod = loadModule()
+  // The manifest shape from the report (modly-Codex-image-extension, image-to-image)
+  assert.deepEqual(mod.normalizeNodeInputs({
+    id: 'image-to-image',
+    input: 'image',
+    inputs: [
+      { name: 'front', label: 'Primary image', type: 'image', required: true },
+      { name: 'left', label: 'Image 2', type: 'image', required: false },
+    ],
+  }), {
+    inputs: ['image', 'image'],
+    inputLabels: ['Primary image', 'Image 2'],
+    inputsRequired: [true, false],
+  })
+
+  // Plain type names are unchanged, with no derived labels or optionality
+  assert.deepEqual(
+    mod.normalizeNodeInputs({ inputs: ['image', 'text'], input_labels: ['Image', 'Prompt'] }),
+    { inputs: ['image', 'text'], inputLabels: ['Image', 'Prompt'], inputsRequired: undefined },
+  )
+  // Explicit input_labels win; a slot without a label falls back to its name, then its type
+  assert.deepEqual(
+    mod.normalizeNodeInputs({ inputs: ['mesh', { type: 'image', name: 'ref' }] }).inputLabels,
+    ['mesh', 'ref'],
+  )
+  assert.deepEqual(mod.normalizeNodeInputs({ input: 'image' }), { inputLabels: undefined })
+})
+
+test('normalizeNodeInputs rejects slot entries without a type', () => {
+  const mod = loadModule()
+  assert.throws(() => mod.normalizeNodeInputs({ id: 'n', inputs: [{ label: 'x' }] }), /n inputs\[0\] must be a type name/)
+  assert.throws(() => mod.normalizeNodeInputs({ id: 'n', inputs: ['image', null] }), /inputs\[1\]/)
+})
+
+test('validateInstallManifest sees object-shaped scene slots as scene inputs', () => {
+  const mod = loadModule()
+  const files = { hasEntryFile: () => true, hasGeneratorFile: () => true }
+  assert.throws(() => mod.validateInstallManifest({
+    id: 'proc', type: 'process', entry: 'processor.js',
+    nodes: [{ id: 'run', inputs: [{ type: 'scene' }] }],
+  }, files, 'repository'), /scene input and output are supported only for model nodes/)
+})

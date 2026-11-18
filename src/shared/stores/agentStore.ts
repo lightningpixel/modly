@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
+import { TOOL_LIMITS, clampToolLimit } from '@shared/utils/agentStream'
 
 export type ThinkingMode = 'auto' | 'on' | 'off'
 
@@ -45,11 +46,15 @@ interface AgentSettings {
   localModel:      string                          // catalog id or custom:<file>
   external:        Partial<Record<ProviderId, ExternalConfig>>
   defaultThinking: ThinkingMode
+  toolBudget:      number                          // tool calls per chat turn
+  toolTimeout:     number                          // seconds per tool call
 
   setProvider:        (provider: ProviderId)                        => void
   setLocalModel:      (model: string)                               => void
   setExternal:        (provider: ProviderId, cfg: ExternalConfig)   => void
   setDefaultThinking: (mode: ThinkingMode)                          => void
+  setToolBudget:      (budget: number)                              => void
+  setToolTimeout:     (seconds: number)                             => void
 }
 
 // ─── Secure persistence ────────────────────────────────────────────────────────
@@ -118,11 +123,16 @@ export const useAgentStore = create<AgentSettings>()(
       localModel:      DEFAULT_LOCAL_MODEL,
       external:        {},
       defaultThinking: 'auto',
+      // New keys need no migration: persist fills them from these defaults.
+      toolBudget:      TOOL_LIMITS.budget.default,
+      toolTimeout:     TOOL_LIMITS.timeout.default,
 
       setProvider:        (provider)       => set({ provider }),
       setLocalModel:      (model)          => set({ localModel: model }),
       setExternal:        (provider, cfg)  => set((s) => ({ external: { ...s.external, [provider]: cfg } })),
       setDefaultThinking: (mode)           => set({ defaultThinking: mode }),
+      setToolBudget:      (budget)         => set({ toolBudget: clampToolLimit('budget', budget) }),
+      setToolTimeout:     (seconds)        => set({ toolTimeout: clampToolLimit('timeout', seconds) }),
     }),
     {
       name: 'modly-agent-settings',

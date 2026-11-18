@@ -1,14 +1,14 @@
 import { ipcMain, BrowserWindow, Notification, dialog, app, shell } from 'electron'
 import { buildSync } from 'esbuild'
 import { autoUpdater } from 'electron-updater'
-import { basename, join } from 'path'
+import { basename, dirname, extname, join } from 'path'
 import { rm as rmAsync, readFile, writeFile, mkdir, readdir, rename, cp, symlink, lstat, copyFile } from 'fs/promises'
 import { existsSync, mkdirSync, readdirSync, statSync } from 'fs'
 import axios from 'axios'
 import * as tar from 'tar'
 import * as os from 'os'
 import { promisify } from 'util'
-import { PythonBridge, API_BASE_URL } from './python-bridge'
+import { PythonBridge, apiBaseUrl } from './python-bridge'
 import {
   isModelDownloaded,
   listDownloadedModels,
@@ -42,10 +42,16 @@ import {
   weightStorageHasLocalData,
 } from './model-sources'
 import { getSettings, setSettings } from './settings-store'
+import {
+  claimStorageDirectory, deleteStorageDirectory, listStorageEntries, moveStorageDirectory,
+  validateStorageLocation, type StorageKind,
+} from './storage-directory-guard'
 import { checkSetupNeeded, markSetupDone, runFullSetup, getVenvPythonExe, ensureSslPatch } from './python-setup'
+import { extensionChildEnv } from './child-env'
 import { logger } from './logger'
 import { getProcessRunner, getPythonProcessRunner, getExtPythonExe, terminateProcessRunner, terminateAllProcessRunners } from './process-runner'
 import { getBuiltinExtensionsDir } from './builtin-sync'
+import { createConversationStorage } from './agent-conversations'
 import { spawn, execFile } from 'child_process'
 import {
   EXT_INCOMPLETE_MARKER,
@@ -58,16 +64,19 @@ import {
   resolveExtensionPathWithinRoot,
 } from './extension-path-guard'
 import { detectGpuInfo, describeGpuInfo, torchFlavorFor, type GpuInfo } from './gpu-detect'
+import { sampleGpuMemory } from './gpu-memory'
 import { SETUP_LAUNCHER_SOURCE } from './setup-launcher'
 import {
   assertCompatibleExtensionUpdateType,
   expectedModelIds,
   markExtensionInstallationInterrupted,
+  parseGitHubRepoUrl,
   validateExtensionQuarantinePayload,
   validateExtensionReloadPayload,
   validateExistingExtensionReplacement,
   validateInstallManifest,
   assertSupportedSceneNodeShape,
+  normalizeNodeInputs,
 } from './extension-install-utils'
 import {
   beginExtensionRegistrationTransaction,
@@ -85,6 +94,9 @@ import {
   validateExtensionDestinationRegistration,
 } from './extension-install-recovery'
 import { registerWorkspaceAssetLibraryIpcHandlers } from './artifact-registry-service'
+import { getThumbnailsDir } from './asset-thumbnail-protocol'
+import { registerAssetThumbnailIpcHandlers, removeThumbnails } from './asset-thumbnail-cache'
+import { registerWorkspaceImageIpcHandlers } from './workspace-images'
 import { updatesSupported } from './updater'
 import { ModelWeightOperations } from './model-weight-operations'
 import { readLocalFileBase64 } from './bounded-file-reader'
@@ -135,7 +147,7 @@ function runExtensionSetup(
     const proc = spawn(pythonExe, ['-c', launcher, setupPy, args], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env:   {
-        ...process.env,
+        ...extensionChildEnv(process.env),
         PIP_CACHE_DIR:         pipCacheDir,
         MODLY_TORCH_FLAVOR:    torchFlavor,
         MODLY_TORCH_INDEX_URL: gpu.torchIndexUrl ?? '',
@@ -170,6 +182,19 @@ const rmWithRetry = (path: string, label: string) =>
 const renameWithRetry = (from: string, to: string, label: string) =>
   renameExtensionWithRetry(from, to, label, logger)
 
+/** Guard options for storage operations: which model folders belong to Modly. */
+async function storageGuardOptions(): Promise<{ appDir: string; knownModelIds: string[] }> {
+  const ids = new Set<string>()
+  for (const dir of [getSettings(app.getPath('userData')).extensionsDir, getBuiltinExtensionsDir()]) {
+    try {
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        if (!isInternalExtensionDirName(entry.name) && (entry.isDirectory() || entry.isSymbolicLink())) ids.add(entry.name)
+      }
+    } catch { /* missing folder: no ids from it */ }
+  }
+  return { appDir: app.getAppPath(), knownModelIds: [...ids] }
+}
+
 export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGetter): void {
   type ActiveDownload = {
     progress: DownloadProgress & { variantId?: string }
@@ -197,7 +222,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     for (const id of modelIds) {
       try {
         const response = await axios.post(
-          `${API_BASE_URL}/model/unload/${encodeURIComponent(id)}`, {}, { timeout: 40_000 },
+          `${apiBaseUrl()}/model/unload/${encodeURIComponent(id)}`, {}, { timeout: 40_000 },
         )
         if (response.data?.unloaded !== true) throw new Error('Model unload was not confirmed; weights were preserved')
       } catch (err) {
@@ -210,7 +235,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   async function unloadExtensionForRemoval(extensionId: string) {
     let modelIds: string[]
     try {
-      const { data } = await axios.get<{ id: string }[]>(`${API_BASE_URL}/model/all`, { timeout: 10_000 })
+      const { data } = await axios.get<{ id: string }[]>(`${apiBaseUrl()}/model/all`, { timeout: 10_000 })
       modelIds = data.map((model) => model.id).filter((id) => id.startsWith(`${extensionId}/`))
     } catch (err) {
       if (backendUnreachable(err)) return
@@ -343,7 +368,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   ipcMain.handle('python:status', () => ({
     ready: pythonBridge.isReady(),
-    apiUrl: API_BASE_URL
+    apiUrl: apiBaseUrl()
   }))
 
   // File system
@@ -403,7 +428,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
   ipcMain.handle('model:unloadAll', async (): Promise<{ success: boolean; error?: string }> => {
     try {
-      await axios.post(`${API_BASE_URL}/model/unload-all`, {}, { timeout: 10_000 })
+      await axios.post(`${apiBaseUrl()}/model/unload-all`, {}, { timeout: 10_000 })
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -756,7 +781,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       const targetId = active?.currentTargetId
       if (!active || !targetId) return { success: false, error: 'No active download target' }
       active.stopRequested = 'pause'
-      await axios.post(`${API_BASE_URL}/model/hf-download/pause`, null, {
+      await axios.post(`${apiBaseUrl()}/model/hf-download/pause`, null, {
         params: { model_id: targetId },
         timeout: 5000,
       })
@@ -771,7 +796,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       const active = activeDownloads.get(modelId)
       if (active) active.stopRequested = 'cancel'
       if (active?.currentTargetId) {
-        await axios.post(`${API_BASE_URL}/model/hf-download/cancel`, null, {
+        await axios.post(`${apiBaseUrl()}/model/hf-download/cancel`, null, {
           params: { model_id: active.currentTargetId },
           timeout: 5000,
         })
@@ -823,8 +848,20 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     if (result.canceled || !result.filePath) return { success: false }
 
     try {
+      if (format === 'obj') {
+        // Like Blender: the material and texture go next to the chosen .obj.
+        const dir = dirname(result.filePath)
+        const stem = basename(result.filePath, extname(result.filePath))
+        const { data } = await axios.get<{ files: { name: string; data: string }[] }>(
+          `${apiBaseUrl()}/export/obj/files?path=${encodeURIComponent(meshPath)}&name=${encodeURIComponent(stem)}`,
+        )
+        for (const file of data.files) {
+          await writeFile(join(dir, basename(file.name)), Buffer.from(file.data, 'base64'))
+        }
+        return { success: true }
+      }
       const response = await axios.get(
-        `${API_BASE_URL}/export/${format}?path=${encodeURIComponent(meshPath)}`,
+        `${apiBaseUrl()}/export/${format}?path=${encodeURIComponent(meshPath)}`,
         { responseType: 'arraybuffer' }
       )
       await writeFile(result.filePath, Buffer.from(response.data as ArrayBuffer))
@@ -891,11 +928,15 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     return { total, used: total - free, available: free }
   })
 
+  // GPU memory (VRAM) — NVIDIA only via nvidia-smi
+  // (null on macOS, without NVIDIA, or when a sample times out).
+  ipcMain.handle('system:gpuMemory', () => sampleGpuMemory())
+
   ipcMain.handle('app:info', () => ({
     version:   app.getVersion(),
     userData:  app.getPath('userData'),
     modelsDir: getSettings(app.getPath('userData')).modelsDir,
-    apiUrl:    API_BASE_URL,
+    apiUrl:    apiBaseUrl(),
     platform:  process.platform,
     arch:      process.arch,
   }))
@@ -920,6 +961,11 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       throw new Error('Cannot change model storage while model weights are busy')
     }
     const { hfToken, ...dirs } = patch
+    // Refuse a drive root or system folder, and mark a new/empty folder as
+    // Modly's so it may later move or delete what it puts there.
+    for (const dir of Object.values(dirs)) {
+      if (typeof dir === 'string') await claimStorageDirectory(dir, app.getPath('userData'), { appDir: app.getAppPath() })
+    }
     setSettings(app.getPath('userData'), dirs)
     // Keep main-process env in sync so child processes spawned after token change inherit it
     if (hfToken !== undefined) {
@@ -930,7 +976,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       // subprocesses spawned by ExtensionProcess._build_env() pick it up
       // without requiring a full app restart.
       try {
-        await axios.post(`${API_BASE_URL}/settings/hf-token`, { token: hfToken }, { timeout: 3000 })
+        await axios.post(`${apiBaseUrl()}/settings/hf-token`, { token: hfToken }, { timeout: 3000 })
       } catch { /* FastAPI may not be running yet — ignore */ }
     }
     return { ...getSettings(app.getPath('userData')), hfToken: getHfToken() }
@@ -971,6 +1017,17 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   registerWorkspaceAssetLibraryIpcHandlers({
     ipcMain,
     getWorkspaceDir: () => getSettings(app.getPath('userData')).workspaceDir,
+    thumbnailsDir: getThumbnailsDir(),
+  })
+  registerAssetThumbnailIpcHandlers({
+    ipcMain,
+    getWorkspaceDir: () => getSettings(app.getPath('userData')).workspaceDir,
+    thumbnailsDir: getThumbnailsDir(),
+  })
+  registerWorkspaceImageIpcHandlers({
+    ipcMain,
+    getWorkspaceDir: () => getSettings(app.getPath('userData')).workspaceDir,
+    showItemInFolder: (path) => shell.showItemInFolder(path),
   })
 
   ipcMain.handle('workspace:listCollections', async () => {
@@ -1011,6 +1068,10 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   ipcMain.handle('workspace:deleteJob', async (_, { collection, filename }: { collection: string; filename: string }) => {
     await rmAsync(workspacePath(collection, filename), { force: true })
     await rmAsync(workspacePath(collection, filename.replace(/\.glb$/, '.meta.json')), { force: true })
+    await removeThumbnails(
+      { workspaceDir: getSettings(app.getPath('userData')).workspaceDir, thumbnailsDir: getThumbnailsDir() },
+      `${collection}/${filename}`,
+    ).catch(() => undefined)
   })
 
   // Directory utilities for settings
@@ -1055,6 +1116,14 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     return result.canceled ? null : result.filePaths[0]
   })
 
+  // Agent conversations: one JSON file each under <userData>/agent/conversations.
+  // Ids are validated in the storage layer, so no path escapes that folder.
+  const conversations = createConversationStorage(join(app.getPath('userData'), 'agent', 'conversations'))
+  ipcMain.handle('agent:conversations:list', () => conversations.list())
+  ipcMain.handle('agent:conversations:read', (_, id: string) => conversations.read(id))
+  ipcMain.handle('agent:conversations:save', (_, conversation: unknown) => conversations.save(conversation))
+  ipcMain.handle('agent:conversations:remove', (_, id: string) => conversations.remove(id))
+
   // Add a local GGUF to the agent's models folder. Picking and copying both
   // happen here, so the renderer never hands main an arbitrary path to copy.
   ipcMain.handle('agent:addModel', async (): Promise<{ success: boolean; cancelled?: boolean; fileName?: string; error?: string }> => {
@@ -1089,36 +1158,47 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     }
   })
 
+  // Storage moves and deletions only touch what Modly created (#351).
   ipcMain.handle('fs:moveDirectory', async (_, { src, dest }: { src: string; dest: string }) => {
     try {
-      await mkdir(dest, { recursive: true })
-      await cp(src, dest, { recursive: true })
-      await rmAsync(src, { recursive: true, force: true })
-      return { success: true }
+      const userData = app.getPath('userData')
+      const { kept } = await moveStorageDirectory(src, dest, getSettings(userData), userData, await storageGuardOptions())
+      return { success: true, kept }
     } catch (err) {
-      return { success: false, error: String(err) }
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
 
   ipcMain.handle('fs:deleteDirectory', async (_, dirPath: string) => {
+    try {
+      const userData = app.getPath('userData')
+      const { kept } = await deleteStorageDirectory(dirPath, getSettings(userData), userData, await storageGuardOptions())
+      return { success: true, kept }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  // What a change of storage folder would move or delete: Modly's own entries,
+  // and how many others it leaves alone.
+  ipcMain.handle('fs:storageEntries', async (_, kind: StorageKind) => {
     const userData = app.getPath('userData')
     const settings = getSettings(userData)
-    const allowedRoots = [
-      settings.modelsDir,
-      settings.workspaceDir,
-      settings.extensionsDir,
-      join(userData, 'gen-cache'),
-    ]
-    const resolved = join(dirPath)
-    const isAllowed = allowedRoots.some((root) => resolved.startsWith(root))
-    if (!isAllowed) {
-      return { success: false, error: 'Path is outside allowed directories' }
-    }
+    const dir = { models: settings.modelsDir, workspace: settings.workspaceDir, workflows: settings.workflowsDir }[kind]
+    if (!dir) return { modly: [], other: [] }
     try {
-      await rmAsync(resolved, { recursive: true, force: true })
-      return { success: true }
+      return await listStorageEntries(kind, dir, settings, await storageGuardOptions())
+    } catch {
+      return { modly: [], other: [] }
+    }
+  })
+
+  ipcMain.handle('fs:checkStorageLocation', (_, dirPath: string) => {
+    try {
+      validateStorageLocation(dirPath, app.getPath('userData'), { appDir: app.getAppPath() })
+      return { ok: true }
     } catch (err) {
-      return { success: false, error: String(err) }
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
 
@@ -1170,7 +1250,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       id:                string
       name?:             string
       input?:            string
-      inputs?:           string[]
+      inputs?:           unknown[]   // type names, or { type, label?, required? } slot objects
       input_labels?:     string[]
       output?:           string
       params_schema?:    unknown[]
@@ -1208,7 +1288,8 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       validateModelNodeIds(parsed.nodes ?? [])
     }
     const nodes = (parsed.nodes ?? []).map(n => {
-      const declaredInputs = Array.isArray(n.inputs) ? n.inputs : [n.input ?? 'image']
+      const slots = normalizeNodeInputs(n)
+      const declaredInputs = slots.inputs ?? [n.input ?? 'image']
       const output = n.output ?? 'mesh'
       assertSupportedSceneNodeShape(parsed.type === 'process' ? 'process' : 'model', n, declaredInputs, output)
       const usesManagedWeights = weightGroups !== undefined
@@ -1240,8 +1321,9 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         id:             nodeId,
         name:           n.name ?? n.id,
         input:          n.input  ?? 'image' as const,
-        inputs:         n.inputs,
-        inputLabels:    n.input_labels,
+        inputs:         slots.inputs,
+        inputLabels:    slots.inputLabels,
+        inputsRequired: slots.inputsRequired,
         output:         n.output ?? 'mesh'  as const,
         paramsSchema:   n.params_schema ?? parsed.params_schema ?? [],
         paramDefaults:  { ...(parsed.param_defaults ?? {}), ...(n.param_defaults ?? {}) },
@@ -1292,7 +1374,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     let payload: unknown
     try {
       const response = await axios.post(
-        `${API_BASE_URL}/extensions/reload`,
+        `${apiBaseUrl()}/extensions/reload`,
         validationCapability ? { validationCapability } : {},
         { timeout: 10_000 },
       )
@@ -1315,7 +1397,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
     let payload: unknown
     try {
       const response = await axios.post(
-        `${API_BASE_URL}/extensions/reload`,
+        `${apiBaseUrl()}/extensions/reload`,
         {},
         { timeout: 10_000 },
       )
@@ -1501,11 +1583,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
 
     try {
       // 1. Parse and validate GitHub URL
-      const parsed  = new URL(githubUrl.trim())
-      if (parsed.hostname !== 'github.com') throw new Error('Invalid URL: must be a GitHub repository (github.com)')
-      const parts = parsed.pathname.split('/').filter(Boolean)
-      if (parts.length < 2) throw new Error('Invalid URL: expected format https://github.com/owner/repo')
-      const [owner, repo] = parts
+      const { owner, repo } = parseGitHubRepoUrl(githubUrl)
 
       emit({ step: 'downloading', percent: 0 })
 
@@ -1881,7 +1959,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       }
       // Hot-reload Python so it stops using the deleted model extension
       try {
-        await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
+        await axios.post(`${apiBaseUrl()}/extensions/reload`, {}, { timeout: 10_000 })
       } catch { /* ignore if Python is not running */ }
       return { success: true }
     } catch (err) {
@@ -2114,7 +2192,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
   ipcMain.handle('extensions:reload', async () => {
     terminateAllProcessRunners()
     try {
-      const res = await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
+      const res = await axios.post(`${apiBaseUrl()}/extensions/reload`, {}, { timeout: 10_000 })
       return { success: true, errors: (res.data as { errors?: Record<string, string> }).errors ?? {} }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -2185,7 +2263,7 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       if (patch.modelsDir !== undefined && weightOperations.busy) {
         throw new Error('Cannot change model storage while model weights are busy')
       }
-      await axios.post(`${API_BASE_URL}/settings/paths`, {
+      await axios.post(`${apiBaseUrl()}/settings/paths`, {
         models_dir:     patch.modelsDir,
         workspace_dir:  patch.workspaceDir,
         extensions_dir: patch.extensionsDir,

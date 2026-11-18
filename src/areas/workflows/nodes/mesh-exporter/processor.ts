@@ -1,5 +1,6 @@
 import path = require('path')
 import fs   = require('fs')
+import { objFiles, textureExtension, type ObjTexture } from './obj'
 
 interface ProcessInput  { filePath?: string; text?: string }
 interface ProcessResult { filePath?: string; text?: string }
@@ -17,10 +18,14 @@ interface PrimGeometry {
   normals:   Float32Array | null
   uvs:       Float32Array | null
   indices:   number[]
+  /** Index into the base color textures, or null when untextured. */
+  texture:   number | null
 }
 
-function extractPrimitives(doc: any): PrimGeometry[] {
+function extractPrimitives(doc: any, textures: ObjTexture[]): PrimGeometry[] {
   const result: PrimGeometry[] = []
+  // One entry per distinct texture, shared by the primitives that use it.
+  const textureIndex = new Map<unknown, number>()
   for (const mesh of doc.getRoot().listMeshes()) {
     for (const prim of mesh.listPrimitives()) {
       const posArr = prim.getAttribute('POSITION')?.getArray() as Float32Array | null
@@ -32,10 +37,41 @@ function extractPrimitives(doc: any): PrimGeometry[] {
       const indices   = idxRaw
         ? Array.from(idxRaw as Uint16Array | Uint32Array)
         : Array.from({ length: vertCount }, (_, i) => i)
-      result.push({ positions: posArr, normals: normArr, uvs: uvArr, indices })
+      let texture: number | null = null
+      const baseColor = prim.getMaterial()?.getBaseColorTexture() ?? null
+      const image = baseColor?.getImage() as Uint8Array | null | undefined
+      if (baseColor && image && textureExtension(baseColor.getMimeType() ?? '')) {
+        if (!textureIndex.has(baseColor)) {
+          textureIndex.set(baseColor, textures.length)
+          textures.push({ image, mimeType: baseColor.getMimeType() })
+        }
+        texture = textureIndex.get(baseColor)!
+      }
+      result.push({ positions: posArr, normals: normArr, uvs: uvArr, indices, texture })
     }
   }
   return result
+}
+
+// ─── Real-world scale ──────────────────────────────────────────────────────
+
+/** STL, OBJ and PLY carry no unit: by convention they hold millimetres. */
+const MM_PER_M = 1000
+
+/**
+ * Whether the GLB declares its real size: Modly's set_real_scale writes
+ * `scenes[n].extras.modly.real_scale = { unit: 'm' }` (api/services/mesh_ops/real_scale.py).
+ */
+function isCalibrated(doc: any): boolean {
+  const scene = doc.getRoot().getDefaultScene?.() ?? doc.getRoot().listScenes?.()[0]
+  const extras = scene?.getExtras?.() as { modly?: { real_scale?: { unit?: unknown } } } | undefined
+  return extras?.modly?.real_scale?.unit === 'm'
+}
+
+/** A calibrated asset is written in millimetres, like the API's exports. */
+function scalePrimitives(prims: PrimGeometry[], factor: number): PrimGeometry[] {
+  if (factor === 1) return prims
+  return prims.map((p) => ({ ...p, positions: p.positions.map((v) => v * factor) }))
 }
 
 // ─── STL (binary) ─────────────────────────────────────────────────────────────
@@ -88,45 +124,12 @@ function writeSTL(prims: PrimGeometry[], outPath: string): void {
 
 // ─── OBJ ──────────────────────────────────────────────────────────────────────
 
-function writeOBJ(prims: PrimGeometry[], outPath: string): void {
-  const lines: string[] = ['# Exported by Modly mesh-exporter', '']
-  let vOff = 1, vnOff = 1, vtOff = 1
-
-  for (let pi = 0; pi < prims.length; pi++) {
-    const { positions: p, normals: n, uvs: uv, indices } = prims[pi]
-    const vc = p.length / 3
-
-    lines.push(`g mesh_${pi}`)
-
-    for (let i = 0; i < p.length; i += 3)
-      lines.push(`v ${p[i].toFixed(6)} ${p[i+1].toFixed(6)} ${p[i+2].toFixed(6)}`)
-
-    if (n) for (let i = 0; i < n.length; i += 3)
-      lines.push(`vn ${n[i].toFixed(6)} ${n[i+1].toFixed(6)} ${n[i+2].toFixed(6)}`)
-
-    if (uv) for (let i = 0; i < uv.length; i += 2)
-      lines.push(`vt ${uv[i].toFixed(6)} ${uv[i+1].toFixed(6)}`)
-
-    for (let i = 0; i + 2 < indices.length; i += 3) {
-      const [a, b, c] = [indices[i]+vOff, indices[i+1]+vOff, indices[i+2]+vOff]
-      if (n && uv) {
-        const [ua, ub, uc] = [indices[i]+vtOff, indices[i+1]+vtOff, indices[i+2]+vtOff]
-        const [na, nb, nc] = [indices[i]+vnOff, indices[i+1]+vnOff, indices[i+2]+vnOff]
-        lines.push(`f ${a}/${ua}/${na} ${b}/${ub}/${nb} ${c}/${uc}/${nc}`)
-      } else if (n) {
-        const [na, nb, nc] = [indices[i]+vnOff, indices[i+1]+vnOff, indices[i+2]+vnOff]
-        lines.push(`f ${a}//${na} ${b}//${nb} ${c}//${nc}`)
-      } else {
-        lines.push(`f ${a} ${b} ${c}`)
-      }
-    }
-
-    vOff  += vc
-    if (n)  vnOff += n.length  / 3
-    if (uv) vtOff += uv.length / 2
-  }
-
-  fs.writeFileSync(outPath, lines.join('\n'), 'utf-8')
+/** `<name>.obj`, plus `<name>.mtl` and its textures next to it when the mesh is textured. */
+function writeOBJ(prims: PrimGeometry[], textures: ObjTexture[], outPath: string): string[] {
+  const dir = path.dirname(outPath)
+  const files = objFiles(prims, textures, path.basename(outPath, path.extname(outPath)))
+  for (const file of files) fs.writeFileSync(path.join(dir, file.name), file.data)
+  return files.map((file) => file.name)
 }
 
 // ─── PLY (ASCII) ──────────────────────────────────────────────────────────────
@@ -202,8 +205,17 @@ const processor = async (
 
   let outPath: string
   if (outputPath) {
-    fs.mkdirSync(outputPath, { recursive: true })
-    outPath = path.join(outputPath, `export-${Date.now()}${ext}`)
+    // Relative destinations belong to the configured workspace, never the
+    // application's working directory (often Program Files on Windows).
+    const destination = path.resolve(context.workspaceDir, outputPath)
+    const destinationExt = path.extname(destination).toLowerCase()
+    const isFile = !/[\\/]$/.test(outputPath)
+      && Object.values(EXT_MAP).includes(destinationExt)
+      && !(fs.existsSync(destination) && fs.statSync(destination).isDirectory())
+    if (isFile && destinationExt !== ext) {
+      throw new Error(`mesh-exporter: output file extension must be ${ext} for format "${format}"`)
+    }
+    outPath = isFile ? destination : path.join(destination, `export-${Date.now()}${ext}`)
   } else {
     const exportsDir = path.join(context.workspaceDir, 'Exports')
     fs.mkdirSync(exportsDir, { recursive: true })
@@ -216,10 +228,16 @@ const processor = async (
   if (format === 'glb') {
     await io.write(outPath, doc)
   } else {
-    const prims = extractPrimitives(doc)
+    const calibrated = isCalibrated(doc)
+    const textures: ObjTexture[] = []
+    const prims = scalePrimitives(extractPrimitives(doc, textures), calibrated ? MM_PER_M : 1)
     if (prims.length === 0) throw new Error('mesh-exporter: no mesh data found in input')
+    if (calibrated) context.log('Real-size asset: written in millimetres')
     if      (format === 'stl') writeSTL(prims, outPath)
-    else if (format === 'obj') writeOBJ(prims, outPath)
+    else if (format === 'obj') {
+      const written = writeOBJ(prims, textures, outPath)
+      if (written.length > 1) context.log(`Material and texture: ${written.slice(1).join(', ')}`)
+    }
     else if (format === 'ply') writePLY(prims, outPath)
   }
 

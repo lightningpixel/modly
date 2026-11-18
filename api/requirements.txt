@@ -13,6 +13,9 @@ pymeshlab>=2023.12
 # trimesh's graph engine: connected parts, hole loops and vertex merging in
 # inspect_mesh / repair_mesh. Optional for trimesh, so never pulled in by it.
 scipy>=1.10
+# trimesh decodes glTF images with Pillow. Optional for trimesh: without it,
+# every op that reloads a mesh silently drops its textures.
+Pillow>=10.0
 
 # Model downloads (HuggingFace)
 huggingface_hub>=0.27.0

@@ -21,6 +21,7 @@ export interface InstallManifest {
     id?: string
     input?: unknown
     inputs?: unknown
+    input_labels?: unknown
     output?: unknown
     hf_repo?: unknown
     model_sources?: unknown
@@ -43,6 +44,54 @@ export interface ExtensionReloadPayload {
   errors: Record<string, string>
 }
 
+export interface NormalizedNodeInputs {
+  /** One type name per input slot, or undefined for a single-input node. */
+  inputs?: string[]
+  /** Display label per slot: explicit `input_labels`, else the objects' labels. */
+  inputLabels?: string[]
+  /** Set only when at least one slot is optional; true means required. */
+  inputsRequired?: boolean[]
+}
+
+/**
+ * A manifest may declare `inputs` as type names (`["image", "text"]`) or as
+ * slot objects (`[{ "type": "image", "label": "Front", "required": false }]`).
+ * Everything downstream compares slots against type names, so objects are
+ * reduced to their type here and their label/required carried separately.
+ */
+export function normalizeNodeInputs(node: { id?: unknown; inputs?: unknown; input_labels?: unknown }): NormalizedNodeInputs {
+  const explicitLabels = Array.isArray(node.input_labels) ? node.input_labels as string[] : undefined
+  if (!Array.isArray(node.inputs)) return { inputLabels: explicitLabels }
+
+  const inputs: string[] = []
+  const labels: (string | undefined)[] = []
+  const required: boolean[] = []
+  node.inputs.forEach((entry: unknown, i: number) => {
+    if (typeof entry === 'string') {
+      inputs.push(entry)
+      labels.push(undefined)
+      required.push(true)
+      return
+    }
+    const slot = entry as { type?: unknown; label?: unknown; name?: unknown; required?: unknown } | null
+    if (!slot || typeof slot !== 'object' || typeof slot.type !== 'string') {
+      throw new Error(`manifest.json: ${String(node.id ?? 'node')} inputs[${i}] must be a type name or an object with a "type"`)
+    }
+    inputs.push(slot.type)
+    labels.push(typeof slot.label === 'string' ? slot.label : typeof slot.name === 'string' ? slot.name : undefined)
+    required.push(slot.required !== false)
+  })
+
+  const derivedLabels = labels.some((label) => label !== undefined)
+    ? labels.map((label, i) => label ?? inputs[i])
+    : undefined
+  return {
+    inputs,
+    inputLabels: explicitLabels ?? derivedLabels,
+    inputsRequired: required.every(Boolean) ? undefined : required,
+  }
+}
+
 export function assertSupportedSceneNodeShape(
   kind: 'model' | 'process',
   node: { id?: string; input?: unknown; inputs?: unknown; output?: unknown },
@@ -56,6 +105,19 @@ export function assertSupportedSceneNodeShape(
   if (kind === 'model' && usesSceneInput && (node.inputs !== undefined || node.input !== 'scene')) {
     throw new Error(`manifest.json: ${node.id ?? 'node'} must declare scene as its single input field`)
   }
+}
+
+/**
+ * Owner and repo of a pasted github.com URL. Accepts the clone URL form
+ * ("<repo>.git"), which the GitHub API would otherwise answer with a 404.
+ */
+export function parseGitHubRepoUrl(input: string): { owner: string; repo: string } {
+  const parsed = new URL(input.trim())
+  if (parsed.hostname !== 'github.com') throw new Error('Invalid URL: must be a GitHub repository (github.com)')
+  const [owner, rawRepo] = parsed.pathname.split('/').filter(Boolean)
+  const repo = rawRepo?.replace(/\.git$/, '')
+  if (!owner || !repo) throw new Error('Invalid URL: expected format https://github.com/owner/repo')
+  return { owner, repo }
 }
 
 export type IncompleteInstallRecoveryAction =
@@ -87,7 +149,7 @@ export function validateInstallManifest(
     validateModelNodeIds(manifest.nodes ?? [])
   }
   for (const node of Array.isArray(manifest.nodes) ? manifest.nodes : []) {
-    const declaredInputs = Array.isArray(node.inputs) ? node.inputs : [node.input ?? 'image']
+    const declaredInputs = normalizeNodeInputs(node).inputs ?? [node.input ?? 'image']
     const output = node.output ?? 'mesh'
     assertSupportedSceneNodeShape(isProcess ? 'process' : 'model', node, declaredInputs, output)
     const usesSharedWeights = weightGroups !== undefined || node.weight_groups !== undefined

@@ -17,6 +17,8 @@ import re as _re
 import services.generator_registry as registry
 from services.generator_registry import generator_registry
 from schemas.generation import GenerateFromArtifactRequest, JobStatus
+from services.run_history import run_history
+from services.weight_integrity import IncompleteModelWeightsError
 from services.artifact_input import (
     RESERVED_ARTIFACT_PARAMS,
     TypedArtifactInput,
@@ -54,6 +56,45 @@ def _purge_old_jobs() -> None:
         _cancel_events.pop(jid, None)
         _job_generators.pop(jid, None)
         _completed_at.pop(jid, None)
+
+
+def record_job_filed(
+    job_id: str,
+    model_id: str,
+    inputs: dict,
+    params: dict,
+    collection: str,
+    parent_run_id: Optional[str] = None,
+) -> None:
+    """File the persisted history record of a generation job (see services.run_history)."""
+    run_history.begin(
+        job_id, "generation", model_id=model_id, inputs=inputs,
+        params={**params, "collection": collection}, parent_run_id=parent_run_id,
+    )
+
+
+MAX_RUN_ID_CHARS = 200
+
+
+def normalize_parent_run_id(value: object) -> Optional[str]:
+    """The optional ``parent_run_id`` a caller sent: the workflow run that launched this
+    generation. Blank means none (a multipart form sends "" rather than omitting it)."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    if len(value) > MAX_RUN_ID_CHARS:
+        raise HTTPException(400, "parent_run_id is too long")
+    return value
+
+
+def _record_job_end(job_id: str) -> None:
+    """Copy a job's final state into its history record once its worker returned."""
+    job = _jobs.get(job_id)
+    if job is None or job.status not in ("done", "error", "cancelled"):
+        run_history.finish(job_id, "error", error="Generation ended without a final status")
+        return
+    output_path = job.output_url.removeprefix("/workspace/") if job.output_url else None
+    run_history.finish(job_id, job.status, error=job.error, output_path=output_path)
 
 
 def sanitize_collection(collection: str) -> str:
@@ -109,9 +150,11 @@ async def generate_from_image(
     enable_texture: bool = Form(False),
     texture_resolution: int = Form(1024),
     params: str = Form("{}"),
+    parent_run_id: Optional[str] = Form(None),
 ):
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(400, "File must be an image")
+    parent_run_id = normalize_parent_run_id(parent_run_id)
 
     if remesh not in VALID_REMESH_MODES:
         raise HTTPException(400, "remesh must be 'quad', 'triangle', or 'none'")
@@ -146,6 +189,10 @@ async def generate_from_image(
     _jobs[job_id] = job
     _cancel_events[job_id] = threading.Event()
 
+    record_job_filed(
+        job_id, model_id, {"image": image.filename}, full_params, collection, parent_run_id
+    )
+
     background_tasks.add_task(
         _run_generation, job_id, image_bytes, full_params, collection, output_kind, model_id
     )
@@ -159,6 +206,7 @@ async def generate_from_artifact(
     background_tasks: BackgroundTasks,
 ):
     """Queue a validated typed artifact without serializing it as image bytes."""
+    parent_run_id = normalize_parent_run_id(request.parent_run_id)
     try:
         manifest = generator_registry.get_manifest(request.model_id)
     except (KeyError, ValueError) as exc:
@@ -172,9 +220,13 @@ async def generate_from_artifact(
         raise HTTPException(400, str(exc)) from exc
 
     params = {k: v for k, v in request.params.items() if k not in RESERVED_ARTIFACT_PARAMS}
-    params["scene_manifest_path"] = str(artifact.path)
     collection = sanitize_collection(request.collection)
     job_id = str(uuid.uuid4())
+    record_job_filed(
+        job_id, request.model_id, {request.input_kind: request.input_path}, params, collection,
+        parent_run_id,
+    )
+    params["scene_manifest_path"] = str(artifact.path)
     _purge_old_jobs()
     _jobs[job_id] = JobStatus(job_id=job_id, status="pending", progress=0)
     _cancel_events[job_id] = threading.Event()
@@ -198,17 +250,30 @@ async def cancel_job(job_id: str):
     job = _jobs.get(job_id)
     if not job:
         raise HTTPException(404, f"Job {job_id} not found")
+    if job.status not in ("pending", "running"):
+        # The job already ended: its worker now holds the warm model or another
+        # job's generation, and there is nothing left to stop.
+        return {"cancelled": False}
     _cancelled.add(job_id)
     if job_id in _cancel_events:
         _cancel_events[job_id].set()
-    if job.status in ("pending", "running"):
-        job.status = "cancelled"
-        _completed_at[job_id] = time.monotonic()
+    job.status = "cancelled"
+    _completed_at[job_id] = time.monotonic()
+    run_history.finish(job_id, "cancelled")
     # Kill only the subprocess bound to this job. A queued cancellation must not
-    # terminate whichever earlier job currently owns the active generator.
+    # terminate whichever earlier job currently owns the active generator, and an
+    # unpinned job runs beside the pinned worker, so it can share its generator:
+    # then the cancel event is the only safe way to stop it.
     try:
         gen = _job_generators.get(job_id)
-        if gen is not None and hasattr(gen, "_proc") and gen._proc and gen._proc.poll() is None:
+        shared = any(
+            other_id != job_id and bound is gen
+            for other_id, bound in _job_generators.items()
+        )
+        if (
+            gen is not None and not shared
+            and hasattr(gen, "_proc") and gen._proc and gen._proc.poll() is None
+        ):
             gen._proc.kill()
             gen._loaded = False
             gen._proc = None
@@ -262,6 +327,8 @@ async def _run_generation(
             job.status = "cancelled"
             _completed_at[job_id] = time.monotonic()
         raise
+    finally:
+        _record_job_end(job_id)
 
 
 def _run_generation_impl(
@@ -277,6 +344,7 @@ def _run_generation_impl(
     job = _jobs[job_id]
     job.status = "running"
     job.step = None
+    run_history.mark_running(job_id)
 
     def progress_cb(pct: int, step: str = "") -> None:
         # Monotonic: the loading phase walks the bar up on a background thread and
@@ -286,6 +354,7 @@ def _run_generation_impl(
             job.progress = pct
         if step:
             job.step = step
+            run_history.step(job_id, step)
 
     try:
         # Refuse a selected weight variant that is not installed before loading
@@ -385,7 +454,8 @@ def _run_generation_impl(
         except UnicodeEncodeError:
             print(msg.encode("ascii", errors="replace").decode("ascii"))
         job.status = "error"
-        job.error  = tb.strip()
+        # Actionable errors reach the user as-is; the full traceback stays in the log.
+        job.error  = str(exc) if isinstance(exc, IncompleteModelWeightsError) else tb.strip()
         _completed_at[job_id] = time.monotonic()
     finally:
         _job_generators.pop(job_id, None)

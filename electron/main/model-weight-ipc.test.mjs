@@ -61,7 +61,7 @@ function fixture(t) {
     if (name === './model-weight-operations') return realOperations
     if (name === './settings-store') return { getSettings: () => settings, setSettings: (_, patch) => Object.assign(settings, patch) }
     if (name === './builtin-sync') return { getBuiltinExtensionsDir: () => join(root, 'builtin') }
-    if (name === './python-bridge') return { API_BASE_URL: 'http://test' }
+    if (name === './python-bridge') return { apiBaseUrl: () => 'http://test' }
     if (name === './model-downloader') return {
       downloadModelSourcesFromHF: async (...args) => { calls.push(args[0]); await hooks.download(...args) },
     }

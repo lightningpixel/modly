@@ -14,6 +14,7 @@ import type {
   AssetLibrarySourceScope,
 } from '../../src/shared/types/assetLibrary'
 import type { ArtifactProvenance } from '../../src/shared/types/artifacts'
+import { findCachedThumbnailUrl, pruneThumbnails } from './asset-thumbnail-cache'
 
 const WINDOWS_ABSOLUTE_PATH = /^[a-zA-Z]:[\\/]/
 const ENCODED_ESCAPE_PATTERN = /%2e|%2f|%5c/i
@@ -44,6 +45,8 @@ export interface NormalizedWorkspaceAssetPath {
 
 export interface WorkspaceAssetLibraryRequest {
   workspaceDir: string
+  /** Modly-owned thumbnail cache; when set, renderable entries carry their cached `thumbnailUrl`. */
+  thumbnailsDir?: string
 }
 
 export interface WorkspaceAssetLibraryReadRequest extends WorkspaceAssetLibraryRequest {
@@ -67,6 +70,7 @@ export interface IpcMainLike {
 export interface WorkspaceAssetLibraryIpcDeps {
   ipcMain: IpcMainLike
   getWorkspaceDir: () => string
+  thumbnailsDir?: string
 }
 
 function libraryError(code: AssetLibraryError['code'], message: string): AssetLibraryError {
@@ -223,11 +227,14 @@ async function hasRigMetadata(absolutePath: string): Promise<boolean> {
   }
 }
 
-async function buildEntry(workspaceDir: string, workspacePath: string): Promise<AssetLibraryEntry> {
+async function buildEntry(workspaceDir: string, workspacePath: string, thumbnailsDir?: string): Promise<AssetLibraryEntry> {
   const { absolutePath } = normalizeWorkspaceAssetPath(workspaceDir, workspacePath)
   const stats = await stat(absolutePath)
   const classification = classifyAssetLibraryCandidate({ workspacePath, hasRigMetadata: await hasRigMetadata(absolutePath) })
   const metadata = await readMetadata(workspaceDir, workspacePath, absolutePath)
+  const thumbnailUrl = thumbnailsDir && classification.previewKind === '3d-model'
+    ? await findCachedThumbnailUrl({ workspaceDir, thumbnailsDir }, workspacePath, stats)
+    : undefined
   const manifestCapability = metadata.manifestWorkspacePath ? manifestCapabilityFor(metadata.manifestWorkspacePath) : undefined
   return {
     id: `library:${workspacePath}`,
@@ -247,6 +254,7 @@ async function buildEntry(workspaceDir: string, workspacePath: string): Promise<
     nonOpenableReason: classification.nonOpenableReason,
     createdAt: (stats.birthtime.getTime() > 0 ? stats.birthtime : stats.mtime).toISOString(),
     updatedAt: stats.mtime.toISOString(),
+    thumbnailUrl,
   }
 }
 
@@ -278,7 +286,7 @@ async function collectFiles(workspaceDir: string, rootName: typeof ALLOWED_ROOTS
 export async function listWorkspaceAssetLibrary(request: WorkspaceAssetLibraryRequest): Promise<AssetLibraryListResult> {
   try {
     const workspacePaths = (await Promise.all(ALLOWED_ROOTS.map((root) => collectFiles(request.workspaceDir, root)))).flat().sort()
-    const entries = await Promise.all(workspacePaths.map((workspacePath) => buildEntry(request.workspaceDir, workspacePath)))
+    const entries = await Promise.all(workspacePaths.map((workspacePath) => buildEntry(request.workspaceDir, workspacePath, request.thumbnailsDir)))
     return { success: true, entries: entries.filter((entry) => entry.state !== 'unsupported') }
   } catch (error) {
     return { success: false, error: libraryError('list-failed', error instanceof Error ? error.message : String(error)) }
@@ -304,7 +312,7 @@ export async function readWorkspaceAssetLibraryEntry(request: WorkspaceAssetLibr
     const normalized = normalizeWorkspaceAssetPath(request.workspaceDir, request.workspacePath)
     const sourceValidation = await validateRequestedSource(request.workspaceDir, normalized.workspacePath, request.sourceWorkspacePath)
     if (!sourceValidation.success) return { success: false, error: sourceValidation.error }
-    const entry = await buildEntry(request.workspaceDir, normalized.workspacePath)
+    const entry = await buildEntry(request.workspaceDir, normalized.workspacePath, request.thumbnailsDir)
     return { success: true, entry, preview: await previewEntry(normalized.absolutePath, entry) }
   } catch (error) {
     return { success: false, error: libraryError('unsafe-path', error instanceof Error ? error.message : String(error)) }
@@ -353,15 +361,20 @@ function readPayloadRequest(payload: unknown): { workspacePath?: string, sourceW
 }
 
 export function registerWorkspaceAssetLibraryIpcHandlers(deps: WorkspaceAssetLibraryIpcDeps): void {
-  deps.ipcMain.handle('workspace:library:list', async () => listWorkspaceAssetLibrary({ workspaceDir: deps.getWorkspaceDir() }))
+  deps.ipcMain.handle('workspace:library:list', async () => {
+    const result = await listWorkspaceAssetLibrary({ workspaceDir: deps.getWorkspaceDir(), thumbnailsDir: deps.thumbnailsDir })
+    // Listing is the natural sweep point: drop thumbnails of deleted or changed meshes in the background.
+    if (deps.thumbnailsDir) void pruneThumbnails(deps.thumbnailsDir).catch(() => undefined)
+    return result
+  })
   deps.ipcMain.handle('workspace:library:read', async (_event, payload) => {
     const { workspacePath, sourceWorkspacePath } = readPayloadRequest(payload)
     if (!workspacePath) return { success: false, error: libraryError('invalid-request', 'workspacePath is required.') }
-    return readWorkspaceAssetLibraryEntry({ workspaceDir: deps.getWorkspaceDir(), workspacePath, sourceWorkspacePath })
+    return readWorkspaceAssetLibraryEntry({ workspaceDir: deps.getWorkspaceDir(), thumbnailsDir: deps.thumbnailsDir, workspacePath, sourceWorkspacePath })
   })
   deps.ipcMain.handle('workspace:library:open', async (_event, payload) => {
     const { workspacePath, sourceWorkspacePath } = readPayloadRequest(payload)
     if (!workspacePath) return { success: false, error: libraryError('invalid-request', 'workspacePath is required.') }
-    return openWorkspaceAssetLibraryEntry({ workspaceDir: deps.getWorkspaceDir(), workspacePath, sourceWorkspacePath })
+    return openWorkspaceAssetLibraryEntry({ workspaceDir: deps.getWorkspaceDir(), thumbnailsDir: deps.thumbnailsDir, workspacePath, sourceWorkspacePath })
   })
 }

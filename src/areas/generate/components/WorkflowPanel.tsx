@@ -14,14 +14,12 @@ import { useWaitButton } from '@areas/workflows/useWaitButton'
 import { buildAllWorkflowExtensions, getWorkflowExtension } from '@areas/workflows/mockExtensions'
 import { validateWorkflowPreflight } from '@areas/workflows/preflight'
 import { mimeFromPath } from '@areas/workflows/nodes/imageUtils'
+import { SUPPORTED_IMAGE_TYPES, saveImageToWorkspace, takePastedImage, useImageHandoff } from '@shared/utils/imageInput'
 import type { WorkflowExtension } from '@areas/workflows/mockExtensions'
 import type { Workflow, WFNode, WFEdge, ParamSchema } from '@shared/types/electron.d'
 import { PICKER_LABELS, openParamPicker, resolvePickerIntent } from '@shared/utils/paramPicker'
 import { FloatInput, IntInput, PickerIcon } from '@shared/components/ui'
 import { isMissingWeightVariant, withWeightVariantAvailability } from '@shared/utils/weightVariants'
-import ChatPanel from './ChatPanel'
-
-type PanelMode = 'basic' | 'chat'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -30,8 +28,6 @@ const TYPE_COLOR: Record<string, string> = {
   mesh:  '#a78bfa',
   text:  '#fbbf24',
 }
-
-const SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'])
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -158,7 +154,19 @@ function WorkflowDropdown({ workflows, value, onChange }: {
 
 type PatchFn = (nodeId: string, patch: Record<string, unknown>) => void
 
-function ImageParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: FlowNode[]; onPatch: PatchFn }) {
+/** The image node params for a file on disk: its path and an inline preview. */
+async function readImageParams(path: string): Promise<{ filePath: string, preview: string }> {
+  const base64 = await window.electron.fs.readFileBase64(path)
+  return { filePath: path, preview: `data:${mimeFromPath(path)};base64,${base64}` }
+}
+
+function ImageParamRow({ nodeId, nodes, onPatch, pasteTarget = false }: {
+  nodeId: string
+  nodes: FlowNode[]
+  onPatch: PatchFn
+  /** Takes images pasted with Ctrl+V (only one row of the panel does). */
+  pasteTarget?: boolean
+}) {
   const node     = nodes.find((n) => n.id === nodeId)
   const data     = node?.data as { params: Record<string, unknown> } | undefined
   const preview  = data?.params.preview as string | undefined
@@ -169,10 +177,9 @@ function ImageParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: Flow
     const request = ++loadRequest.current
     if (!path) return
     try {
-      const base64 = await window.electron.fs.readFileBase64(path)
+      const image = await readImageParams(path)
       if (request !== loadRequest.current) return
-      const src = `data:${mimeFromPath(path)};base64,${base64}`
-      onPatch(nodeId, { params: { ...(data?.params ?? {}), filePath: path, preview: src } })
+      onPatch(nodeId, { params: { ...(data?.params ?? {}), ...image } })
     } catch {
       if (request === loadRequest.current) showToast('Unable to load the selected image')
     }
@@ -181,6 +188,23 @@ function ImageParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: Flow
   const browse = useCallback(async () => {
     await applyImagePath(await window.electron.fs.selectImage())
   }, [applyImagePath])
+
+  // Ctrl+V outside text fields: the clipboard image is saved to the workspace
+  // (the node needs a file path), then loaded like a browsed one.
+  const applyRef = useRef(applyImagePath)
+  applyRef.current = applyImagePath
+  useEffect(() => {
+    if (!pasteTarget) return
+    const onPaste = (event: ClipboardEvent) => {
+      const file = takePastedImage(event)
+      if (!file) return
+      saveImageToWorkspace(file, 'pasted-image')
+        .then((path) => applyRef.current(path))
+        .catch((err: unknown) => showToast(err instanceof Error ? err.message : 'Unable to paste the image'))
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+  }, [pasteTarget, showToast])
 
   return (
     <div
@@ -218,6 +242,7 @@ function ImageParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: Flow
             <polyline points="21 15 16 10 5 21"/>
           </svg>
           <span className="text-[10px] text-zinc-500">Browse image…</span>
+          {pasteTarget && <span className="text-[9px] text-zinc-600">or paste with Ctrl+V</span>}
         </button>
       )}
     </div>
@@ -522,6 +547,25 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
     && (n.data as { showInGenerate?: boolean }).showInGenerate === true,
   )
 
+  // An image handed over by another page (Home) goes into the first image input
+  // shown here, exactly as if it had been browsed in this panel.
+  const pendingImage = useImageHandoff((s) => s.pendingPath)
+  // Ctrl+V goes to the same input.
+  const pasteTargetId = paramNodes.find((n) => n.type === 'imageNode')?.id
+  useEffect(() => {
+    const path = useImageHandoff.getState().take()
+    if (!path) return
+    const target = paramNodes.find((n) => n.type === 'imageNode')
+    if (!target) {
+      showToast('This workflow has no image input. Pick a workflow with one.')
+      return
+    }
+    readImageParams(path)
+      .then((image) => patchNode(target.id, { params: { ...(target.data.params ?? {}), ...image } }))
+      .catch(() => showToast('Unable to load the selected image'))
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs when an image is handed over; nodes are read at that point
+  }, [pendingImage])
+
   const handleGenerate = useCallback(() => {
     if (firstPreflightIssue) {
       showToast(firstPreflightIssue)
@@ -549,7 +593,7 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
           const isLast = i === paramNodes.length - 1
           return (
             <div key={node.id}>
-              {node.type === 'imageNode' && <ImageParamRow nodeId={node.id} nodes={nodes} onPatch={patchNode} />}
+              {node.type === 'imageNode' && <ImageParamRow nodeId={node.id} nodes={nodes} onPatch={patchNode} pasteTarget={node.id === pasteTargetId} />}
               {node.type === 'textNode'  && <TextParamRow  nodeId={node.id} nodes={nodes} onPatch={patchNode} />}
               {node.type === 'meshNode'  && <MeshParamRow  nodeId={node.id} nodes={nodes} onPatch={patchNode} />}
               {node.type === 'waitNode'  && <WaitParamRow  nodeId={node.id} />}
@@ -610,30 +654,6 @@ function EmbeddedCanvas({ workflow, allExtensions }: {
   )
 }
 
-// ─── Mode toggle ──────────────────────────────────────────────────────────────
-
-function ModeToggle({ mode, onChange }: { mode: PanelMode; onChange: (m: PanelMode) => void }): JSX.Element {
-  return (
-    <div className="shrink-0 px-3 pt-3 pb-2.5">
-      <div className="flex bg-zinc-900 border border-zinc-800 rounded-lg p-0.5">
-        {(['basic', 'chat'] as PanelMode[]).map((m) => (
-          <button
-            key={m}
-            onClick={() => onChange(m)}
-            className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-colors capitalize ${
-              mode === m
-                ? 'bg-zinc-700 text-zinc-100 shadow-sm'
-                : 'text-zinc-500 hover:text-zinc-300'
-            }`}
-          >
-            {m}
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
-
 // ─── Main panel ───────────────────────────────────────────────────────────────
 
 export default function WorkflowPanel() {
@@ -642,7 +662,6 @@ export default function WorkflowPanel() {
   const loadExtensions         = useExtensionsStore((s) => s.loadExtensions)
   const { navigate }           = useNavStore()
   const [selectedId, setSelectedId] = useState<string | null>(activeId)
-  const [mode, setMode]             = useState<PanelMode>('basic')
 
   const allExtensions = useMemo(
     () => buildAllWorkflowExtensions(modelExtensions, processExtensions),
@@ -667,56 +686,44 @@ export default function WorkflowPanel() {
   return (
     <div className="flex flex-col flex-1 min-h-0">
 
-      {/* Mode toggle */}
-      <ModeToggle mode={mode} onChange={setMode} />
-
-      {mode === 'chat' ? (
-        <>
-          <div className="shrink-0 h-px bg-zinc-800" />
-          <ChatPanel />
-        </>
-      ) : (
-        <>
-          {/* Header */}
-          <div className="shrink-0 px-4 pt-2.5 pb-3 border-b border-zinc-800 flex flex-col gap-3">
-            <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-500">Workflow</h2>
-            <div className="flex items-center gap-2">
-              <div className="flex-1 min-w-0">
-                <WorkflowDropdown workflows={workflows} value={selectedId} onChange={setSelectedId} />
-              </div>
-              {selectedId && (
-                <button
-                  onClick={() => { useWorkflowsStore.getState().setActive(selectedId!); navigate('workflows') }}
-                  title="Edit workflow"
-                  className="shrink-0 p-1.5 rounded-lg border border-zinc-700 bg-zinc-800/60 text-zinc-400
-                             hover:text-zinc-100 hover:bg-zinc-700 hover:border-zinc-600 transition-colors"
-                >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                  </svg>
-                </button>
-              )}
-            </div>
+      {/* Header */}
+      <div className="shrink-0 px-4 pt-3 pb-3 border-b border-zinc-800 flex flex-col gap-3">
+        <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-500">Workflow</h2>
+        <div className="flex items-center gap-2">
+          <div className="flex-1 min-w-0">
+            <WorkflowDropdown workflows={workflows} value={selectedId} onChange={setSelectedId} />
           </div>
-
-          {/* Canvas or empty state */}
-          {workflow ? (
-            <ReactFlowProvider>
-              <EmbeddedCanvas
-                key={workflow.id}
-                workflow={workflow}
-                allExtensions={allExtensions}
-              />
-            </ReactFlowProvider>
-          ) : (
-            <div className="flex-1 flex items-center justify-center px-6">
-              <p className="text-xs text-zinc-600 text-center leading-relaxed">
-                No workflows yet.<br/>Create one in the Workflows tab.
-              </p>
-            </div>
+          {selectedId && (
+            <button
+              onClick={() => { useWorkflowsStore.getState().setActive(selectedId!); navigate('workflows') }}
+              title="Edit workflow"
+              className="shrink-0 p-1.5 rounded-lg border border-zinc-700 bg-zinc-800/60 text-zinc-400
+                         hover:text-zinc-100 hover:bg-zinc-700 hover:border-zinc-600 transition-colors"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+              </svg>
+            </button>
           )}
-        </>
+        </div>
+      </div>
+
+      {/* Canvas or empty state */}
+      {workflow ? (
+        <ReactFlowProvider>
+          <EmbeddedCanvas
+            key={workflow.id}
+            workflow={workflow}
+            allExtensions={allExtensions}
+          />
+        </ReactFlowProvider>
+      ) : (
+        <div className="flex-1 flex items-center justify-center px-6">
+          <p className="text-xs text-zinc-600 text-center leading-relaxed">
+            No workflows yet.<br/>Create one in the Workflows tab.
+          </p>
+        </div>
       )}
     </div>
   )

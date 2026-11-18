@@ -15,9 +15,13 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast
 import SplatViewer, { type SplatViewerHandle } from './SplatViewer'
 import { useGeneration } from '@shared/hooks/useGeneration'
 import { useAppStore } from '@shared/stores/appStore'
+import { disposeObject, groundPlacement } from '@shared/three/meshScene'
+import { viewScaleFor } from '@shared/three/viewScale'
 import { ViewerToolbar, type ViewMode } from './ViewerToolbar'
 import type { LightSettings, PointLight } from '@shared/stores/appStore'
 import { DEFAULT_LIGHT_SETTINGS } from '@shared/stores/appStore'
+import SculptLayer from '../sculpt/SculptLayer'
+import { useSculptStore } from '../sculpt/sculptStore'
 
 export type GizmoMode = 'translate' | 'rotate' | 'scale'
 
@@ -136,6 +140,35 @@ function CanvasCapture({
 }
 
 // ---------------------------------------------------------------------------
+// CameraRig — reframes the default view when the model's scale changes
+// ---------------------------------------------------------------------------
+
+const DEFAULT_CAMERA_POSITION = new THREE.Vector3(0, 1.5, 4)
+const DEFAULT_NEAR = 0.1
+const DEFAULT_FAR = 1000
+
+function CameraRig({ viewScale }: { viewScale: number }): null {
+  const camera = useThree((s) => s.camera)
+  const controls = useThree((s) => s.controls) as { target?: THREE.Vector3, update?: () => void } | null
+  const applied = useRef(1)
+
+  useEffect(() => {
+    // Only on a change of scale: swapping between unit-sized meshes keeps the
+    // user's camera, as before.
+    if (viewScale === applied.current) return
+    applied.current = viewScale
+    camera.position.copy(DEFAULT_CAMERA_POSITION).multiplyScalar(viewScale)
+    camera.near = DEFAULT_NEAR * viewScale
+    camera.far = DEFAULT_FAR * viewScale
+    camera.updateProjectionMatrix()
+    controls?.target?.set(0, 0, 0)
+    controls?.update?.()
+  }, [viewScale, camera, controls])
+
+  return null
+}
+
+// ---------------------------------------------------------------------------
 // ModelErrorBoundary — catches useGLTF load failures (e.g. 404)
 // ---------------------------------------------------------------------------
 
@@ -190,23 +223,34 @@ function ModelLoadError(): JSX.Element {
 
 interface MeshModelProps {
   url: string
+  /** Workspace URL of the file (currentJob.outputUrl): what sculpt commits patch. */
+  outputUrl: string
   jobId: string
   viewMode: ViewMode
   selected: boolean
+  /** Sculpt mode: clicks paint instead of selecting. */
+  sculpting: boolean
   onStats: (stats: { vertices: number; triangles: number }) => void
+  /** Longest side of the model, in scene units: frames the view. */
+  onSize: (longestSide: number) => void
   onSelect: () => void
   onObject: (obj: THREE.Object3D | null) => void
 }
 
-function MeshModel({ url, jobId, viewMode, selected, onStats, onSelect, onObject }: MeshModelProps): JSX.Element {
-  const extension = url.split('?')[0]?.split('.').pop()?.toLowerCase()
-  const common = { url, jobId, viewMode, selected, onStats, onSelect, onObject }
-  return extension === 'obj' ? <ObjMeshModel {...common} /> : <GltfMeshModel {...common} />
+function MeshModel(props: MeshModelProps): JSX.Element {
+  const extension = props.url.split('?')[0]?.split('.').pop()?.toLowerCase()
+  return extension === 'obj' ? <ObjMeshModel {...props} /> : <GltfMeshModel {...props} />
 }
 
 function GltfMeshModel(props: MeshModelProps): JSX.Element {
-  const { scene } = useGLTF(props.url)
-  return <SceneMeshModel {...props} scene={scene} loaderType="gltf" />
+  const { scene, parser } = useGLTF(props.url)
+  return (
+    <>
+      <SceneMeshModel {...props} scene={scene} loaderType="gltf" />
+      {/* Keyed by URL: a new mesh file starts a new sculpt session. */}
+      <SculptLayer key={props.url} scene={scene} parser={parser} outputUrl={props.outputUrl} />
+    </>
+  )
 }
 
 function ObjMeshModel(props: MeshModelProps): JSX.Element {
@@ -218,7 +262,9 @@ function SceneMeshModel({
   url,
   viewMode,
   selected,
+  sculpting,
   onStats,
+  onSize,
   onSelect,
   onObject,
   scene,
@@ -244,13 +290,7 @@ function SceneMeshModel({
       } else {
         useGLTF.clear(url)
       }
-      scene.traverse((child) => {
-        if (child instanceof THREE.Mesh) {
-          child.geometry.dispose()
-          const materials = Array.isArray(child.material) ? child.material : [child.material]
-          materials.forEach((m: THREE.Material) => m.dispose())
-        }
-      })
+      disposeObject(scene)
     }
   }, [loaderType, scene, url])
 
@@ -277,15 +317,11 @@ function SceneMeshModel({
   // Centre the mesh on the grid. Runs only on first load / model change — never
   // on plain re-renders, so a live gizmo transform is not silently overwritten.
   useEffect(() => {
-    // Clear any cached transform before measuring (useGLTF may reuse a scene
+    // Clears any cached transform before measuring (useGLTF may reuse a scene
     // that still carries an earlier gizmo pose).
-    scene.position.set(0, 0, 0)
-    scene.rotation.set(0, 0, 0)
-    scene.scale.set(1, 1, 1)
-    const box = new THREE.Box3().setFromObject(scene)
-    const center = new THREE.Vector3()
-    box.getCenter(center)
-    scene.position.set(-center.x, -box.min.y, -center.z)
+    const placement = groundPlacement(scene)
+    scene.position.copy(placement.offset)
+    onSize(Math.max(placement.size.x, placement.size.y, placement.size.z))
 
     // Compute stats
     let vertices = 0
@@ -351,7 +387,7 @@ function SceneMeshModel({
     <Select enabled={selected}>
       <primitive
         object={scene}
-        onClick={(e: { stopPropagation: () => void }) => { e.stopPropagation(); onSelect() }}
+        onClick={(e: { stopPropagation: () => void }) => { e.stopPropagation(); if (!sculpting) onSelect() }}
       />
     </Select>
   )
@@ -944,6 +980,13 @@ export default function Viewer3D({
   const splatRef = useRef<SplatViewerHandle | null>(null)
 
   const [meshObject, setMeshObject] = useState<THREE.Object3D | null>(null)
+  // Camera, grid and zoom limits follow the model's size (see viewScaleFor).
+  const [viewScale, setViewScale] = useState(1)
+  const handleModelSize = useCallback((longestSide: number) => setViewScale(viewScaleFor(longestSide)), [])
+
+  const sculpting = useSculptStore((s) => s.active)
+  const sculptStatus = useSculptStore((s) => s.status)
+  const sculptError = useSculptStore((s) => s.error)
 
   // Local gizmo-transform history (live TRS), undoable with Ctrl+Z. A snapshot
   // is taken when a drag starts and committed on release only if it changed.
@@ -969,10 +1012,16 @@ export default function Viewer3D({
   // Reset view state when model changes
   useEffect(() => {
     setSelected(false)
-    setViewMode('solid')
+    // A sculpt commit swaps in the patched file: keep the sculptor's view mode.
+    if (!useSculptStore.getState().active) setViewMode('solid')
     setStoreMeshStats(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reset only when the model changes; setters are stable
   }, [modelUrl])
+
+  // Sculpt mode owns the left button: no selection, so no transform gizmo.
+  useEffect(() => {
+    if (sculpting) setSelected(false)
+  }, [sculpting, setSelected])
 
   // Clear the shared selection when the viewer unmounts — the store would
   // otherwise keep it set and flash a stale selection on the next mount.
@@ -983,7 +1032,7 @@ export default function Viewer3D({
     const handler = (e: KeyboardEvent) => {
       if (e.key !== 'Delete') return
       if (document.activeElement instanceof HTMLInputElement) return
-      if (!selected) return
+      if (!selected || useSculptStore.getState().active) return
       setCurrentJob(null)
       setSelected(false)
     }
@@ -1116,7 +1165,8 @@ export default function Viewer3D({
             <Lightformer intensity={0.3 * (lightSettings.envIntensity ?? DEFAULT_LIGHT_SETTINGS.envIntensity)} position={[4, 1, -4]} scale={6} />
           </Environment>
 
-          <gridHelper args={[10, 20, '#3f3f46', '#27272a']} />
+          <gridHelper args={[10, 20, '#3f3f46', '#27272a']} scale={viewScale} />
+          <CameraRig viewScale={viewScale} />
 
           {modelUrl && currentJob ? (
             <Selection enabled={selected}>
@@ -1126,10 +1176,13 @@ export default function Viewer3D({
                 <directionalLight position={[-4, 2, -4]} color={lightSettings.fillColor} intensity={lightSettings.fillIntensity} />
                 <MeshModel
                   url={modelUrl}
+                  outputUrl={outputUrl}
                   jobId={currentJob.id}
                   viewMode={viewMode}
                   selected={selected}
+                  sculpting={sculpting}
                   onStats={setStoreMeshStats}
+                  onSize={handleModelSize}
                   onSelect={handleMeshSelect}
                   onObject={setMeshObject}
                 />
@@ -1154,13 +1207,13 @@ export default function Viewer3D({
             />
           ))}
 
-          {selected && meshObject && gizmoMode === 'translate' && (
+          {!sculpting && selected && meshObject && gizmoMode === 'translate' && (
             <TranslateGizmo object={meshObject} onDragStart={handleGizmoDragStart} onDragEnd={handleGizmoDragEnd} />
           )}
-          {selected && meshObject && gizmoMode === 'rotate' && (
+          {!sculpting && selected && meshObject && gizmoMode === 'rotate' && (
             <RotateGizmo object={meshObject} onDragStart={handleGizmoDragStart} onDragEnd={handleGizmoDragEnd} />
           )}
-          {selected && meshObject && gizmoMode === 'scale' && (
+          {!sculpting && selected && meshObject && gizmoMode === 'scale' && (
             <ScaleGizmo object={meshObject} onDragStart={handleGizmoDragStart} onDragEnd={handleGizmoDragEnd} />
           )}
 
@@ -1169,8 +1222,8 @@ export default function Viewer3D({
             enablePan
             enableZoom
             enableRotate
-            minDistance={0.5}
-            maxDistance={20}
+            minDistance={0.5 * viewScale}
+            maxDistance={20 * viewScale}
             autoRotate={autoRotate}
             autoRotateSpeed={1.5}
             enableDamping
@@ -1204,11 +1257,31 @@ export default function Viewer3D({
           </div>
         )}
 
+        {/* Sculpt status: preparing / saving / last error */}
+        {sculpting && (sculptStatus !== 'idle' || sculptError) && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 pointer-events-none">
+            {sculptStatus !== 'idle' ? (
+              <p role="status" className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-900/90 border border-zinc-700/60 text-xs text-zinc-200">
+                <svg className="animate-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                </svg>
+                {sculptStatus === 'preparing' ? 'Preparing mesh…' : 'Saving sculpt…'}
+              </p>
+            ) : (
+              <p role="alert" className="max-w-md px-3 py-1.5 rounded-lg bg-red-950/90 border border-red-500/40 text-xs text-red-200">
+                {sculptError}
+              </p>
+            )}
+          </div>
+        )}
+
         {/* Bottom-right hint */}
         {modelUrl && (
           <div className="absolute bottom-4 right-4 pointer-events-none">
             <p className="text-xs text-zinc-600">
-              {selected
+              {sculpting
+                ? <>Drag on the mesh to sculpt &bull; drag outside to orbit &bull; <span className="text-zinc-500">Esc</span> to finish</>
+                : selected
                 ? <>Click mesh to select &bull; <span className="text-zinc-500">Delete</span> to remove</>
                 : 'Drag to rotate \u2022 Scroll to zoom'
               }

@@ -14,7 +14,7 @@ metadata:
 
 ## Overview
 
-Modly exposes a local API at `http://127.0.0.1:8765` while the official desktop app is running. The stdlib-only CLI at `tools/modly-cli/agent.py` is an agent helper over the canonical automation contract:
+Modly exposes a local API at `http://127.0.0.1:8765` while the official desktop app is running. If another program holds that port, the app uses the next free one and writes it to `api-port` in its user data folder (`%APPDATA%/Modly`, `~/Library/Application Support/Modly`, `~/.config/Modly`); the CLI reads it, and `MODLY_API_URL` overrides both. The stdlib-only CLI at `tools/modly-cli/agent.py` is an agent helper over the canonical automation contract:
 
 - `health`
 - `model`
