@@ -127,7 +127,19 @@ class FramingOpsTests(unittest.TestCase):
                 self.assertEqual(_visible_box(framed), (0, 0, 512, 512))
 
     def test_crop_edges_are_clamped(self) -> None:
-        self.assertEqual(image_ops_registry.resolve_params("crop", {"left": 90})["left"], 45)
+        self.assertEqual(image_ops_registry.resolve_params("crop", {"left": 150})["left"], 100.0)
+
+    def test_crop_accepts_fractional_percentages(self) -> None:
+        path = self._save(Image.new("RGB", (1000, 500), (10, 20, 30)), "wide.png")
+        result = image_ops_registry.run("crop", path, {"left": 12.5, "top": 10.2}, self.context)
+        self.assertEqual(_open(result.path).size, (875, 449))
+
+    def test_crop_refuses_an_empty_box(self) -> None:
+        path = self._save(Image.new("RGB", (100, 100), (10, 20, 30)), "sq.png")
+        for params in ({"left": 60, "right": 40}, {"top": 60, "bottom": 40}):
+            with self.subTest(params=params):
+                with self.assertRaises(ImageOpInputError):
+                    image_ops_registry.run("crop", path, params, self.context)
 
     def test_auto_frame_centers_an_off_center_cutout(self) -> None:
         cutout = Image.new("RGBA", (400, 300), (0, 0, 0, 0))

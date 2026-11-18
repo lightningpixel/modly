@@ -102,11 +102,11 @@ def _edge_param(param_id: str, label: str) -> dict[str, Any]:
     return {
         "id": param_id,
         "label": label,
-        "type": "int",
-        "default": 0,
-        "min": 0,
-        "max": 45,
-        "step": 1,
+        "type": "float",
+        "default": 0.0,
+        "min": 0.0,
+        "max": 100.0,
+        "step": 0.1,
         "tooltip": f"Percentage of the image cut off the {param_id} edge.",
     }
 
@@ -114,10 +114,11 @@ def _edge_param(param_id: str, label: str) -> dict[str, Any]:
 def crop(input_path: Path, params: Mapping[str, Any], context: ImageOpContext) -> ImageOpResult:
     image = load_image(input_path)
     image = image.convert("RGBA" if _has_alpha(image) else "RGB")
-    box = framing.crop_box(
-        image.width, image.height,
-        params.get("left", 0), params.get("top", 0), params.get("right", 0), params.get("bottom", 0),
-    )
+    left, top = params.get("left", 0), params.get("top", 0)
+    right, bottom = params.get("right", 0), params.get("bottom", 0)
+    if left + right >= 100 or top + bottom >= 100:
+        raise ImageOpInputError("Nothing left to crop: the frame is empty.")
+    box = framing.crop_box(image.width, image.height, left, top, right, bottom)
     cropped = image.crop(box)
     (out_path,) = write_new_files(context.images_dir, sanitize_stem(input_path.name), [("crop", png_bytes(cropped))])
     return ImageOpResult(path=out_path, details={"width": cropped.width, "height": cropped.height, "box": list(box)})

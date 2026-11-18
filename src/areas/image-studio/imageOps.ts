@@ -212,3 +212,35 @@ export function notReadyMissing(err: unknown): SetupStep[] | null {
   if (!detail || typeof detail !== 'object' || (detail as { code?: unknown }).code !== 'not_ready') return null
   return knownSteps((detail as { missing?: unknown }).missing)
 }
+
+// ─── Keyboard ─────────────────────────────────────────────────────────────────
+
+/** Input types that take no typing: a shortcut key pressed on one still belongs to the page. */
+const NON_TEXT_INPUTS = new Set(['button', 'checkbox', 'radio', 'range', 'reset', 'submit', 'image', 'color', 'file'])
+
+/** Whether a key event's target is a field the user types in (page shortcuts must not fire there). Duck-typed so it runs without a DOM. */
+export function isTextField(target: EventTarget | null): boolean {
+  if (!target || typeof target !== 'object') return false
+  const el = target as { tagName?: unknown, type?: unknown, isContentEditable?: unknown }
+  if (el.isContentEditable === true) return true
+  const tag = typeof el.tagName === 'string' ? el.tagName.toUpperCase() : ''
+  if (tag === 'TEXTAREA' || tag === 'SELECT') return true
+  if (tag !== 'INPUT') return false
+  const type = typeof el.type === 'string' ? el.type.toLowerCase() : 'text'
+  return !NON_TEXT_INPUTS.has(type)
+}
+
+/** Tags whose Enter/Space key already does something (activates, follows, submits, toggles). */
+const INTERACTIVE_TAGS = new Set(['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'SUMMARY'])
+const INTERACTIVE_ROLES = new Set(['button', 'link', 'checkbox', 'radio', 'switch', 'tab', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'combobox', 'textbox', 'slider', 'spinbutton'])
+
+/** Whether a key event's target is a control that handles Enter itself, so a page-wide Enter shortcut must leave it alone. Duck-typed so it runs without a DOM. */
+export function isInteractive(target: EventTarget | null): boolean {
+  if (isTextField(target)) return true
+  if (!target || typeof target !== 'object') return false
+  const el = target as { tagName?: unknown, getAttribute?: unknown }
+  const tag = typeof el.tagName === 'string' ? el.tagName.toUpperCase() : ''
+  if (INTERACTIVE_TAGS.has(tag)) return true
+  const role = typeof el.getAttribute === 'function' ? (el.getAttribute as (name: string) => unknown).call(target, 'role') : null
+  return typeof role === 'string' && INTERACTIVE_ROLES.has(role.toLowerCase())
+}

@@ -8,6 +8,8 @@ import {
   createRunLock,
   failInstall,
   isOutsideWorkspace,
+  isInteractive,
+  isTextField,
   modelViewCaption,
   notReadyMissing,
   opCopy,
@@ -180,4 +182,34 @@ test('isOutsideWorkspace recognises only the 403 outside_workspace', () => {
   assert.equal(isOutsideWorkspace({ response: { status: 403, data: { detail: 'Forbidden' } } }), false)
   assert.equal(isOutsideWorkspace({ response: { status: 400, data: { detail: { code: 'outside_workspace' } } } }), false)
   assert.equal(isOutsideWorkspace(new Error('boom')), false)
+})
+
+// ─── Keyboard focus ───────────────────────────────────────────────────────────
+
+test('isTextField is true only where typing goes', () => {
+  const target = (stub: object) => stub as unknown as EventTarget
+  assert.equal(isTextField(target({ tagName: 'INPUT', type: 'number' })), true)
+  assert.equal(isTextField(target({ tagName: 'TEXTAREA' })), true)
+  assert.equal(isTextField(target({ tagName: 'SELECT' })), true)
+  assert.equal(isTextField(target({ tagName: 'DIV', isContentEditable: true })), true)
+  assert.equal(isTextField(target({ tagName: 'INPUT', type: 'checkbox' })), false)
+  assert.equal(isTextField(target({ tagName: 'INPUT', type: 'range' })), false)
+  assert.equal(isTextField(target({ tagName: 'BUTTON' })), false)
+  assert.equal(isTextField(null), false)
+})
+
+test('isInteractive is true on controls that handle Enter themselves', () => {
+  const target = (stub: object) => stub as unknown as EventTarget
+  const withRole = (role: string | null) => target({ tagName: 'DIV', getAttribute: (name: string) => (name === 'role' ? role : null) })
+  assert.equal(isInteractive(target({ tagName: 'BUTTON' })), true)
+  assert.equal(isInteractive(target({ tagName: 'a' })), true)
+  assert.equal(isInteractive(target({ tagName: 'SELECT' })), true)
+  assert.equal(isInteractive(target({ tagName: 'INPUT', type: 'checkbox' })), true)
+  assert.equal(isInteractive(target({ tagName: 'INPUT', type: 'number' })), true)
+  assert.equal(isInteractive(target({ tagName: 'DIV', isContentEditable: true })), true)
+  assert.equal(isInteractive(withRole('button')), true)
+  assert.equal(isInteractive(withRole('Link')), true)
+  assert.equal(isInteractive(withRole(null)), false)
+  assert.equal(isInteractive(target({ tagName: 'BODY' })), false)
+  assert.equal(isInteractive(null), false)
 })
