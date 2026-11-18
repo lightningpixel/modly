@@ -76,18 +76,6 @@ export const PAGES = [
     wrapperClass: 'flex flex-1 overflow-hidden',
   },
   {
-    id: 'print',
-    label: 'Print',
-    group: 'create',
-    icon: [
-      ['path', { d: 'M6 9V3h12v6' }],
-      ['rect', { x: 3, y: 9, width: 18, height: 8, rx: 1.5 }],
-      ['rect', { x: 7, y: 14, width: 10, height: 7, rx: 1 }],
-    ],
-    load: () => import('@areas/print/PrintPage'),
-    wrapperClass: 'flex flex-1 overflow-hidden',
-  },
-  {
     id: 'library',
     label: 'Library',
     group: 'manage',

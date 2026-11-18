@@ -22,7 +22,7 @@ test('the pages keep their ids, labels and sidebar order', () => {
     pagesByGroup().map((s) => [s.group, s.pages.map((p) => `${p.id}:${p.label}`)]),
     [
       ['home', ['home:Home']],
-      ['create', ['generate:Generate', 'image-studio:Image Studio', 'workflows:Workflows', 'print:Print']],
+      ['create', ['generate:Generate', 'image-studio:Image Studio', 'workflows:Workflows']],
       ['manage', ['library:Library']],
       ['system', ['models:Extensions', 'settings:Settings']],
     ],
