@@ -12,6 +12,7 @@ import {
   DEFAULT_API_PORT, findPortHolder, isModlyBackend, isPortFree, killListener, osAssignedPort,
   pickPort, removePortFile, writePortFile,
 } from './api-port'
+import { appOrigins, getAppSecret } from './api-guard'
 
 const API_HOST = '127.0.0.1'
 // 8765 unless another program holds it; chosen again at every start.
@@ -100,6 +101,11 @@ export class PythonBridge {
           HF_TOKEN:               this.resolveHfToken(),
           // The port is not fixed: the API and the extensions it runs call back here.
           MODLY_API_URL:          apiBaseUrl(),
+          // The backend refuses web pages; the app window proves it is Modly with
+          // this secret (see api-guard.ts). MODLY_ORIGINS / MODLY_HOSTS set by the
+          // user come through cleanPythonEnv().
+          MODLY_APP_SECRET:       getAppSecret(),
+          MODLY_APP_ORIGINS:      appOrigins(process.env['ELECTRON_RENDERER_URL']).join(','),
         },
         // On Unix, put the bridge in its own process group so every subprocess
         // it spawns (extension runners, etc.) inherits that group. On shutdown

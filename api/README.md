@@ -21,6 +21,21 @@ pip install -r requirements.txt
 uvicorn main:app --host 127.0.0.1 --port 8765 --reload
 ```
 
+## Calling the API from other apps
+
+Scripts, CLIs and other programs (curl, `modly-cli`, the MCP server, OrcaSlicer…) can call the API
+with no token or setup.
+
+**Web pages** are refused (403), so a site open in your browser cannot drive Modly. To let a web app
+in, list its origin in `MODLY_ORIGINS` before starting Modly (comma-separated, `*` wildcards):
+
+```bash
+MODLY_ORIGINS="http://localhost:3000,chrome-extension://*"   # or "*" for every page
+```
+
+The request's `Host` must be `localhost` or an IP address (this blocks DNS rebinding). To reach the
+API by a machine name, list it in `MODLY_HOSTS`, e.g. `MODLY_HOSTS=jetson.local`.
+
 ## Key endpoints
 
 | Method | Path | Description |
