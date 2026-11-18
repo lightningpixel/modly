@@ -8,6 +8,7 @@ import {
   createRunLock,
   failInstall,
   isOutsideWorkspace,
+  isTextField,
   modelViewCaption,
   notReadyMissing,
   opCopy,
@@ -180,4 +181,18 @@ test('isOutsideWorkspace recognises only the 403 outside_workspace', () => {
   assert.equal(isOutsideWorkspace({ response: { status: 403, data: { detail: 'Forbidden' } } }), false)
   assert.equal(isOutsideWorkspace({ response: { status: 400, data: { detail: { code: 'outside_workspace' } } } }), false)
   assert.equal(isOutsideWorkspace(new Error('boom')), false)
+})
+
+// ─── Keyboard focus ───────────────────────────────────────────────────────────
+
+test('isTextField is true only where typing goes', () => {
+  const target = (stub: object) => stub as unknown as EventTarget
+  assert.equal(isTextField(target({ tagName: 'INPUT', type: 'number' })), true)
+  assert.equal(isTextField(target({ tagName: 'TEXTAREA' })), true)
+  assert.equal(isTextField(target({ tagName: 'SELECT' })), true)
+  assert.equal(isTextField(target({ tagName: 'DIV', isContentEditable: true })), true)
+  assert.equal(isTextField(target({ tagName: 'INPUT', type: 'checkbox' })), false)
+  assert.equal(isTextField(target({ tagName: 'INPUT', type: 'range' })), false)
+  assert.equal(isTextField(target({ tagName: 'BUTTON' })), false)
+  assert.equal(isTextField(null), false)
 })

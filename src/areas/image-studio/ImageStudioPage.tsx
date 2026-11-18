@@ -24,6 +24,9 @@ const ICONS = {
   close:    'M6 6l12 12M18 6 6 18',
 }
 
+const ICON_BUTTON_CLASS =
+  'flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900/60 text-zinc-300 transition-colors hover:border-zinc-700 hover:text-zinc-100 disabled:opacity-50'
+
 const PASTE_HINT = typeof navigator !== 'undefined' && /mac/i.test(navigator.platform) ? '⌘V' : 'Ctrl+V'
 
 /** Transparent pixels show as a checkerboard, as in image editors. */
@@ -89,10 +92,19 @@ function ModelView({ image }: { image: StudioImage }): JSX.Element {
   )
 }
 
-function Canvas({ image, activity }: { image: StudioImage, activity: string | null }): JSX.Element {
+function Canvas({ image, activity, hideToggles, onOverlaySlot }: {
+  image: StudioImage
+  activity: string | null
+  /** A tool draws over the image (crop): the view toggles would sit in its way. */
+  hideToggles: boolean
+  /** Receives the layer over the image that the active tool can draw into. */
+  onOverlaySlot: (element: HTMLDivElement | null) => void
+}): JSX.Element {
   const [maskFor, setMaskFor] = useState<string | null>(null)
   const [modelView, setModelView] = useState(false)
-  const showMask = Boolean(image.maskPath) && maskFor === image.id
+  // With the toggles hidden, so is what they switch: the tool works on the plain image.
+  const showMask = !hideToggles && Boolean(image.maskPath) && maskFor === image.id
+  const showModelView = !hideToggles && modelView
   const mask = useMaskPreview(showMask ? image.maskPath : undefined)
 
   let content: JSX.Element
@@ -100,7 +112,7 @@ function Canvas({ image, activity }: { image: StudioImage, activity: string | nu
     content = mask.url
       ? <img src={mask.url} alt={`Mask of ${image.name}`} draggable={false} className="absolute inset-0 h-full w-full object-contain" />
       : <span className="absolute inset-0 flex items-center justify-center text-xs text-zinc-500">{mask.failed ? 'Could not load the mask' : 'Loading mask…'}</span>
-  } else if (modelView) {
+  } else if (showModelView) {
     content = <ModelView image={image} />
   } else {
     content = <img src={image.previewUrl} alt={image.name} draggable={false} className="absolute inset-0 h-full w-full object-contain" />
@@ -109,12 +121,13 @@ function Canvas({ image, activity }: { image: StudioImage, activity: string | nu
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-zinc-800" style={CHECKERBOARD}>
       {content}
-      <button type="button" aria-pressed={modelView} onClick={() => setModelView(!modelView)}
+      <div ref={onOverlaySlot} className="absolute inset-0 empty:hidden" />
+      {!hideToggles && <button type="button" aria-pressed={modelView} onClick={() => setModelView(!modelView)}
         title={modelView ? 'Show the image fitted to the canvas' : 'Show the image exactly as Generate sends it to the model'}
         className={`absolute left-3 bottom-3 rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors ${modelView ? 'border-accent bg-accent/20 text-accent-light' : 'border-zinc-700 bg-zinc-950/70 text-zinc-300 hover:text-zinc-100'}`}>
         What the model sees
-      </button>
-      {image.maskPath && (
+      </button>}
+      {!hideToggles && image.maskPath && (
         <button type="button" aria-pressed={showMask} onClick={() => setMaskFor(showMask ? null : image.id)}
           title={showMask ? 'Show the image' : 'Show the mask the cut-out was made from'}
           className={`absolute right-3 bottom-3 rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors ${showMask ? 'border-accent bg-accent/20 text-accent-light' : 'border-zinc-700 bg-zinc-950/70 text-zinc-300 hover:text-zinc-100'}`}>
@@ -201,8 +214,17 @@ export default function ImageStudioPage(): JSX.Element {
   const [busy, setBusy] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [activity, setActivity] = useState<ImageOpActivity | null>(null)
+  const [activeTool, setActiveTool] = useState<string | null>(null)
+  const [optionsSlot, setOptionsSlot] = useState<HTMLDivElement | null>(null)
+  const [overlaySlot, setOverlaySlot] = useState<HTMLDivElement | null>(null)
 
   const selected = entries.find((e) => e.id === selectedId)
+  const hasSelection = selected !== undefined
+
+  // No image, no tool: the tools work on the selected image.
+  useEffect(() => {
+    if (!hasSelection) setActiveTool(null)
+  }, [hasSelection])
 
   /** An image already on disk: used where it is, not copied. */
   const addPath = useCallback(async (path: string) => {
@@ -294,18 +316,19 @@ export default function ImageStudioPage(): JSX.Element {
           </p>
         </div>
 
-        {selected && <ImageOpsToolbar entries={entries} selected={selected} onResult={addResult} onActivity={setActivity} />}
+        {selected && (
+          <ImageOpsToolbar entries={entries} selected={selected} onResult={addResult} onActivity={setActivity}
+            activeTool={activeTool} onActiveToolChange={setActiveTool} optionsSlot={optionsSlot} overlaySlot={overlaySlot} />
+        )}
 
-        <button type="button" onClick={browse} disabled={busy}
-          className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:border-zinc-700 hover:text-zinc-100 disabled:opacity-50">
-          <Icon d={ICONS.upload} size={14} />
-          {busy ? 'Adding…' : 'Add image'}
+        <button type="button" onClick={browse} disabled={busy} title={busy ? 'Adding…' : 'Add image'} aria-label="Add image"
+          className={ICON_BUTTON_CLASS}>
+          <Icon d={ICONS.upload} size={16} />
         </button>
         {selected && (
-          <button type="button" onClick={() => { void revealInFolder(selected) }}
-            className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:border-zinc-700 hover:text-zinc-100">
-            <Icon d={ICONS.folder} size={14} />
-            Show in folder
+          <button type="button" onClick={() => { void revealInFolder(selected) }} title="Show in folder" aria-label="Show in folder"
+            className={ICON_BUTTON_CLASS}>
+            <Icon d={ICONS.folder} size={16} />
           </button>
         )}
         <button type="button" onClick={() => { if (selected) sendToGenerate(selected) }} disabled={!selected}
@@ -315,9 +338,13 @@ export default function ImageStudioPage(): JSX.Element {
         </button>
       </header>
 
+      {/* The active tool's options; ImageOpsToolbar portals them in. Hidden while empty. */}
+      <div ref={setOptionsSlot} className="relative flex shrink-0 flex-wrap items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/60 px-3 py-2 empty:hidden" />
+
       {selected
-        ? <Canvas image={selected} activity={activity?.ids.includes(selected.id) ? activity.label : null} />
-: <EmptyCanvas busy={busy} onBrowse={browse} />}
+        ? <Canvas image={selected} activity={activity?.ids.includes(selected.id) ? activity.label : null}
+            hideToggles={activeTool === 'crop'} onOverlaySlot={setOverlaySlot} />
+        : <EmptyCanvas busy={busy} onBrowse={browse} />}
 
       {entries.length > 0 && (
         <section className="shrink-0">

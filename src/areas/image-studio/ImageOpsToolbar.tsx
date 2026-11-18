@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useAppStore } from '@shared/stores/appStore'
 import { ParamFields } from '@shared/components/ui/ParamFields'
 import { SseProgressBar } from '@shared/components/ui/SseProgressBar'
@@ -10,6 +11,7 @@ import {
   cardForStatus,
   createRunLock,
   failInstall,
+  isTextField,
   opCopy,
   runInputFor,
   setupMessage,
@@ -19,6 +21,7 @@ import {
   type RunLock,
   type SetupCard,
 } from './imageOps'
+import { ImageOpIcon } from './imageOpIcons'
 import { ImageOpNotReadyError, getImageOpStatus, listImageOps, prepareImageOp, runImageOpOnFile } from './imageOpsApi'
 
 // Image operations served by the backend (GET /image/ops: background removal,
@@ -43,10 +46,20 @@ interface ToolbarProps {
   selected: StudioImage
   onResult: (result: ImageOpResult, source: StudioImage) => Promise<void>
   onActivity: (activity: ImageOpActivity | null) => void
+  /** Id of the op whose options show, or null when no tool is open. */
+  activeTool: string | null
+  onActiveToolChange: (id: string | null) => void
+  /** The options bar under the header: the active op renders its options there. */
+  optionsSlot: HTMLElement | null
+  /** A layer over the canvas image, for a tool that draws on it (crop). */
+  overlaySlot: HTMLElement | null
 }
 
 const BUTTON_CLASS =
   'flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:border-zinc-700 hover:text-zinc-100 disabled:opacity-50'
+
+const ICON_BUTTON_CLASS =
+  'flex h-8 w-8 items-center justify-center rounded-lg border transition-colors disabled:cursor-not-allowed disabled:opacity-40'
 
 function Spinner({ size = 14 }: { size?: number }): JSX.Element {
   return (
@@ -56,16 +69,9 @@ function Spinner({ size = 14 }: { size?: number }): JSX.Element {
   )
 }
 
-function WandIcon(): JSX.Element {
-  return (
-    <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M15 4V2M15 16v-2M8 9h2M20 9h2M17.8 11.8 19 13M17.8 6.2 19 5M3 21l9-9M12.2 6.2 11 5" />
-    </svg>
-  )
-}
-
-/** Hidden when the backend is unreachable or serves no image ops. */
+/** One icon per op in the header; hidden when the backend is unreachable or serves no image ops. */
 export default function ImageOpsToolbar(props: ToolbarProps): JSX.Element | null {
+  const { activeTool, onActiveToolChange } = props
   const apiUrl = useAppStore((s) => s.apiUrl)
   const [ops, setOps] = useState<ImageOpDescriptor[]>([])
   const [runningOp, setRunningOp] = useState<string | null>(null)
@@ -80,23 +86,53 @@ export default function ImageOpsToolbar(props: ToolbarProps): JSX.Element | null
     return () => { cancelled = true }
   }, [apiUrl])
 
+  // The active op left the list (backend reloaded or unreachable): close it.
+  useEffect(() => {
+    if (activeTool !== null && !ops.some((op) => op.id === activeTool)) onActiveToolChange(null)
+  }, [ops, activeTool, onActiveToolChange])
+
+  // Esc closes the active tool, unless the user is typing in a field.
+  useEffect(() => {
+    if (activeTool === null) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented || isTextField(event.target)) return
+      onActiveToolChange(null)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [activeTool, onActiveToolChange])
+
   if (ops.length === 0) return null
   return (
-    <div className="flex flex-wrap items-center gap-3">
+    <div className="flex items-center gap-1">
       {ops.map((op) => (
         <ImageOpControl key={op.id} op={op} lock={lock} blocked={runningOp !== null && runningOp !== op.id} {...props} />
       ))}
+      <span className="mx-2 h-5 w-px bg-zinc-800" aria-hidden="true" />
     </div>
   )
 }
 
-function ImageOpControl({ op, lock, blocked, entries, selected, onResult, onActivity }: ToolbarProps & {
+/** What a run processes: the input file, the entry selected when it was asked, and its params when they override the options bar's. */
+interface RunTarget {
+  input: StudioImage
+  selectedId: string
+  params?: Record<string, unknown>
+}
+
+/**
+ * One op: its header icon and, while it is the active tool, its options in
+ * the options bar. All of the op's state (params, setup download, readiness)
+ * lives here, so closing and reopening the tool keeps it.
+ */
+function ImageOpControl(props: ToolbarProps & {
   op: ImageOpDescriptor
   /** Shared by all the ops: one runs at a time. */
   lock: RunLock
   /** Another op is running. */
   blocked: boolean
 }): JSX.Element {
+  const { op, lock, blocked, entries, selected, onResult, onActivity, activeTool, onActiveToolChange, optionsSlot } = props
   const showError = useAppStore((s) => s.showError)
   const showToast = useAppStore((s) => s.showToast)
   const [params, setParams] = useState<Record<string, unknown>>(() => defaultParamValues(op.params_schema))
@@ -107,28 +143,42 @@ function ImageOpControl({ op, lock, blocked, entries, selected, onResult, onActi
   const [running, setRunning] = useState(false)
   /** Set once the op answered ready, so later clicks skip the status check. */
   const ready = useRef(false)
-  /** The image the user asked to process, kept across the setup download. */
-  const pending = useRef<{ input: StudioImage, selectedId: string } | null>(null)
+  /** The run the user asked for, kept across the setup download. */
+  const pending = useRef<RunTarget | null>(null)
   const copy = opCopy(op)
+  const active = activeTool === op.id
 
-  async function run(input: StudioImage, selectedId: string) {
+  // Closing the tool drops a download offer not taken up; an install under way keeps going.
+  useEffect(() => {
+    if (active) return
+    if (card.phase === 'confirm' || card.phase === 'error') {
+      pending.current = null
+      setCard(HIDDEN_CARD)
+    }
+  }, [active, card.phase])
+
+  /** True when a result was added to the history. */
+  async function run(target: RunTarget): Promise<boolean> {
+    const { input, selectedId } = target
     if (!lock.claim(op.id)) {
       showToast('Wait for the current image operation to finish')
-      return
+      return false
     }
     setRunning(true)
     onActivity({ ids: [selectedId, input.id], label: copy.running })
     try {
-      const result = await runImageOpOnFile(op.id, input.path, paramsRef.current)
+      const result = await runImageOpOnFile(op.id, input.path, target.params ?? paramsRef.current)
       await onResult({ op: op.id, path: result.path, maskPath: result.maskPath }, input)
+      return true
     } catch (err) {
       if (err instanceof ImageOpNotReadyError) {
         ready.current = false
-        pending.current = { input, selectedId }
+        pending.current = target
         await checkSetup()
       } else {
         showError(err instanceof Error ? err.message : String(err))
       }
+      return false
     } finally {
       setRunning(false)
       onActivity(null)
@@ -151,11 +201,18 @@ function ImageOpControl({ op, lock, blocked, entries, selected, onResult, onActi
     }
   }
 
-  async function start() {
-    if (running || card.phase === 'installing' || card.phase === 'checking') return
-    const target = { input: runInputFor(entries, selected, op.id), selectedId: selected.id }
+  /**
+   * Runs the op on the selected image, with `override` as its params when
+   * given (else the options bar's). True when a result was added; false when
+   * it did not run, failed, or now waits for the one-time download (the run
+   * then happens, with the same params, once the download is done).
+   */
+  async function start(override?: Record<string, unknown>): Promise<boolean> {
+    if (running || card.phase === 'installing' || card.phase === 'checking') return false
+    const target: RunTarget = { input: runInputFor(entries, selected, op.id), selectedId: selected.id, params: override }
     pending.current = target
-    if (ready.current || await checkSetup()) await run(target.input, target.selectedId)
+    if (ready.current || await checkSetup()) return run(target)
+    return false
   }
 
   async function download() {
@@ -187,34 +244,56 @@ function ImageOpControl({ op, lock, blocked, entries, selected, onResult, onActi
     setCard(HIDDEN_CARD)
     const target = pending.current
     pending.current = null
-    if (target) await run(target.input, target.selectedId)
+    if (target) await run(target)
   }
 
   const busy = running || blocked || card.phase === 'checking' || card.phase === 'installing'
 
-  return (
-    <div className="relative flex items-center gap-2">
+  const genericOptions = (
+    <>
+      <span className="shrink-0 text-xs font-medium text-zinc-200">{op.label}</span>
       <ParamFields
         schema={op.params_schema}
         values={params}
         onChange={(id, value) => setParams((current) => ({ ...current, [id]: value }))}
         disabled={running}
-        // Crop's four edges sit in two columns to keep the header short.
-        className={op.params_schema.length > 2 ? 'grid w-80 grid-cols-2 gap-x-3 gap-y-1' : 'flex w-52 flex-col gap-1'}
+        className="flex flex-wrap items-center gap-3 [&>*]:w-52"
       />
-      <button type="button" onClick={() => { void start() }} disabled={busy} aria-busy={running} className={BUTTON_CLASS}>
-        {running ? <><Spinner /> {copy.running}</> : <><WandIcon /> {op.label}</>}
+      <button type="button" onClick={() => { void start() }} disabled={busy} aria-busy={running} className={`ml-auto ${BUTTON_CLASS}`}>
+        {running ? <><Spinner /> {copy.running}</> : 'Apply'}
+      </button>
+    </>
+  )
+
+  // CROP_UI: crop is the one op with its own UI. Task 4 replaces this branch with
+  //   <CropTool start={start} running={running} busy={busy} optionsSlot={optionsSlot}
+  //     overlaySlot={props.overlaySlot} onActiveToolChange={onActiveToolChange} />
+  // Until then crop falls through to the generic options.
+  const options = op.id === 'crop' ? genericOptions : genericOptions
+
+  return (
+    <>
+      <button type="button" onClick={() => onActiveToolChange(active ? null : op.id)}
+        disabled={blocked} aria-pressed={active} aria-busy={running} title={op.label} aria-label={op.label}
+        className={`${ICON_BUTTON_CLASS} ${active ? 'border-accent bg-accent/20 text-accent-light' : 'border-transparent text-zinc-400 hover:border-zinc-700 hover:bg-zinc-900/60 hover:text-zinc-100'}`}>
+        {running ? <Spinner size={16} /> : <ImageOpIcon opId={op.id} />}
       </button>
 
-      {card.phase !== 'hidden' && card.phase !== 'checking' && (
-        <SetupCardView
-          card={card}
-          message={setupMessage(op, card.downloadBytes)}
-          onDownload={() => { void download() }}
-          onClose={() => { pending.current = null; setCard(HIDDEN_CARD) }}
-        />
+      {active && optionsSlot && createPortal(
+        <>
+          {options}
+          {card.phase !== 'hidden' && card.phase !== 'checking' && (
+            <SetupCardView
+              card={card}
+              message={setupMessage(op, card.downloadBytes)}
+              onDownload={() => { void download() }}
+              onClose={() => { pending.current = null; setCard(HIDDEN_CARD) }}
+            />
+          )}
+        </>,
+        optionsSlot,
       )}
-    </div>
+    </>
   )
 }
 

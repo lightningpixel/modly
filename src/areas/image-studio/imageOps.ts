@@ -212,3 +212,20 @@ export function notReadyMissing(err: unknown): SetupStep[] | null {
   if (!detail || typeof detail !== 'object' || (detail as { code?: unknown }).code !== 'not_ready') return null
   return knownSteps((detail as { missing?: unknown }).missing)
 }
+
+// ─── Keyboard ─────────────────────────────────────────────────────────────────
+
+/** Input types that take no typing: a shortcut key pressed on one still belongs to the page. */
+const NON_TEXT_INPUTS = new Set(['button', 'checkbox', 'radio', 'range', 'reset', 'submit', 'image', 'color', 'file'])
+
+/** Whether a key event's target is a field the user types in (page shortcuts must not fire there). Duck-typed so it runs without a DOM. */
+export function isTextField(target: EventTarget | null): boolean {
+  if (!target || typeof target !== 'object') return false
+  const el = target as { tagName?: unknown, type?: unknown, isContentEditable?: unknown }
+  if (el.isContentEditable === true) return true
+  const tag = typeof el.tagName === 'string' ? el.tagName.toUpperCase() : ''
+  if (tag === 'TEXTAREA' || tag === 'SELECT') return true
+  if (tag !== 'INPUT') return false
+  const type = typeof el.type === 'string' ? el.type.toLowerCase() : 'text'
+  return !NON_TEXT_INPUTS.has(type)
+}
